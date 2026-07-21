@@ -1,9 +1,14 @@
+name: nanobot
+
 x-common-config: &common-config
   build:
     context: .
     dockerfile: Dockerfile
     args:
       NANOBOT_CHANNELS: ${NANOBOT_CHANNELS:-whatsapp}
+  # The local WSL user and the image's nanobot user are both UID/GID 1000.
+  # Starting non-root also keeps cap_drop: ALL compatible with entrypoint.sh.
+  user: "1000:1000"
   volumes:
     - ~/.nanobot:/home/nanobot/.nanobot
   cap_drop:
