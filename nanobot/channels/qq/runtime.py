@@ -48,12 +48,14 @@ except Exception:  # pragma: no cover
 
 try:
     import botpy
+    from botpy.gateway import BotWebSocket
     from botpy.http import Route
 
     QQ_AVAILABLE = True
 except ImportError:  # pragma: no cover
     QQ_AVAILABLE = False
     botpy = None
+    BotWebSocket = None
     Route = None
 
 if TYPE_CHECKING:
@@ -104,14 +106,28 @@ def _guess_send_file_type(filename: str) -> int:
     return QQ_FILE_TYPE_FILE
 
 
+_RECONNECT_BACKOFF_START = 5
+_RECONNECT_BACKOFF_MAX = 300
+
+
+def _is_network_error(exc: BaseException) -> bool:
+    """Check whether an exception is a transient network/DNS error."""
+    return isinstance(
+        exc,
+        (aiohttp.ClientConnectorError, OSError),
+    )
+
+
 def _make_bot_class(channel: QQChannel) -> type[botpy.Client]:
-    """Create a botpy Client subclass bound to the given channel."""
+    """Create a botpy client with per-session reconnect backoff."""
     intents = botpy.Intents(public_messages=True, direct_message=True)
 
     class _Bot(botpy.Client):
         def __init__(self):
             # Disable botpy's file log — nanobot uses loguru; default "botpy.log" fails on read-only fs
             super().__init__(intents=intents, ext_handlers=False)
+            self._ws_backoff: dict[int, int] = {}
+            self._ws_retry_at: dict[int, float] = {}
 
         async def on_ready(self):
             logger.info("QQ bot ready: {}", self.robot.name)
@@ -124,6 +140,35 @@ def _make_bot_class(channel: QQChannel) -> type[botpy.Client]:
 
         async def on_direct_message_create(self, message):
             await channel._on_message(message, is_group=False)
+
+        async def bot_connect(self, session):
+            """Connect a botpy session with exponential retry backoff."""
+            session_id = id(session)
+            retry_at = self._ws_retry_at.pop(session_id, None)
+            if retry_at is not None:
+                remaining = retry_at - time.monotonic()
+                if remaining > 0:
+                    await asyncio.sleep(remaining)
+
+            client = BotWebSocket(session, self._connection)
+            backoff = self._ws_backoff.get(session_id, _RECONNECT_BACKOFF_START)
+            try:
+                await client.ws_connect()
+                self._ws_backoff.pop(session_id, None)
+            except (Exception, KeyboardInterrupt, SystemExit) as e:
+                if _is_network_error(e):
+                    channel.logger.warning(
+                        "QQ bot network error (retry in {}s): {}",
+                        backoff,
+                        e,
+                    )
+                    # Count botpy's post-connect pacing toward the retry delay.
+                    self._ws_retry_at[session_id] = time.monotonic() + backoff
+                    self._ws_backoff[session_id] = min(backoff * 2, _RECONNECT_BACKOFF_MAX)
+                else:
+                    channel.logger.exception("QQ bot WebSocket error: {}", e)
+
+                self._connection.add(session)
 
     return _Bot
 
@@ -210,15 +255,24 @@ class QQChannel(BaseChannel):
         await self._run_bot()
 
     async def _run_bot(self) -> None:
-        """Run the bot connection with auto-reconnect."""
+        """Run botpy with fallback backoff for errors escaping start()."""
+        backoff = 5
+        max_backoff = 300
         while self._running:
             try:
                 await self._client.start(appid=self.config.app_id, secret=self.config.secret)
+                backoff = 5
             except Exception as e:
-                self.logger.warning("bot error: {}", e)
+                if _is_network_error(e):
+                    self.logger.warning(
+                        "QQ bot network error (retry in {}s): {}", backoff, e
+                    )
+                else:
+                    self.logger.warning("bot error: {}", e)
             if self._running:
-                self.logger.info("Reconnecting bot in 5 seconds...")
-                await asyncio.sleep(5)
+                self.logger.info("Reconnecting bot in {} seconds...", backoff)
+                await asyncio.sleep(backoff)
+                backoff = min(backoff * 2, max_backoff)
 
     async def stop(self) -> None:
         """Stop bot and cleanup resources."""
