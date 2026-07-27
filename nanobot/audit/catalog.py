@@ -17,6 +17,10 @@ from nanobot.audit.segments import JsonlSegment
 from nanobot.audit.types import CatalogRecordType
 
 
+class CatalogWriteUncertainError(RuntimeError):
+    pass
+
+
 @dataclass(frozen=True, slots=True)
 class EpochCommit:
     durability_epoch: int
@@ -108,14 +112,14 @@ class ProcessCatalog:
         return tuple(self._records)
 
     def _append(self, record_type: CatalogRecordType, **fields: Any) -> CatalogReceipt:
-        self._sequence += 1
+        sequence = self._sequence + 1
         raw = {
             "catalog_version": 1,
             "catalog_record_type": record_type.value,
             "catalog_record_id": new_audit_id(),
             "process_instance_id": self.process_instance_id,
             "catalog_segment_id": self.segment_id,
-            "catalog_sequence": self._sequence,
+            "catalog_sequence": sequence,
             "previous_catalog_hash": self._previous_hash,
             "occurred_at": datetime.now(UTC),
             "catalog_record_hash": "",
@@ -123,8 +127,13 @@ class ProcessCatalog:
         }
         raw["catalog_record_hash"] = hash_record(raw, hash_field="catalog_record_hash")
         record = catalog_record_adapter.validate_python(raw)
-        append = self._segment.append(record.model_dump(mode="json"))
-        self._segment.fsync()
+        try:
+            append = self._segment.append(record.model_dump(mode="json"))
+            self._segment.fsync()
+        except Exception as error:
+            self._segment.close_uncertain()
+            raise CatalogWriteUncertainError(type(error).__name__) from error
+        self._sequence = sequence
         self._previous_hash = record.catalog_record_hash
         self._records.append(record)
         return CatalogReceipt(record.catalog_record_id, record.catalog_record_hash, append.end)
@@ -175,6 +184,32 @@ class ProcessCatalog:
             previous_segment_id=previous_segment_id,
             previous_segment_hash=previous_hash,
             previous_segment_record_count=previous_record_count,
+        )
+
+    def recover_after_uncertain(self, *, abandon_reason: str) -> CatalogReceipt:
+        previous_segment_id = self.segment_id
+        previous_hash = self._previous_hash
+        previous_record_count = self._sequence
+
+        self.segment_id = new_audit_id()
+        directory = self.root / "catalog" / self.process_instance_id
+        self._segment = JsonlSegment.create(directory / f"{self.segment_id}.jsonl")
+        self._sequence = 0
+        self._previous_hash = previous_hash
+        self.register_segment(
+            stream_kind="catalog",
+            segment_id=self.segment_id,
+            path_token=f"catalog/{self.process_instance_id}/{self.segment_id}.jsonl",
+            previous_segment_id=previous_segment_id,
+            previous_segment_hash=previous_hash,
+            previous_segment_record_count=previous_record_count,
+        )
+        return self.abandon_segment(
+            stream_kind="catalog",
+            segment_id=previous_segment_id,
+            last_committed_offset=0,
+            last_committed_hash=previous_hash,
+            abandon_reason=abandon_reason,
         )
 
     def close_segment(
