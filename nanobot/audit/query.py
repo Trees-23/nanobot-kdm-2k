@@ -414,7 +414,9 @@ class AuditQuery:
     def _find_traces_indexed(self, filters: TraceFilter) -> TracePage:
         where, params, having, having_params = self._filter_sql(filters)
         sql = (
-            "SELECT e.trace_id, MAX(e.occurred_at) AS last_seen FROM events e WHERE "
+            "SELECT e.trace_id, MIN(e.occurred_at) AS first_seen, "
+            "MAX(e.occurred_at) AS last_seen, COUNT(DISTINCT e.turn_id) AS turn_count, "
+            "COUNT(DISTINCT e.run_id) AS run_count FROM events e WHERE "
             + " AND ".join(where)
             + " GROUP BY e.trace_id"
         )
@@ -422,20 +424,54 @@ class AuditQuery:
             sql += " HAVING " + " AND ".join(having)
         sql += " ORDER BY last_seen DESC, e.trace_id DESC LIMIT ?"
         connection = sqlite3.connect(f"file:{self.index_path}?mode=ro", uri=True)
+        connection.row_factory = sqlite3.Row
         try:
             rows = connection.execute(
                 sql, (*params, *having_params, filters.limit + 1)
             ).fetchall()
+            selected = rows[: filters.limit]
+            statuses: dict[str, list[RunStatus]] = defaultdict(list)
+            if selected:
+                placeholders = ",".join("?" for _ in selected)
+                status_rows = connection.execute(
+                    f"SELECT trace_id, status FROM events WHERE event_type='run_finished' "
+                    f"AND trace_id IN ({placeholders}) "
+                    "ORDER BY occurred_at, process_instance_id, segment_sequence, event_id",
+                    tuple(row["trace_id"] for row in selected),
+                ).fetchall()
+                for row in status_rows:
+                    if row["status"] is not None:
+                        statuses[row["trace_id"]].append(RunStatus(row["status"]))
+            coverage_row = connection.execute(
+                "SELECT value FROM meta WHERE key='coverage_complete'"
+            ).fetchone()
         finally:
             connection.close()
-        selected = rows[: filters.limit]
-        views = [self.load_trace(row[0]) for row in selected]
+        integrity = (
+            IntegrityStatus.VALID
+            if coverage_row is not None and coverage_row[0] == "true"
+            else IntegrityStatus.UNKNOWN
+        )
+        summaries = [
+            TraceSummary(
+                first_seen=datetime.fromisoformat(row["first_seen"]),
+                last_seen=datetime.fromisoformat(row["last_seen"]),
+                turn_count=row["turn_count"],
+                run_count=row["run_count"],
+                terminal_run_statuses=statuses[row["trace_id"]],
+                integrity_status=integrity,
+            )
+            for row in selected
+        ]
         next_cursor = None
         if len(rows) > filters.limit and selected:
-            next_cursor = _cursor(datetime.fromisoformat(selected[-1][1]), selected[-1][0])
+            next_cursor = _cursor(
+                datetime.fromisoformat(selected[-1]["last_seen"]),
+                selected[-1]["trace_id"],
+            )
         return TracePage(
-            items=[view.summary for view in views],
-            trace_ids=[view.trace_id for view in views],
+            items=summaries,
+            trace_ids=[row["trace_id"] for row in selected],
             next_cursor=next_cursor,
         )
 

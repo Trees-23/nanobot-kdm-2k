@@ -26,7 +26,7 @@ def _root(config_path: str | None, audit_root: str | None) -> Path:
         config = load_config(path)
         if config.audit.path:
             return Path(config.audit.path).expanduser().resolve()
-        return path.parent / "runtime" / "audit" / "v1"
+        return path.parent / "audit" / "v1"
     config = load_config()
     return get_audit_dir(config.audit.path)
 

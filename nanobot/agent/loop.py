@@ -625,7 +625,11 @@ class AgentLoop:
             return TurnRoute(
                 channel=msg.channel,
                 chat_id=msg.chat_id,
-                metadata=dict(msg.metadata or {}),
+                metadata={
+                    key: value
+                    for key, value in (msg.metadata or {}).items()
+                    if key not in {AUDIT_CONTEXT_META, "source_type"}
+                },
             )
 
         channel, chat_id = (
@@ -1394,12 +1398,14 @@ class AgentLoop:
             await asyncio.gather(*self._background_tasks, return_exceptions=True)
             self._background_tasks.clear()
         errors: list[BaseException] = []
-        cleanup_steps = (
+        cleanup_steps = [
             self.subagents.close,
             self._exec_session_manager.close_all,
             lambda: agent_context.close_mcp(self),
-            self.audit_runtime.close,
-        )
+        ]
+        audit_runtime = getattr(self, "audit_runtime", None)
+        if audit_runtime is not None:
+            cleanup_steps.append(audit_runtime.close)
         for cleanup in cleanup_steps:
             try:
                 await cleanup()
@@ -1456,8 +1462,9 @@ class AgentLoop:
         checkpoint = checkpoint if isinstance(checkpoint, dict) else {}
         goal = session.metadata.get("goal_state")
         goal = goal if isinstance(goal, dict) else {}
-        if msg.metadata.get("source_type"):
-            source_type = str(msg.metadata["source_type"])
+        direct_source_type = getattr(msg, "_audit_source_type", None)
+        if direct_source_type or msg.metadata.get("source_type"):
+            source_type = str(direct_source_type or msg.metadata["source_type"])
         elif is_cron_turn(msg.metadata):
             source_type = "cron"
         elif local_trigger(msg.metadata) is not None:
@@ -1578,26 +1585,31 @@ class AgentLoop:
                     )
                 ctx.state = next_state
         except BaseException as error:
-            with suppress(Exception):
-                setattr(
-                    error,
-                    AUDIT_CONTEXT_META,
-                    {
-                        "trace_id": audit_turn.trace_id,
-                        "turn_id": audit_turn.turn_id,
-                        "run_id": audit_run.run_id,
-                    },
-                )
+            if not getattr(self.audit_runtime.emitter, "audit_disabled", False):
+                with suppress(Exception):
+                    setattr(
+                        error,
+                        AUDIT_CONTEXT_META,
+                        {
+                            "trace_id": audit_turn.trace_id,
+                            "turn_id": audit_turn.turn_id,
+                            "run_id": audit_run.run_id,
+                        },
+                    )
             await audit.finished(status="failed")
             self._active_audit_runs.get(key, {}).pop(audit_run.run_id, None)
             raise
 
         if ctx.outbound is not None:
-            ctx.outbound.metadata[AUDIT_CONTEXT_META] = {
-                "trace_id": audit_turn.trace_id,
-                "turn_id": audit_turn.turn_id,
-                "run_id": audit_run.run_id,
-            }
+            if (
+                ctx.kind is TurnKind.SYSTEM
+                or not getattr(self.audit_runtime.emitter, "audit_disabled", False)
+            ):
+                ctx.outbound.metadata[AUDIT_CONTEXT_META] = {
+                    "trace_id": audit_turn.trace_id,
+                    "turn_id": audit_turn.turn_id,
+                    "run_id": audit_run.run_id,
+                }
             await audit.response_prepared(
                 response_kind="command" if not ctx.stop_reason else "assistant"
             )
@@ -2167,15 +2179,18 @@ class AgentLoop:
         """Process an external message directly and return the outbound payload."""
         if channel == "system":
             raise ValueError("channel 'system' is reserved for internal messages")
-        await self.audit_runtime.ensure_started()
+        audit_runtime = getattr(self, "audit_runtime", None)
+        if audit_runtime is not None:
+            await audit_runtime.ensure_started()
         await self._connect_mcp()
-        metadata: dict[str, Any] = {"source_type": "sdk"}
+        metadata: dict[str, Any] = {}
         if not persist_user_message:
             metadata[turn_continuation.SKIP_USER_PERSIST_META] = True
         msg = InboundMessage(
             channel=channel, sender_id=sender_id, chat_id=chat_id,
             content=content, media=media or [], metadata=metadata,
         )
+        msg._audit_source_type = "sdk"
         # Share the dispatch lock so direct calls serialize with bus turns.
         lock = self._session_locks.setdefault(session_key, asyncio.Lock())
         try:

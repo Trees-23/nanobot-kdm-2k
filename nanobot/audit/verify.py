@@ -82,21 +82,25 @@ class AuditVerifier:
         errors: list[str] = []
         incomplete: list[str] = []
         pairs = (
-            ("run_started", "run_finished", "run_id"),
-            ("iteration_started", "iteration_finished", "run_id"),
-            ("model_request_started", ("model_response_received", "model_request_failed"), "model_call_id"),
-            ("model_attempt_started", "model_attempt_finished", "attempt_id"),
-            ("tool_started", "tool_finished", "tool_call_id"),
+            ("run_started", "run_finished", ("run_id",)),
+            ("iteration_started", "iteration_finished", ("run_id", "iteration")),
+            (
+                "model_request_started",
+                ("model_response_received", "model_request_failed"),
+                ("model_call_id",),
+            ),
+            ("model_attempt_started", "model_attempt_finished", ("attempt_id",)),
+            ("tool_started", "tool_finished", ("tool_call_id",)),
         )
-        for started_type, terminal_types, identifier in pairs:
+        for started_type, terminal_types, identity_fields in pairs:
             terminal_set = {terminal_types} if isinstance(terminal_types, str) else set(terminal_types)
             starts = Counter(
-                getattr(event, identifier)
+                tuple(getattr(event, field) for field in identity_fields)
                 for event in result.events
                 if event.event_type == started_type
             )
             terminals = Counter(
-                getattr(event, identifier)
+                tuple(getattr(event, field) for field in identity_fields)
                 for event in result.events
                 if event.event_type in terminal_set
             )

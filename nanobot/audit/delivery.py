@@ -7,6 +7,8 @@ import time
 from datetime import UTC, datetime
 from typing import Any
 
+from pydantic_core import to_jsonable_python
+
 from nanobot.audit.ids import new_audit_id
 from nanobot.audit.schema import (
     DeliveryAttemptedDraft,
@@ -123,11 +125,14 @@ class DeliveryAuditRecorder:
                 "attempt_ordinal": ordinal,
             }
         )
-        adapter_metadata = {
-            key: value
-            for key, value in self.msg.metadata.items()
-            if key != AUDIT_CONTEXT_META
-        }
+        adapter_metadata = to_jsonable_python(
+            {
+                key: value
+                for key, value in self.msg.metadata.items()
+                if key != AUDIT_CONTEXT_META
+            },
+            fallback=str,
+        )
         payload = DeliveryPayloadDraft.model_validate(
             {
                 "payload_id": new_audit_id(),

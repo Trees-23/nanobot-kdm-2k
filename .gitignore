@@ -94,6 +94,7 @@ nano.*.save
 # Logs & temp
 *.log
 logs/
+runtime/audit/
 tmp/
 temp/
 *.tmp

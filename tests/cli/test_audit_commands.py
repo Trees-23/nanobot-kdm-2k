@@ -109,3 +109,15 @@ async def test_config_selects_its_own_audit_path(tmp_path) -> None:
 
     assert result.exit_code == 0
     assert "t1" in result.stdout
+
+
+async def test_config_uses_instance_default_audit_path(tmp_path) -> None:
+    config_path = tmp_path / "instance" / "config.json"
+    config_path.parent.mkdir()
+    config_path.write_text("{}", encoding="utf-8")
+    await write_fixture(config_path.parent / "audit" / "v1")
+
+    result = runner.invoke(app, ["audit", "list", "--config", str(config_path)])
+
+    assert result.exit_code == 0
+    assert "t1" in result.stdout

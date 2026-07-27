@@ -105,3 +105,18 @@ async def test_delivery_exhaustion_records_failed_terminal(monkeypatch) -> None:
     assert emitter.events[-1].event_type == "delivery_finished"
     assert emitter.events[-1].final_attempt_ordinal == 2
     assert emitter.events[-1].status == "failed"
+
+
+async def test_delivery_metadata_is_converted_to_json_values() -> None:
+    emitter = RecordingEmitter()
+    item = message()
+    item.metadata["remote"] = ("127.0.0.1", 8765)
+
+    class Channel:
+        async def send(self, _msg):
+            return None
+
+    await manager(emitter)._send_with_retry(Channel(), item)
+
+    payload = next(payload for payload in emitter.payloads if payload is not None)
+    assert payload.content.adapter_metadata["remote"] == ["127.0.0.1", 8765]

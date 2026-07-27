@@ -11,6 +11,7 @@ x-common-config: &common-config
   user: "1000:1000"
   volumes:
     - ~/.nanobot:/home/nanobot/.nanobot
+    - nanobot-audit:/home/nanobot/.nanobot/audit
   cap_drop:
     - ALL
 
@@ -56,3 +57,6 @@ services:
     command: ["status"]
     stdin_open: true
     tty: true
+
+volumes:
+  nanobot-audit:
