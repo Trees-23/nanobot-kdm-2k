@@ -9,7 +9,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, SerializeAsAny
 
 from nanobot.audit.reader import AuditReader
 from nanobot.audit.schema import AuditEventBase, AuditPayloadBase
@@ -80,9 +80,9 @@ class TraceView(BaseModel):
     summary: TraceSummary
     turns: list[TurnView]
     run_tree: RunTree
-    timeline: list[AuditEventBase]
-    payloads: dict[str, AuditPayloadBase] | None = None
-    decisions: list[AuditEventBase]
+    timeline: list[SerializeAsAny[AuditEventBase]]
+    payloads: dict[str, SerializeAsAny[AuditPayloadBase]] | None = None
+    decisions: list[SerializeAsAny[AuditEventBase]]
     integrity: VerificationReport
 
 
