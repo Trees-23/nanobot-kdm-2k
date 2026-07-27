@@ -22,6 +22,8 @@ from nanobot.audit.schema import (
     FinalizationRequestedDraft,
     IterationFinishedDraft,
     IterationStartedDraft,
+    ModelAttemptFinishedDraft,
+    ModelAttemptStartedDraft,
     ModelFirstOutputDraft,
     ModelRequestFailedDraft,
     ModelRequestPayloadDraft,
@@ -29,8 +31,10 @@ from nanobot.audit.schema import (
     ModelResponsePayloadDraft,
     ModelResponseReceivedDraft,
     PolicyBlockedDraft,
+    ProviderRouteDecisionDraft,
     ReasoningSummaryPayloadDraft,
     ReasoningSummaryReceivedDraft,
+    RetryScheduledDraft,
     RunConfigPayloadDraft,
     RunFinishedDraft,
     RunStartedDraft,
@@ -40,6 +44,12 @@ from nanobot.audit.schema import (
     ToolStartedDraft,
 )
 from nanobot.providers.base import LLMResponse
+from nanobot.providers.observed_call import (
+    ProviderAttemptResult,
+    ProviderAttemptSnapshot,
+    ProviderRetryDecision,
+    ProviderRouteDecision,
+)
 from nanobot.utils.llm_runtime import LLMRuntime
 
 
@@ -65,6 +75,7 @@ class RunnerAuditHook(AgentHook):
         self._tool_ids: dict[str, str] = {}
         self._tool_started_ns: dict[str, int] = {}
         self._tool_params: dict[str, Any] = {}
+        self._attempt_counts: dict[str, int] = {}
 
     def _common(
         self,
@@ -132,6 +143,11 @@ class RunnerAuditHook(AgentHook):
     ) -> None:
         self._current_model_call_id = request.model_call_id
         self._model_started_ns[request.model_call_id] = time.monotonic_ns()
+        context.provider_attempt_observer = RunnerProviderAttemptObserver(
+            self,
+            model_call_id=request.model_call_id,
+            iteration=context.iteration,
+        )
         event = ModelRequestStartedDraft.model_validate(
             {
                 **self._common(
@@ -180,7 +196,7 @@ class RunnerAuditHook(AgentHook):
                     ),
                     "status": status,
                     "error_kind": response.error_kind or response.error_type or "provider_error",
-                    "attempt_count": 0,
+                    "attempt_count": self._attempt_counts.get(model_call_id, 0),
                 }
             )
             await self._emitter.emit(event)
@@ -232,7 +248,7 @@ class RunnerAuditHook(AgentHook):
                 ),
                 "status": status,
                 "error_kind": type(error).__name__,
-                "attempt_count": 0,
+                "attempt_count": self._attempt_counts.get(model_call_id, 0),
             }
         )
         await self._emitter.emit(event)
@@ -457,3 +473,90 @@ class RunnerAuditHook(AgentHook):
         )
         await self._emitter.emit(event, critical=True)
         self._run_finished = True
+
+
+class RunnerProviderAttemptObserver:
+    def __init__(
+        self,
+        hook: RunnerAuditHook,
+        *,
+        model_call_id: str,
+        iteration: int,
+    ) -> None:
+        self._hook = hook
+        self._model_call_id = model_call_id
+        self._iteration = iteration
+        self._last_attempt_id: str | None = None
+
+    async def attempt_started(self, snapshot: ProviderAttemptSnapshot) -> None:
+        self._last_attempt_id = snapshot.attempt_id
+        self._hook._attempt_counts[self._model_call_id] = (
+            self._hook._attempt_counts.get(self._model_call_id, 0) + 1
+        )
+        event = ModelAttemptStartedDraft.model_validate(
+            {
+                **self._hook._common(
+                    "model_attempt_started",
+                    iteration=self._iteration,
+                    model_call_id=self._model_call_id,
+                ),
+                "attempt_id": snapshot.attempt_id,
+                "attempt_ordinal": snapshot.attempt_ordinal,
+                "provider": snapshot.provider,
+                "model": snapshot.model,
+                "input_variant": snapshot.input_variant,
+            }
+        )
+        await self._hook._emitter.emit(event)
+
+    async def attempt_finished(self, snapshot: ProviderAttemptResult) -> None:
+        event = ModelAttemptFinishedDraft.model_validate(
+            {
+                **self._hook._common(
+                    "model_attempt_finished",
+                    iteration=self._iteration,
+                    model_call_id=self._model_call_id,
+                ),
+                "attempt_id": snapshot.attempt_id,
+                "attempt_ordinal": snapshot.attempt_ordinal,
+                "provider": snapshot.provider,
+                "model": snapshot.model,
+                "elapsed_ms": snapshot.elapsed_ms,
+                "status": snapshot.status,
+            }
+        )
+        await self._hook._emitter.emit(event)
+
+    async def route_decision(self, decision: ProviderRouteDecision) -> None:
+        event = ProviderRouteDecisionDraft.model_validate(
+            {
+                **self._hook._common(
+                    "provider_route_decision",
+                    iteration=self._iteration,
+                    model_call_id=self._model_call_id,
+                ),
+                "route_action": decision.action,
+                "provider": decision.provider,
+                "model": decision.model,
+                "input_variant": decision.input_variant,
+            }
+        )
+        await self._hook._emitter.emit(event)
+
+    async def retry_scheduled(self, retry: ProviderRetryDecision) -> None:
+        prior_attempt_id = retry.prior_attempt_id or self._last_attempt_id
+        if prior_attempt_id is None:
+            return
+        event = RetryScheduledDraft.model_validate(
+            {
+                **self._hook._common(
+                    "retry_scheduled",
+                    iteration=self._iteration,
+                    model_call_id=self._model_call_id,
+                ),
+                "prior_attempt_id": prior_attempt_id,
+                "delay_ms": retry.delay_ms,
+                "policy_name": retry.policy_name,
+            }
+        )
+        await self._hook._emitter.emit(event)

@@ -799,6 +799,8 @@ class AgentRunner:
                 runtime=spec.runtime,
             ),
         )
+        if context.provider_attempt_observer is not None:
+            kwargs["attempt_observer"] = context.provider_attempt_observer
         wants_streaming = hook.wants_streaming()
         wants_progress_streaming = (
             not wants_streaming
@@ -1082,6 +1084,8 @@ class AgentRunner:
                 runtime=spec.runtime,
             ),
         )
+        if context.provider_attempt_observer is not None:
+            kwargs["attempt_observer"] = context.provider_attempt_observer
         try:
             response = await spec.runtime.provider.chat_with_retry(**kwargs)
         except BaseException as error:

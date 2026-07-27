@@ -6,6 +6,7 @@ from nanobot.agent.runner import AgentRunner
 from nanobot.agent.tools.base import ToolResult
 from nanobot.audit.context import AuditRunContext
 from nanobot.providers.base import LLMProvider, LLMResponse, ToolCallRequest
+from tests.providers.test_provider_retry import ScriptedProvider
 
 
 class RecordingEmitter:
@@ -252,3 +253,39 @@ async def test_repeated_lookup_emits_blocked_terminal_and_policy() -> None:
     policies = [event for event in emitter.events if event.event_type == "policy_blocked"]
     assert len(policies) == 1
     assert policies[0].tool_call_id == terminals[-1].tool_call_id
+
+
+async def test_runner_links_real_provider_attempts_to_model_call(monkeypatch) -> None:
+    provider = ScriptedProvider(
+        [
+            LLMResponse(content="timeout", finish_reason="error", error_kind="timeout"),
+            LLMResponse(content="done"),
+        ]
+    )
+    tools = MagicMock()
+    tools.get_definitions.return_value = []
+    emitter = RecordingEmitter()
+
+    async def no_sleep(_delay):
+        return None
+
+    monkeypatch.setattr("nanobot.providers.base.asyncio.sleep", no_sleep)
+    await AgentRunner(audit_emitter=emitter).run(
+        make_run_spec(
+            provider,
+            initial_messages=[],
+            tools=tools,
+            model="test-model",
+            max_iterations=1,
+            max_tool_result_chars=10_000,
+            audit_context=AuditRunContext("trace", "turn", "run"),
+        )
+    )
+
+    attempts = [
+        event for event in emitter.events if event.event_type == "model_attempt_started"
+    ]
+    assert len(attempts) == 2
+    assert attempts[0].attempt_id != attempts[1].attempt_id
+    assert attempts[0].model_call_id == attempts[1].model_call_id
+    assert "retry_scheduled" in emitter.event_types

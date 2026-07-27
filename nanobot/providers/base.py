@@ -1,5 +1,7 @@
 """Base LLM provider interface."""
 
+from __future__ import annotations
+
 import asyncio
 import json
 import os
@@ -10,10 +12,13 @@ from contextlib import suppress
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import json_repair
 from loguru import logger
+
+if TYPE_CHECKING:
+    from nanobot.providers.observed_call import ProviderAttemptObserver
 
 STREAM_IDLE_TIMEOUT_ENV = "NANOBOT_STREAM_IDLE_TIMEOUT_S"
 DEFAULT_STREAM_IDLE_TIMEOUT_S = 90.0
@@ -194,6 +199,7 @@ class LLMProvider(ABC):
     """Base class for LLM providers."""
 
     supports_progress_deltas = False
+    observes_leaf_attempts = False
 
     _CHAT_RETRY_DELAYS = (1, 2, 4)
     _PERSISTENT_MAX_DELAY = 60
@@ -610,9 +616,16 @@ class LLMProvider(ABC):
                         found = True
         return found
 
-    async def _safe_chat(self, **kwargs: Any) -> LLMResponse:
+    async def _safe_chat(
+        self,
+        *,
+        _attempt_observer: ProviderAttemptObserver | None = None,
+        **kwargs: Any,
+    ) -> LLMResponse:
         """Call chat() and convert unexpected exceptions to error responses."""
         try:
+            if self.observes_leaf_attempts:
+                kwargs["attempt_observer"] = _attempt_observer
             return await self.chat(**kwargs)
         except asyncio.CancelledError:
             raise
@@ -654,9 +667,16 @@ class LLMProvider(ABC):
             await on_content_delta(response.content)
         return response
 
-    async def _safe_chat_stream(self, **kwargs: Any) -> LLMResponse:
+    async def _safe_chat_stream(
+        self,
+        *,
+        _attempt_observer: ProviderAttemptObserver | None = None,
+        **kwargs: Any,
+    ) -> LLMResponse:
         """Call chat_stream() and convert unexpected exceptions to error responses."""
         try:
+            if self.observes_leaf_attempts:
+                kwargs["attempt_observer"] = _attempt_observer
             return await self.chat_stream(**kwargs)
         except asyncio.CancelledError:
             raise
@@ -678,6 +698,7 @@ class LLMProvider(ABC):
         on_stream_recover: Callable[[], Awaitable[None]] | None = None,
         retry_mode: str = "standard",
         on_retry_wait: Callable[[str], Awaitable[None]] | None = None,
+        attempt_observer: ProviderAttemptObserver | None = None,
     ) -> LLMResponse:
         """Call chat_stream() with retry on transient provider failures."""
         if max_tokens is self._SENTINEL or max_tokens is None:
@@ -720,6 +741,7 @@ class LLMProvider(ABC):
             on_retry_wait=on_retry_wait,
             should_retry_guard=lambda: not has_streamed_content,
             on_stream_recover=_recover_stream if on_stream_recover else None,
+            attempt_observer=attempt_observer,
         )
 
     async def chat_with_retry(
@@ -733,6 +755,7 @@ class LLMProvider(ABC):
         tool_choice: str | dict[str, Any] | None = None,
         retry_mode: str = "standard",
         on_retry_wait: Callable[[str], Awaitable[None]] | None = None,
+        attempt_observer: ProviderAttemptObserver | None = None,
     ) -> LLMResponse:
         """Call chat() with retry on transient provider failures.
 
@@ -761,6 +784,7 @@ class LLMProvider(ABC):
             messages,
             retry_mode=retry_mode,
             on_retry_wait=on_retry_wait,
+            attempt_observer=attempt_observer,
         )
 
     @classmethod
@@ -868,16 +892,47 @@ class LLMProvider(ABC):
         on_retry_wait: Callable[[str], Awaitable[None]] | None,
         should_retry_guard: Callable[[], bool] | None = None,
         on_stream_recover: Callable[[], Awaitable[None]] | None = None,
+        attempt_observer: ProviderAttemptObserver | None = None,
     ) -> LLMResponse:
+        from nanobot.providers.observed_call import (
+            ProviderRetryDecision,
+            ProviderRouteDecision,
+            notify_observer,
+            observed_provider_call,
+        )
+
         attempt = 0
+        actual_attempt = 0
         delays = list(self._CHAT_RETRY_DELAYS)
         persistent = retry_mode == "persistent"
         last_response: LLMResponse | None = None
         last_error_key: str | None = None
         identical_error_count = 0
+        last_attempt_id: str | None = None
+
+        async def invoke(call_kwargs: dict[str, Any], *, input_variant: str) -> LLMResponse:
+            nonlocal actual_attempt, last_attempt_id
+            if self.observes_leaf_attempts:
+                return await call(
+                    **call_kwargs,
+                    _attempt_observer=attempt_observer,
+                )
+            actual_attempt += 1
+            observed = await observed_provider_call(
+                call,
+                call_kwargs,
+                observer=attempt_observer,
+                provider=type(self).__name__,
+                model=str(call_kwargs.get("model") or self.get_default_model()),
+                attempt_ordinal=actual_attempt,
+                input_variant=input_variant,
+            )
+            last_attempt_id = observed.attempt_id
+            return observed.response
+
         while True:
             attempt += 1
-            response = await call(**kw)
+            response = await invoke(kw, input_variant="original")
             if response.finish_reason != "error":
                 return response
             last_response = response
@@ -920,7 +975,17 @@ class LLMProvider(ABC):
                     )
                     retry_kw = dict(kw)
                     retry_kw["messages"] = stripped
-                    result = await call(**retry_kw)
+                    await notify_observer(
+                        attempt_observer,
+                        "route_decision",
+                        ProviderRouteDecision(
+                            "image_stripped_retry",
+                            type(self).__name__,
+                            str(retry_kw.get("model") or self.get_default_model()),
+                            "without_images",
+                        ),
+                    )
+                    result = await invoke(retry_kw, input_variant="without_images")
                     # Permanently strip images from the original messages so
                     # subsequent iterations do not repeat the error-retry cycle.
                     if result.finish_reason != "error":
@@ -930,9 +995,9 @@ class LLMProvider(ABC):
 
             if persistent and identical_error_count >= self._PERSISTENT_IDENTICAL_ERROR_LIMIT:
                 logger.warning(
-                    "Stopping persistent retry after {} identical transient errors: {}",
+                    "Stopping persistent retry after {} identical transient errors kind={}",
                     identical_error_count,
-                    (response.content or "")[:120].lower(),
+                    response.error_kind or response.error_type or "provider_error",
                 )
                 if on_retry_wait:
                     await on_retry_wait(
@@ -942,9 +1007,9 @@ class LLMProvider(ABC):
 
             if not persistent and attempt > len(delays):
                 logger.warning(
-                    "LLM request failed after {} retries, giving up: {}",
+                    "LLM request failed after {} retries, giving up kind={}",
                     attempt,
-                    (response.content or "")[:120].lower(),
+                    response.error_kind or response.error_type or "provider_error",
                 )
                 if on_retry_wait:
                     await on_retry_wait(
@@ -958,11 +1023,23 @@ class LLMProvider(ABC):
                 delay = min(delay, self._PERSISTENT_MAX_DELAY)
 
             logger.warning(
-                "LLM transient error (attempt {}{}), retrying in {}s: {}",
+                "LLM transient error attempt={}{} status={} kind={} retry_in_s={}",
                 attempt,
                 "+" if persistent and attempt > len(delays) else f"/{len(delays)}",
+                response.error_status_code,
+                response.error_kind or response.error_type or "provider_error",
                 int(round(delay)),
-                (response.content or "")[:120].lower(),
+            )
+            await notify_observer(
+                attempt_observer,
+                "retry_scheduled",
+                ProviderRetryDecision(
+                    prior_attempt_id=last_attempt_id,
+                    delay_ms=max(0, int(round(delay * 1000))),
+                    policy_name=(
+                        "persistent_provider_retry" if persistent else "standard_provider_retry"
+                    ),
+                ),
             )
             await self._sleep_with_heartbeat(
                 delay,
@@ -971,7 +1048,9 @@ class LLMProvider(ABC):
                 on_retry_wait=on_retry_wait,
             )
 
-        return last_response if last_response is not None else await call(**kw)
+        if last_response is None:
+            return await invoke(kw, input_variant="original")
+        return last_response
 
     @abstractmethod
     def get_default_model(self) -> str:
