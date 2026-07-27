@@ -44,6 +44,7 @@ class AgentHookContext:
     stop_reason: str | None = None
     error: str | None = None
     session_key: str | None = None
+    model_call_id: str | None = None
 
 
 @dataclass(slots=True)
