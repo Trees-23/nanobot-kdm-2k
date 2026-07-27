@@ -72,6 +72,7 @@ from nanobot.bus.outbound_events import (  # noqa: E402
     StreamEndEvent,
     outbound_event_from_message,
 )
+from nanobot.cli.audit import create_audit_app  # noqa: E402
 from nanobot.cli.gateway import create_gateway_app  # noqa: E402
 from nanobot.cli.stream import StreamRenderer, ThinkingSpinner  # noqa: E402
 from nanobot.config.paths import get_workspace_path, is_default_workspace  # noqa: E402
@@ -227,6 +228,7 @@ app = typer.Typer(
 )
 
 console = Console()
+app.add_typer(create_audit_app(console=console), name="audit")
 EXIT_COMMANDS = {"exit", "quit", "/exit", "/quit", ":q"}
 _REASONING_SENTENCE_ENDINGS = (".", "!", "?", "。", "！", "？")
 _REASONING_FLUSH_CHARS = 60
