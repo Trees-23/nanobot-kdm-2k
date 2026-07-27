@@ -650,9 +650,9 @@ a remote human received or read the message. `remote_receipt_id` is nullable and
 an adapter explicitly obtains one; V1 does not require changing every `BaseChannel.send()` return
 type.
 
-Duplicate suppression produces `delivery_finished(status=suppressed, attempt=0)` without a
+Duplicate suppression produces `delivery_finished(status=suppressed, final_attempt_ordinal=0)` without a
 `delivery_attempted`, because no adapter call occurred. An unknown channel similarly produces
-`delivery_finished(status=failed, attempt=0, outcome_reason=unknown_channel)`. Every other
+`delivery_finished(status=failed, final_attempt_ordinal=0, outcome_reason=unknown_channel)`. Every other
 delivery terminal event requires at least one matching attempt.
 
 For streamed channels, individual coalesced send attempts record delivery metadata, byte counts,
@@ -1174,7 +1174,7 @@ tool call, valid payload references, and a valid integrity report.
 {"event_type":"provider_route_decision","model_call_id":"M3","route_action":"primary_selected","provider":"openai","model":"gpt-x"}
 {"event_type":"model_attempt_started","model_call_id":"M3","attempt_id":"A3","attempt_ordinal":1,"provider":"openai","model":"gpt-x"}
 {"event_type":"model_attempt_finished","model_call_id":"M3","attempt_id":"A3","attempt_ordinal":1,"status":"timeout"}
-{"event_type":"retry_scheduled","model_call_id":"M3","prior_attempt_id":"A3","delay_ms":2000,"policy":"provider_retry_v1"}
+{"event_type":"retry_scheduled","model_call_id":"M3","prior_attempt_id":"A3","delay_ms":2000,"policy_name":"provider_retry_v1"}
 {"event_type":"model_attempt_started","model_call_id":"M3","attempt_id":"A4","attempt_ordinal":2,"provider":"openai","model":"gpt-x"}
 {"event_type":"model_attempt_finished","model_call_id":"M3","attempt_id":"A4","attempt_ordinal":2,"status":"error"}
 {"event_type":"provider_route_decision","model_call_id":"M3","route_action":"fallback_selected","provider":"anthropic","model":"claude-y"}
@@ -1186,7 +1186,7 @@ tool call, valid payload references, and a valid integrity report.
 {"event_type":"tool_started","run_id":"R2","tool_call_id":"C3","tool":"web_search"}
 {"event_type":"tool_finished","run_id":"R2","tool_call_id":"C3","status":"error","outcome_reason":"provider_error"}
 {"event_type":"tool_started","run_id":"R2","tool_call_id":"C4","tool":"web_search"}
-{"event_type":"policy_blocked","run_id":"R2","tool_call_id":"C4","policy":"repeated_external_lookup_v1","count":3,"limit":2}
+{"event_type":"policy_blocked","run_id":"R2","tool_call_id":"C4","policy_name":"repeated_external_lookup","policy_version":"v1","observed_count":3,"threshold":2}
 {"event_type":"tool_finished","run_id":"R2","tool_call_id":"C4","status":"blocked","outcome_reason":"repeated_external_lookup"}
 {"event_type":"model_request_started","run_id":"R2","model_call_id":"M4"}
 {"event_type":"model_attempt_started","model_call_id":"M4","attempt_id":"A6","attempt_ordinal":1,"provider":"anthropic","model":"claude-y"}
