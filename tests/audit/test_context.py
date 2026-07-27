@@ -62,6 +62,19 @@ def test_child_run_shares_trace_and_turn() -> None:
     assert child.run_id != "r1"
 
 
+def test_injected_result_retains_active_turn() -> None:
+    resolved = TraceContextResolver().resolve_turn(
+        TraceTurnInput(
+            session_key="s1",
+            injected_trace_id="trace",
+            injected_turn_id="turn",
+            injected_run_id="run",
+        )
+    )
+    assert resolved.trace_id == "trace"
+    assert resolved.turn_id == "turn"
+
+
 def test_resumed_run_gets_new_identity() -> None:
     turn = TraceContextResolver().resolve_turn(
         TraceTurnInput(

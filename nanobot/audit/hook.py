@@ -15,7 +15,7 @@ from nanobot.agent.hook import (
     ModelRequestSnapshot,
     RuntimeDecision,
 )
-from nanobot.audit.context import AuditRunContext
+from nanobot.audit.context import AuditRunContext, clear_run_cause, run_cause
 from nanobot.audit.ids import new_audit_id
 from nanobot.audit.schema import (
     ContinuationRequestedDraft,
@@ -94,7 +94,7 @@ class RunnerAuditHook(AgentHook):
             "run_id": self._run.run_id,
             "parent_run_id": self._run.parent_run_id,
             "resumed_from_run_id": self._run.resumed_from_run_id,
-            "caused_by_event_id": None,
+            "caused_by_event_id": run_cause(self._run.run_id),
             "model_call_id": model_call_id,
             "attempt_id": None,
             "tool_call_id": None,
@@ -472,6 +472,7 @@ class RunnerAuditHook(AgentHook):
             }
         )
         await self._emitter.emit(event, critical=True)
+        clear_run_cause(self._run.run_id)
         self._run_finished = True
 
 

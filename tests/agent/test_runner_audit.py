@@ -4,7 +4,7 @@ from unittest.mock import AsyncMock, MagicMock
 from agent.runner_helpers import make_run_spec
 from nanobot.agent.runner import AgentRunner
 from nanobot.agent.tools.base import ToolResult
-from nanobot.audit.context import AuditRunContext
+from nanobot.audit.context import AuditRunContext, set_run_cause
 from nanobot.providers.base import LLMProvider, LLMResponse, ToolCallRequest
 from tests.providers.test_provider_retry import ScriptedProvider
 
@@ -197,6 +197,7 @@ async def test_runner_cancellation_closes_tool_and_run_spans() -> None:
         )
     )
     await started.wait()
+    set_run_cause("run", "cancel-event")
     task.cancel()
     try:
         await task
@@ -209,8 +210,10 @@ async def test_runner_cancellation_closes_tool_and_run_spans() -> None:
         event for event in emitter.events if event.event_type == "tool_finished"
     )
     assert tool_terminal.status == "cancelled"
+    assert tool_terminal.caused_by_event_id == "cancel-event"
     assert emitter.events[-1].event_type == "run_finished"
     assert emitter.events[-1].status == "cancelled"
+    assert emitter.events[-1].caused_by_event_id == "cancel-event"
 
 
 async def test_repeated_lookup_emits_blocked_terminal_and_policy() -> None:

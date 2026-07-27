@@ -17,13 +17,15 @@ from nanobot.agent.tools.context import (
     RequestContext,
     ToolContext,
     bind_request_context,
+    current_request_context,
     reset_request_context,
 )
 from nanobot.agent.tools.exec_session import ExecSessionManager
 from nanobot.agent.tools.file_state import FileStates
 from nanobot.agent.tools.loader import ToolLoader
 from nanobot.agent.tools.registry import ToolRegistry
-from nanobot.bus.events import InboundMessage
+from nanobot.audit.context import AuditRunContext
+from nanobot.bus.events import AUDIT_CONTEXT_META, InboundMessage
 from nanobot.bus.queue import MessageBus
 from nanobot.config.schema import AgentDefaults, ToolsConfig
 from nanobot.providers.base import LLMProvider
@@ -96,6 +98,7 @@ class SubagentManager:
         max_concurrent_subagents: int | None = None,
         fail_on_tool_error: bool | None = None,
         llm_wall_timeout_for_session: Callable[[str | None], float | None] | None = None,
+        audit_emitter: Any | None = None,
     ):
         if workspace is None:
             raise TypeError("SubagentManager.__init__() missing required argument: 'workspace'")
@@ -143,7 +146,8 @@ class SubagentManager:
             if fail_on_tool_error is not None
             else defaults.fail_on_tool_error
         )
-        self.runner = AgentRunner()
+        self.runner = AgentRunner(audit_emitter=audit_emitter)
+        self._audit_emitter = audit_emitter
         self._exec_session_manager = ExecSessionManager()
         self._llm_wall_timeout_for_session = llm_wall_timeout_for_session
         self._running_tasks: dict[str, asyncio.Task[None]] = {}
@@ -236,7 +240,29 @@ class SubagentManager:
             runtime = runtime.with_generation_overrides(temperature=temperature)
         task_id = str(uuid.uuid4())[:8]
         display_label = label or task[:30] + ("..." if len(task) > 30 else "")
-        origin = {"channel": origin_channel, "chat_id": origin_chat_id, "session_key": session_key}
+        origin: dict[str, Any] = {
+            "channel": origin_channel,
+            "chat_id": origin_chat_id,
+            "session_key": session_key,
+        }
+        request = current_request_context()
+        raw_audit = request.metadata.get(AUDIT_CONTEXT_META) if request is not None else None
+        audit_context: AuditRunContext | None = None
+        if isinstance(raw_audit, dict) and all(
+            isinstance(raw_audit.get(name), str) and raw_audit[name]
+            for name in ("trace_id", "turn_id", "run_id")
+        ):
+            parent = AuditRunContext(
+                trace_id=raw_audit["trace_id"],
+                turn_id=raw_audit["turn_id"],
+                run_id=raw_audit["run_id"],
+            )
+            audit_context = parent.child_run(source_type="subagent")
+            origin[AUDIT_CONTEXT_META] = {
+                "trace_id": audit_context.trace_id,
+                "turn_id": audit_context.turn_id,
+                "run_id": audit_context.run_id,
+            }
 
         status = SubagentStatus(
             task_id=task_id,
@@ -256,6 +282,7 @@ class SubagentManager:
                 runtime,
                 origin_message_id,
                 workspace_scope,
+                audit_context,
             )
         )
         self._running_tasks[task_id] = bg_task
@@ -280,11 +307,12 @@ class SubagentManager:
         task_id: str,
         task: str,
         label: str,
-        origin: dict[str, str],
+        origin: dict[str, Any],
         status: SubagentStatus,
         runtime: LLMRuntime,
         origin_message_id: str | None = None,
         workspace_scope: WorkspaceScope | None = None,
+        audit_context: AuditRunContext | None = None,
     ) -> None:
         """Execute the subagent task and announce the result."""
         logger.info("Subagent [{}] starting task: {}", task_id, label)
@@ -312,12 +340,20 @@ class SubagentManager:
                 if self._llm_wall_timeout_for_session
                 else None
             )
+            request_metadata = {}
+            if audit_context is not None:
+                request_metadata[AUDIT_CONTEXT_META] = {
+                    "trace_id": audit_context.trace_id,
+                    "turn_id": audit_context.turn_id,
+                    "run_id": audit_context.run_id,
+                }
             request_token = bind_request_context(RequestContext(
                 channel=origin["channel"],
                 chat_id=origin["chat_id"],
                 message_id=origin_message_id,
                 session_key=sess_key,
                 runtime=runtime,
+                metadata=request_metadata,
             ))
             token = bind_workspace_scope(workspace_scope) if workspace_scope is not None else None
             try:
@@ -336,6 +372,7 @@ class SubagentManager:
                     session_key=sess_key,
                     workspace=root,
                     llm_timeout_s=llm_timeout,
+                    audit_context=audit_context,
                 ))
             finally:
                 if token is not None:
@@ -374,7 +411,7 @@ class SubagentManager:
         label: str,
         task: str,
         result: str,
-        origin: dict[str, str],
+        origin: dict[str, Any],
         status: str,
         origin_message_id: str | None = None,
     ) -> None:
@@ -399,6 +436,8 @@ class SubagentManager:
             "injected_event": "subagent_result",
             "subagent_task_id": task_id,
         }
+        if isinstance(origin.get(AUDIT_CONTEXT_META), dict):
+            metadata[AUDIT_CONTEXT_META] = dict(origin[AUDIT_CONTEXT_META])
         if origin_message_id:
             metadata["origin_message_id"] = origin_message_id
         msg = InboundMessage(

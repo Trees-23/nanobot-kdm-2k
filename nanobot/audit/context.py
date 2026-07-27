@@ -6,6 +6,20 @@ from dataclasses import dataclass, replace
 
 from nanobot.audit.ids import new_audit_id
 
+_RUN_CAUSES: dict[str, str] = {}
+
+
+def set_run_cause(run_id: str, event_id: str) -> None:
+    _RUN_CAUSES[run_id] = event_id
+
+
+def run_cause(run_id: str) -> str | None:
+    return _RUN_CAUSES.get(run_id)
+
+
+def clear_run_cause(run_id: str) -> None:
+    _RUN_CAUSES.pop(run_id, None)
+
 
 @dataclass(frozen=True, slots=True)
 class TraceTurnInput:
@@ -16,6 +30,7 @@ class TraceTurnInput:
     checkpoint_trace_id: str | None = None
     checkpoint_run_id: str | None = None
     injected_trace_id: str | None = None
+    injected_turn_id: str | None = None
     injected_run_id: str | None = None
     reply_trace_id: str | None = None
     reply_source_id: str | None = None
@@ -122,7 +137,7 @@ class TraceContextResolver:
 
         return AuditTurnContext(
             trace_id=trace_id,
-            turn_id=new_audit_id(),
+            turn_id=value.injected_turn_id or new_audit_id(),
             session_key=value.session_key,
             source_type=value.source_type,
             actor_type=value.actor_type,

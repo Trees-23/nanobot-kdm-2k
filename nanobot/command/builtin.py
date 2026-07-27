@@ -184,6 +184,7 @@ async def cmd_stop(ctx: CommandContext) -> OutboundMessage:
     """Cancel all active tasks and subagents for the session."""
     loop = ctx.loop
     msg = ctx.msg
+    audit, audit_turn = await loop._audit_request_cancellation(msg, ctx.key)
     total = await loop._cancel_active_tasks(ctx.key)
     # Also drain pending queue to prevent mid-turn injection deadlock
     pending = loop._pending_queues.pop(ctx.key, None)
@@ -195,10 +196,18 @@ async def cmd_stop(ctx: CommandContext) -> OutboundMessage:
             except Exception:
                 break
     content = f"Stopped {total} task(s)." if total else "No active task to stop."
-    return OutboundMessage(
+    result = OutboundMessage(
         channel=msg.channel, chat_id=msg.chat_id, content=content,
         metadata=dict(msg.metadata or {})
     )
+    result.metadata["_audit_context"] = {
+        "trace_id": audit_turn.trace_id,
+        "turn_id": audit_turn.turn_id,
+        "run_id": None,
+    }
+    await audit.response_prepared(response_kind="command")
+    await audit.finished(status="command_completed")
+    return result
 
 
 async def cmd_restart(ctx: CommandContext) -> OutboundMessage:
