@@ -9,6 +9,12 @@ from typing import Any
 from loguru import logger
 
 from nanobot.providers.base import LLMProvider, LLMResponse
+from nanobot.providers.observed_call import (
+    ProviderAttemptObserver,
+    ProviderRouteDecision,
+    notify_observer,
+    observed_provider_call,
+)
 
 # Circuit breaker tuned to match OpenAICompatProvider's Responses API breaker.
 _PRIMARY_FAILURE_THRESHOLD = 3
@@ -76,6 +82,7 @@ class FallbackProvider(LLMProvider):
     """
 
     supports_stream_recover_callback = True
+    observes_leaf_attempts = True
 
     def __init__(
         self,
@@ -115,16 +122,39 @@ class FallbackProvider(LLMProvider):
         return False
 
     async def chat(self, **kwargs: Any) -> LLMResponse:
+        attempt_observer = kwargs.pop("attempt_observer", None)
         if not self._has_fallbacks:
-            return await self._primary.chat(**kwargs)
+            observed = await observed_provider_call(
+                self._primary.chat,
+                kwargs,
+                observer=attempt_observer,
+                provider=type(self._primary).__name__,
+                model=str(kwargs.get("model") or self._primary.get_default_model()),
+                attempt_ordinal=1,
+                input_variant="original",
+            )
+            return observed.response
         return await self._try_with_fallback(
-            lambda p, kw: p.chat(**kw), kwargs, has_streamed=None
+            lambda p, kw: p.chat(**kw),
+            kwargs,
+            has_streamed=None,
+            attempt_observer=attempt_observer,
         )
 
     async def chat_stream(self, **kwargs: Any) -> LLMResponse:
         on_stream_recover = kwargs.pop("on_stream_recover", None)
+        attempt_observer = kwargs.pop("attempt_observer", None)
         if not self._has_fallbacks:
-            return await self._primary.chat_stream(**kwargs)
+            observed = await observed_provider_call(
+                self._primary.chat_stream,
+                kwargs,
+                observer=attempt_observer,
+                provider=type(self._primary).__name__,
+                model=str(kwargs.get("model") or self._primary.get_default_model()),
+                attempt_ordinal=1,
+                input_variant="original",
+            )
+            return observed.response
 
         has_streamed: list[bool] = [False]
         original_delta = kwargs.get("on_content_delta")
@@ -141,6 +171,7 @@ class FallbackProvider(LLMProvider):
             kwargs,
             has_streamed=has_streamed,
             on_stream_recover=on_stream_recover,
+            attempt_observer=attempt_observer,
         )
 
     async def _try_with_fallback(
@@ -149,19 +180,37 @@ class FallbackProvider(LLMProvider):
         kwargs: dict[str, Any],
         has_streamed: list[bool] | None,
         on_stream_recover: Callable[[], Awaitable[None]] | None = None,
+        attempt_observer: ProviderAttemptObserver | None = None,
     ) -> LLMResponse:
         primary_model = kwargs.get("model") or self._primary.get_default_model()
         primary_was_attempted = False
-        primary_error = "unknown error"
+        attempt_ordinal = 0
+
+        async def call_leaf(provider: LLMProvider, call_kwargs: dict[str, Any]) -> LLMResponse:
+            nonlocal attempt_ordinal
+            attempt_ordinal += 1
+
+            async def invoke(**leaf_kwargs: Any) -> LLMResponse:
+                return await call(provider, leaf_kwargs)
+
+            observed = await observed_provider_call(
+                invoke,
+                call_kwargs,
+                observer=attempt_observer,
+                provider=type(provider).__name__,
+                model=str(call_kwargs.get("model") or provider.get_default_model()),
+                attempt_ordinal=attempt_ordinal,
+                input_variant="original",
+            )
+            return observed.response
 
         if self._primary_available():
             primary_was_attempted = True
-            response = await call(self._primary, kwargs)
+            response = await call_leaf(self._primary, kwargs)
             if response.finish_reason != "error":
                 self._primary_failures = 0
                 self._primary_tripped_at = None
                 return response
-            primary_error = (response.content or primary_error)[:120]
 
             if has_streamed is not None and has_streamed[0]:
                 is_timeout = (response.error_kind or "").lower() == "timeout"
@@ -184,9 +233,10 @@ class FallbackProvider(LLMProvider):
 
             if not self._should_fallback(response):
                 logger.warning(
-                    "Primary model '{}' returned non-fallbackable error: {}",
+                    "Primary model '{}' returned non-fallbackable error status={} kind={}",
                     primary_model,
-                    (response.content or "")[:120],
+                    response.error_status_code,
+                    response.error_kind or response.error_type or "provider_error",
                 )
                 return response
 
@@ -199,6 +249,16 @@ class FallbackProvider(LLMProvider):
                 )
         else:
             logger.debug("Primary model '{}' circuit open; skipping", primary_model)
+            await notify_observer(
+                attempt_observer,
+                "route_decision",
+                ProviderRouteDecision(
+                    "circuit_skipped",
+                    type(self._primary).__name__,
+                    str(primary_model),
+                    "original",
+                ),
+            )
 
         last_response: LLMResponse | None = None
         primary_skipped = not primary_was_attempted
@@ -226,8 +286,9 @@ class FallbackProvider(LLMProvider):
                 )
             elif idx == 0:
                 logger.info(
-                    "Primary model '{}' failed: {}; trying fallback '{}'",
-                    primary_model, primary_error, fallback_model,
+                    "Primary model '{}' failed; trying fallback '{}'",
+                    primary_model,
+                    fallback_model,
                 )
             else:
                 logger.info(
@@ -238,9 +299,22 @@ class FallbackProvider(LLMProvider):
                 fallback_provider = self._provider_factory(fallback)
             except Exception as exc:
                 logger.warning(
-                    "Failed to create provider for fallback '{}': {}", fallback_model, exc
+                    "Failed to create provider for fallback '{}' kind={}",
+                    fallback_model,
+                    type(exc).__name__,
                 )
                 continue
+
+            await notify_observer(
+                attempt_observer,
+                "route_decision",
+                ProviderRouteDecision(
+                    "fallback_selected",
+                    type(fallback_provider).__name__,
+                    str(fallback_model),
+                    "original",
+                ),
+            )
 
             original_values = {
                 name: kwargs.get(name, _MISSING)
@@ -254,7 +328,7 @@ class FallbackProvider(LLMProvider):
             else:
                 kwargs["reasoning_effort"] = fallback.reasoning_effort
             try:
-                fallback_response = await call(fallback_provider, kwargs)
+                fallback_response = await call_leaf(fallback_provider, kwargs)
             finally:
                 for name, value in original_values.items():
                     if value is _MISSING:
@@ -271,9 +345,12 @@ class FallbackProvider(LLMProvider):
 
             last_response = fallback_response
             logger.warning(
-                "Fallback '{}' also failed: {}",
+                "Fallback '{}' also failed status={} kind={}",
                 fallback_model,
-                (fallback_response.content or "")[:120],
+                fallback_response.error_status_code,
+                fallback_response.error_kind
+                or fallback_response.error_type
+                or "provider_error",
             )
 
         logger.warning(
