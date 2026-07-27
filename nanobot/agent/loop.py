@@ -1577,7 +1577,17 @@ class AgentLoop:
                         f"on event {event!r}"
                     )
                 ctx.state = next_state
-        except BaseException:
+        except BaseException as error:
+            with suppress(Exception):
+                setattr(
+                    error,
+                    AUDIT_CONTEXT_META,
+                    {
+                        "trace_id": audit_turn.trace_id,
+                        "turn_id": audit_turn.turn_id,
+                        "run_id": audit_run.run_id,
+                    },
+                )
             await audit.finished(status="failed")
             self._active_audit_runs.get(key, {}).pop(audit_run.run_id, None)
             raise
