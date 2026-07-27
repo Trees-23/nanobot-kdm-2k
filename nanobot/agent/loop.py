@@ -34,6 +34,7 @@ from nanobot.agent.tools.message import MessageTool
 from nanobot.agent.tools.registry import ToolRegistry
 from nanobot.agent.tools.self import MyTool
 from nanobot.agent.turn_hooks import AgentTurnHookSpec, build_agent_turn_hook
+from nanobot.audit.runtime import AuditRuntime
 from nanobot.bus.events import InboundMessage, OutboundMessage
 from nanobot.bus.outbound_events import (
     RetryWaitEvent,
@@ -302,6 +303,7 @@ class AgentLoop:
         runtime_model_publisher: Callable[[str, str | None], None] | None = None,
         restart_mode: str = "auto",
         local_trigger_store: Any | None = None,
+        audit_runtime: AuditRuntime | None = None,
     ):
         from nanobot.config.schema import ToolsConfig
 
@@ -357,6 +359,7 @@ class AgentLoop:
             self._image_generation_provider_configs["openrouter"] = image_generation_provider_config
         self.cron_service = cron_service
         self.local_trigger_store = local_trigger_store
+        self.audit_runtime = audit_runtime or AuditRuntime.disabled()
         self.restrict_to_workspace = restrict_to_workspace
         self.workspace_scopes = WorkspaceScopeResolver(
             default_workspace=workspace,
@@ -471,6 +474,13 @@ class AgentLoop:
             config,
             provider_snapshot_loader,
         )
+        if "audit_runtime" not in extra:
+            from nanobot.config.paths import get_audit_dir
+
+            extra["audit_runtime"] = AuditRuntime.from_config(
+                config.audit,
+                root=get_audit_dir(config.audit.path),
+            )
         return cls(
             bus=bus,
             provider=provider,
@@ -1017,6 +1027,7 @@ class AgentLoop:
 
     async def run(self) -> None:
         """Run the agent loop, dispatching messages as tasks to stay responsive to /stop."""
+        await self.audit_runtime.ensure_started()
         self._running = True
         try:
             await self._connect_mcp()
@@ -1286,6 +1297,7 @@ class AgentLoop:
             self.subagents.close,
             self._exec_session_manager.close_all,
             lambda: agent_context.close_mcp(self),
+            self.audit_runtime.close,
         )
         for cleanup in cleanup_steps:
             try:
@@ -1953,6 +1965,7 @@ class AgentLoop:
         """Process an external message directly and return the outbound payload."""
         if channel == "system":
             raise ValueError("channel 'system' is reserved for internal messages")
+        await self.audit_runtime.ensure_started()
         await self._connect_mcp()
         metadata: dict[str, Any] = {}
         if not persist_user_message:

@@ -95,6 +95,10 @@ class AuditEmitter:
         self._health = _HealthState()
         self.recovery_events: list[AuditEventDraftBase] = []
 
+    def record_failure(self, *, trace_id: str | None, error: BaseException) -> None:
+        """Record an audit-internal loss without exposing exception content."""
+        self._health.record(trace_id, type(error).__name__)
+
     def _redact_event(self, event: AuditEventDraftBase) -> AuditEventDraftBase:
         cleaned, _ = self._redactor.redact(event.model_dump(mode="json"))
         return audit_event_draft_adapter.validate_python(cleaned)
