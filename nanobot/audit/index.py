@@ -293,6 +293,14 @@ class AuditIndexer:
                         ),
                     )
                     indexed_segments += 1
+                index.connection.execute(
+                    "INSERT OR REPLACE INTO meta(key, value) VALUES ('coverage_complete', ?)",
+                    ("true" if not failures else "false",),
+                )
+                index.connection.execute(
+                    "INSERT OR REPLACE INTO meta(key, value) VALUES ('coverage_failures', ?)",
+                    (json.dumps(failures, separators=(",", ":")),),
+                )
                 index.connection.commit()
             except BaseException:
                 index.connection.rollback()

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import sqlite3
 from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
@@ -91,6 +92,26 @@ class TracePage(BaseModel):
     next_cursor: str | None = None
 
 
+class StatsRow(BaseModel):
+    group: str
+    event_count: int
+    trace_count: int
+    run_count: int
+    error_count: int
+    cancellation_count: int
+    iteration_count: int
+    prompt_tokens: int
+    completion_tokens: int
+    total_tokens: int
+    average_latency_ms: float | None
+
+
+class StatsReport(BaseModel):
+    rows: list[StatsRow]
+    coverage_complete: bool
+    indexed_process_ids: list[str]
+
+
 def _cursor(last_seen: datetime, trace_id: str) -> str:
     raw = f"{last_seen.isoformat()}\0{trace_id}".encode()
     return base64.urlsafe_b64encode(raw).decode().rstrip("=")
@@ -107,14 +128,28 @@ def _decode_cursor(value: str) -> tuple[datetime, str]:
 
 
 class AuditQuery:
-    def __init__(self, root: Path) -> None:
+    def __init__(
+        self,
+        root: Path,
+        *,
+        index_path: Path | None = None,
+        use_index: bool | None = None,
+    ) -> None:
         self.root = root
         self.reader = AuditReader(root)
         self.verifier = AuditVerifier(root)
+        self.index_path = index_path or root / "state" / "audit-index.sqlite"
+        self.use_index = self.index_path.exists() if use_index is None else use_index
 
     @classmethod
-    def from_root(cls, root: Path) -> AuditQuery:
-        return cls(root)
+    def from_root(
+        cls,
+        root: Path,
+        *,
+        index_path: Path | None = None,
+        use_index: bool | None = None,
+    ) -> AuditQuery:
+        return cls(root, index_path=index_path, use_index=use_index)
 
     def _records(self) -> tuple[list[AuditEventBase], dict[str, AuditPayloadBase], dict[str, str]]:
         events: list[AuditEventBase] = []
@@ -277,6 +312,11 @@ class AuditQuery:
 
     def find_traces(self, filters: TraceFilter | None = None) -> TracePage:
         filters = filters or TraceFilter()
+        if self.use_index and self.index_path.exists():
+            return self._find_traces_indexed(filters)
+        return self._find_traces_scan(filters)
+
+    def _find_traces_scan(self, filters: TraceFilter) -> TracePage:
         events, _, _ = self._records()
         by_trace: dict[str, list[AuditEventBase]] = defaultdict(list)
         for event in events:
@@ -325,4 +365,140 @@ class AuditQuery:
             items=[row[2] for row in selected],
             trace_ids=[row[1] for row in selected],
             next_cursor=next_cursor,
+        )
+
+    @staticmethod
+    def _filter_sql(filters: TraceFilter) -> tuple[list[str], list[object], list[str], list[object]]:
+        where = ["e.trace_id IS NOT NULL"]
+        params: list[object] = []
+        having: list[str] = []
+        having_params: list[object] = []
+        if filters.session_key:
+            where.append(
+                "EXISTS (SELECT 1 FROM events x WHERE x.trace_id=e.trace_id AND x.session_key=?)"
+            )
+            params.append(filters.session_key)
+        if filters.source_type:
+            where.append(
+                "EXISTS (SELECT 1 FROM events x WHERE x.trace_id=e.trace_id AND x.source_type=?)"
+            )
+            params.append(filters.source_type)
+        if filters.run_status:
+            where.append(
+                "EXISTS (SELECT 1 FROM events x WHERE x.trace_id=e.trace_id "
+                "AND x.event_type='run_finished' AND x.status=?)"
+            )
+            params.append(filters.run_status.value)
+        if filters.model:
+            where.append(
+                "EXISTS (SELECT 1 FROM events x WHERE x.trace_id=e.trace_id AND x.model=?)"
+            )
+            params.append(filters.model)
+        if filters.tool:
+            where.append(
+                "EXISTS (SELECT 1 FROM events x WHERE x.trace_id=e.trace_id AND x.tool_name=?)"
+            )
+            params.append(filters.tool)
+        if filters.since:
+            having.append("MAX(e.occurred_at) >= ?")
+            having_params.append(filters.since.isoformat())
+        if filters.until:
+            having.append("MIN(e.occurred_at) <= ?")
+            having_params.append(filters.until.isoformat())
+        if filters.cursor:
+            timestamp, trace_id = _decode_cursor(filters.cursor)
+            having.append("(MAX(e.occurred_at) < ? OR (MAX(e.occurred_at) = ? AND e.trace_id < ?))")
+            having_params.extend((timestamp.isoformat(), timestamp.isoformat(), trace_id))
+        return where, params, having, having_params
+
+    def _find_traces_indexed(self, filters: TraceFilter) -> TracePage:
+        where, params, having, having_params = self._filter_sql(filters)
+        sql = (
+            "SELECT e.trace_id, MAX(e.occurred_at) AS last_seen FROM events e WHERE "
+            + " AND ".join(where)
+            + " GROUP BY e.trace_id"
+        )
+        if having:
+            sql += " HAVING " + " AND ".join(having)
+        sql += " ORDER BY last_seen DESC, e.trace_id DESC LIMIT ?"
+        connection = sqlite3.connect(f"file:{self.index_path}?mode=ro", uri=True)
+        try:
+            rows = connection.execute(
+                sql, (*params, *having_params, filters.limit + 1)
+            ).fetchall()
+        finally:
+            connection.close()
+        selected = rows[: filters.limit]
+        views = [self.load_trace(row[0]) for row in selected]
+        next_cursor = None
+        if len(rows) > filters.limit and selected:
+            next_cursor = _cursor(datetime.fromisoformat(selected[-1][1]), selected[-1][0])
+        return TracePage(
+            items=[view.summary for view in views],
+            trace_ids=[view.trace_id for view in views],
+            next_cursor=next_cursor,
+        )
+
+    def stats(self, *, group_by: str = "source_type") -> StatsReport:
+        columns = {
+            "source": "source_type",
+            "source_type": "source_type",
+            "status": "status",
+            "model": "model",
+            "tool": "tool_name",
+        }
+        if group_by not in columns:
+            raise ValueError(f"unsupported audit stats group: {group_by}")
+        column = columns[group_by]
+        connection = sqlite3.connect(f"file:{self.index_path}?mode=ro", uri=True)
+        connection.row_factory = sqlite3.Row
+        try:
+            rows = connection.execute(
+                f"""
+                SELECT COALESCE({column}, 'unknown') AS group_name,
+                       COUNT(*) AS event_count,
+                       COUNT(DISTINCT trace_id) AS trace_count,
+                       COUNT(DISTINCT CASE WHEN event_type='run_started' THEN run_id END) AS run_count,
+                       SUM(CASE WHEN event_type='run_finished' AND status='failed' THEN 1 ELSE 0 END) AS error_count,
+                       SUM(CASE WHEN event_type='run_finished' AND status='cancelled' THEN 1 ELSE 0 END) AS cancellation_count,
+                       SUM(CASE WHEN event_type='iteration_started' THEN 1 ELSE 0 END) AS iteration_count,
+                       COALESCE(SUM(prompt_tokens), 0) AS prompt_tokens,
+                       COALESCE(SUM(completion_tokens), 0) AS completion_tokens,
+                       COALESCE(SUM(total_tokens), 0) AS total_tokens,
+                       AVG(elapsed_ms) AS average_latency_ms
+                FROM events GROUP BY COALESCE({column}, 'unknown') ORDER BY group_name
+                """
+            ).fetchall()
+            process_rows = connection.execute(
+                "SELECT DISTINCT process_instance_id FROM segment_cursors"
+            ).fetchall()
+            coverage_row = connection.execute(
+                "SELECT value FROM meta WHERE key = 'coverage_complete'"
+            ).fetchone()
+        finally:
+            connection.close()
+        indexed_processes = sorted(row[0] for row in process_rows)
+        return StatsReport(
+            rows=[
+                StatsRow(
+                    group=row["group_name"],
+                    event_count=row["event_count"],
+                    trace_count=row["trace_count"],
+                    run_count=row["run_count"],
+                    error_count=row["error_count"] or 0,
+                    cancellation_count=row["cancellation_count"] or 0,
+                    iteration_count=row["iteration_count"] or 0,
+                    prompt_tokens=row["prompt_tokens"],
+                    completion_tokens=row["completion_tokens"],
+                    total_tokens=row["total_tokens"],
+                    average_latency_ms=row["average_latency_ms"],
+                )
+                for row in rows
+            ],
+            coverage_complete=(
+                coverage_row is not None
+                and coverage_row[0] == "true"
+                and set(indexed_processes) == set(self.reader.process_ids())
+            ),
+            indexed_process_ids=indexed_processes,
         )
