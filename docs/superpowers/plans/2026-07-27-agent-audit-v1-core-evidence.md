@@ -794,7 +794,7 @@ async def test_epoch_fsyncs_payload_before_event_and_catalog(tmp_path: Path) -> 
     calls: list[str] = []
     writer = writer_with_recording_segments(tmp_path, calls)
     await writer.start()
-    await writer.submit(commit_item_with_payload(), critical=True)
+    await writer.submit(commit_item_with_payload(critical=True))
     await writer.close()
 
     assert calls.index("payload.fsync") < calls.index("event.append")
