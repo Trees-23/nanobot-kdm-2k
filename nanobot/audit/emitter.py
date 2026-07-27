@@ -82,6 +82,8 @@ def _common_health_fields(event_type: str) -> dict[str, object]:
 
 
 class AuditEmitter:
+    audit_disabled = False
+
     def __init__(
         self,
         *,
@@ -184,6 +186,8 @@ class AuditEmitter:
 
 
 class DisabledAuditEmitter:
+    audit_disabled = True
+
     async def emit(
         self,
         event: AuditEventDraftBase,

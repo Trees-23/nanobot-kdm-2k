@@ -66,6 +66,8 @@ async def emit_returned_to_caller(
     status: str,
     context_override: dict[str, Any] | None = None,
 ) -> None:
+    if getattr(emitter, "audit_disabled", False):
+        return
     context = (
         _context({AUDIT_CONTEXT_META: context_override})
         if context_override is not None
@@ -96,7 +98,11 @@ class DeliveryAuditRecorder:
     def __init__(self, emitter: Any, msg: OutboundMessage) -> None:
         self.emitter = emitter
         self.msg = msg
-        self.context = _context(msg.metadata)
+        self.context = (
+            None
+            if getattr(emitter, "audit_disabled", False)
+            else _context(msg.metadata)
+        )
         self.delivery_id = new_audit_id()
 
     @property

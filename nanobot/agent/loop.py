@@ -906,7 +906,7 @@ class AgentLoop:
                 turn = AuditTurnContext(
                     trace_id=audit_context.trace_id,
                     turn_id=audit_context.turn_id,
-                    session_key=session.key,
+                    session_key=session_key or str(session.key),
                     source_type=audit_context.source_type,
                     actor_type="system" if channel == "system" else "user",
                     link_reason="created",
@@ -1003,7 +1003,7 @@ class AgentLoop:
 
             return items
 
-        active_session_key = session.key if session else session_key
+        active_session_key = session_key or (str(session.key) if session is not None else None)
         effective_scope = self.workspace_scopes.for_turn(
             channel=channel,
             message_metadata=metadata,
@@ -1078,7 +1078,7 @@ class AgentLoop:
                 error_message="Sorry, I encountered an error calling the AI model.",
                 concurrent_tools=True,
                 workspace=effective_scope.project_path,
-                session_key=session.key if session else None,
+                session_key=active_session_key,
                 context_block_limit=self.context_block_limit,
                 provider_retry_mode=self.provider_retry_mode,
                 progress_callback=on_progress,

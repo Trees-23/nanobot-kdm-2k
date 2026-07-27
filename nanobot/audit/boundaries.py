@@ -33,6 +33,7 @@ class TurnAuditRecorder:
     ) -> None:
         self.emitter = emitter
         self.turn = turn
+        self.disabled = bool(getattr(emitter, "audit_disabled", False))
         self._finished = False
 
     def common(
@@ -67,6 +68,8 @@ class TurnAuditRecorder:
         }
 
     async def started(self, message: Any) -> None:
+        if self.disabled:
+            return
         if self.turn.link_reason in {"created", "control_trace_created"}:
             trace = TraceCreatedDraft.model_validate(
                 {
@@ -107,6 +110,8 @@ class TurnAuditRecorder:
         await self.emitter.emit(event, payload=payload, critical=True)
 
     async def response_prepared(self, *, response_kind: str) -> None:
+        if self.disabled:
+            return
         event = TurnResponsePreparedDraft.model_validate(
             {**self.common("turn_response_prepared"), "response_kind": response_kind}
         )
@@ -118,6 +123,8 @@ class TurnAuditRecorder:
         target_run_ids: list[str],
         requested_by: str,
     ) -> str:
+        if self.disabled:
+            return new_audit_id()
         event = CancelRequestedDraft.model_validate(
             {
                 **self.common("cancel_requested"),
@@ -134,6 +141,8 @@ class TurnAuditRecorder:
         run: AuditRunContext,
         injection_source: str,
     ) -> None:
+        if self.disabled:
+            return
         event = InputInjectedDraft.model_validate(
             {
                 **self.common("input_injected", run=run),
@@ -149,6 +158,8 @@ class TurnAuditRecorder:
         *,
         run: AuditRunContext,
     ) -> None:
+        if self.disabled:
+            return
         checkpoint_id = str(checkpoint["_audit_checkpoint_id"])
         version = int(checkpoint["_audit_checkpoint_version"])
         phase = str(checkpoint.get("phase") or "unknown")
@@ -183,6 +194,8 @@ class TurnAuditRecorder:
         *,
         run: AuditRunContext,
     ) -> None:
+        if self.disabled:
+            return
         checkpoint_id = str(checkpoint.get("_audit_checkpoint_id") or new_audit_id())
         source_run_id = str(checkpoint.get("_audit_run_id") or checkpoint_id)
         event = CheckpointRestoredDraft.model_validate(
@@ -205,6 +218,8 @@ class TurnAuditRecorder:
         run: AuditRunContext,
         reason: str,
     ) -> None:
+        if self.disabled:
+            return
         checkpoint_id = str(checkpoint.get("_audit_checkpoint_id") or new_audit_id())
         event = CheckpointClearedDraft.model_validate(
             {
@@ -219,6 +234,9 @@ class TurnAuditRecorder:
         await self.emitter.emit(event, critical=True)
 
     async def finished(self, *, status: str) -> None:
+        if self.disabled:
+            self._finished = True
+            return
         if self._finished:
             return
         event = TurnFinishedDraft.model_validate(

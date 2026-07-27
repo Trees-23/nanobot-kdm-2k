@@ -285,7 +285,11 @@ class AgentRunner:
 
     async def run(self, spec: AgentRunSpec) -> AgentRunResult:
         hooks: list[AgentHook] = []
-        if self.audit_emitter is not None and spec.audit_context is not None:
+        if (
+            self.audit_emitter is not None
+            and not getattr(self.audit_emitter, "audit_disabled", False)
+            and spec.audit_context is not None
+        ):
             hooks.append(
                 RunnerAuditHook(
                     self.audit_emitter,

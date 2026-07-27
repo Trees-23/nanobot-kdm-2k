@@ -132,7 +132,12 @@ class _GoalToolsMixin:
         rc = current_request_context()
         emitter = self._audit_emitter
         audit = rc.metadata.get(AUDIT_CONTEXT_META) if rc is not None else None
-        if emitter is None or rc is None or not isinstance(audit, dict):
+        if (
+            emitter is None
+            or getattr(emitter, "audit_disabled", False)
+            or rc is None
+            or not isinstance(audit, dict)
+        ):
             return
         trace_id = audit.get("trace_id")
         turn_id = audit.get("turn_id")
