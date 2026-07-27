@@ -6,6 +6,7 @@ import asyncio
 import json
 import time
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 
 from nanobot.agent.hook import (
@@ -43,6 +44,11 @@ from nanobot.audit.schema import (
     ToolOutputPayloadDraft,
     ToolStartedDraft,
 )
+from nanobot.audit.side_effects import (
+    SideEffectSnapshot,
+    capture_side_effect_after,
+    capture_side_effect_before,
+)
 from nanobot.providers.base import LLMResponse
 from nanobot.providers.observed_call import (
     ProviderAttemptResult,
@@ -75,6 +81,7 @@ class RunnerAuditHook(AgentHook):
         self._tool_ids: dict[str, str] = {}
         self._tool_started_ns: dict[str, int] = {}
         self._tool_params: dict[str, Any] = {}
+        self._tool_side_effects: dict[str, SideEffectSnapshot] = {}
         self._attempt_counts: dict[str, int] = {}
 
     def _common(
@@ -363,13 +370,20 @@ class RunnerAuditHook(AgentHook):
         tool: Any,
         params: Any,
     ) -> None:
-        del tool
         if tool_call.id in self._tool_ids:
             return
         audit_tool_id = new_audit_id()
         self._tool_ids[tool_call.id] = audit_tool_id
         self._tool_started_ns[tool_call.id] = time.monotonic_ns()
         self._tool_params[tool_call.id] = params
+        workspace = getattr(tool, "_workspace", None)
+        self._tool_side_effects[tool_call.id] = capture_side_effect_before(
+            call_id=tool_call.id,
+            tool_name=tool_call.name,
+            tool=tool,
+            params=params,
+            workspace=Path(workspace) if workspace is not None else None,
+        )
         event = ToolStartedDraft.model_validate(
             {
                 **self._common("tool_started", iteration=context.iteration),
@@ -405,6 +419,7 @@ class RunnerAuditHook(AgentHook):
         audit_tool_id = self._tool_ids.pop(tool_call.id)
         started = self._tool_started_ns.pop(tool_call.id, time.monotonic_ns())
         self._tool_params.pop(tool_call.id, None)
+        side_effect_snapshot = self._tool_side_effects.pop(tool_call.id, None)
         status = outcome.status
         if status == "error" and outcome.error_kind in {"TimeoutError", "Timeout"}:
             status = "timeout"
@@ -438,7 +453,11 @@ class RunnerAuditHook(AgentHook):
                 "normalized_error": (
                     {"kind": outcome.error_kind} if outcome.error_kind else None
                 ),
-                "side_effects": [],
+                "side_effects": (
+                    capture_side_effect_after(side_effect_snapshot, outcome.result)
+                    if side_effect_snapshot is not None
+                    else []
+                ),
             },
         )
         await self._emitter.emit(event, payload=payload, critical=True)
