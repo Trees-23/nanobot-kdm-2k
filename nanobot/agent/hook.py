@@ -27,6 +27,13 @@ class RuntimeDecision:
     fields: dict[str, Any]
 
 
+@dataclass(frozen=True, slots=True)
+class ToolAuditOutcome:
+    status: str
+    result: Any
+    error_kind: str | None = None
+
+
 @dataclass(slots=True)
 class AgentHookContext:
     """Mutable per-iteration state exposed to runner hooks."""
@@ -166,6 +173,16 @@ class AgentHook:
     ) -> None:
         pass
 
+    async def after_execute_tool_terminal(
+        self,
+        context: AgentHookContext,
+        tool_call: ToolCallRequest,
+        tool: Any,
+        params: Any,
+        outcome: ToolAuditOutcome,
+    ) -> None:
+        pass
+
     async def emit_reasoning(self, reasoning_content: str | None) -> None:
         pass
 
@@ -206,7 +223,7 @@ class CompositeHook(AgentHook):
 
     async def _for_each_hook_safe(self, method_name: str, *args: Any, **kwargs: Any) -> None:
         for h in self._hooks:
-            if getattr(h, "_reraise", False):
+            if isinstance(h, CompositeHook) or getattr(h, "_reraise", False):
                 await getattr(h, method_name)(*args, **kwargs)
                 continue
 
@@ -308,6 +325,23 @@ class CompositeHook(AgentHook):
             tool,
             params,
             error,
+        )
+
+    async def after_execute_tool_terminal(
+        self,
+        context: AgentHookContext,
+        tool_call: ToolCallRequest,
+        tool: Any,
+        params: Any,
+        outcome: ToolAuditOutcome,
+    ) -> None:
+        await self._for_each_hook_safe(
+            "after_execute_tool_terminal",
+            context,
+            tool_call,
+            tool,
+            params,
+            outcome,
         )
 
     async def emit_reasoning(self, reasoning_content: str | None) -> None:

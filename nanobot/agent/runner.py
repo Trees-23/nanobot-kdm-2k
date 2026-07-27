@@ -22,6 +22,8 @@ from nanobot.agent.hook import (
     AgentRunHookContext,
     CompositeHook,
     ModelRequestSnapshot,
+    RuntimeDecision,
+    ToolAuditOutcome,
 )
 from nanobot.agent.tools.registry import ToolRegistry, is_tool_error_result
 from nanobot.audit.context import AuditRunContext
@@ -526,6 +528,17 @@ class AgentRunner:
                     )
                     if hook.wants_streaming():
                         await hook.on_stream_end(context, resuming=False)
+                    await hook.on_runtime_decision(
+                        context,
+                        RuntimeDecision(
+                            "continuation_requested",
+                            {
+                                "continuation_reason": "empty_response",
+                                "attempt_count": empty_content_retries,
+                                "attempt_limit": _MAX_EMPTY_RETRIES,
+                            },
+                        ),
+                    )
                     await hook.after_iteration(context)
                     continue
                 logger.warning(
@@ -536,6 +549,18 @@ class AgentRunner:
                 )
                 if hook.wants_streaming():
                     await hook.on_stream_end(context, resuming=False)
+                await hook.on_runtime_decision(
+                    context,
+                    RuntimeDecision(
+                        "finalization_requested",
+                        {
+                            "finalization_reason": "empty_response",
+                            "remaining_iteration_budget": max(
+                                0, spec.max_iterations - iteration - 1
+                            ),
+                        },
+                    ),
+                )
                 retry_messages = self._finalization_retry_messages(messages_for_model)
                 response = await self._request_finalization_retry(
                     spec, messages_for_model, hook, context
@@ -560,6 +585,17 @@ class AgentRunner:
                     )
                     if hook.wants_streaming():
                         await hook.on_stream_end(context, resuming=True)
+                    await hook.on_runtime_decision(
+                        context,
+                        RuntimeDecision(
+                            "continuation_requested",
+                            {
+                                "continuation_reason": "length",
+                                "attempt_count": length_recovery_count,
+                                "attempt_limit": _MAX_LENGTH_RECOVERIES,
+                            },
+                        ),
+                    )
                     messages.append(build_assistant_message(
                         clean,
                         reasoning_content=response.reasoning_content,
@@ -670,6 +706,20 @@ class AgentRunner:
                 had_injections = True
             final_content = None
             if spec.finalize_on_max_iterations:
+                await hook.on_runtime_decision(
+                    AgentHookContext(
+                        iteration=spec.max_iterations,
+                        messages=messages,
+                        session_key=spec.session_key,
+                    ),
+                    RuntimeDecision(
+                        "finalization_requested",
+                        {
+                            "finalization_reason": "max_iterations",
+                            "remaining_iteration_budget": 0,
+                        },
+                    ),
+                )
                 final_content = await self._try_finalize_after_max_iterations(
                     spec,
                     hook,
@@ -1191,6 +1241,55 @@ class AgentRunner:
         return results, events, fatal_error
 
     async def _run_tool(
+        self,
+        spec: AgentRunSpec,
+        tool_call: ToolCallRequest,
+        external_lookup_counts: dict[str, int],
+        workspace_violation_counts: dict[str, int],
+        hook: AgentHook | None = None,
+        context: AgentHookContext | None = None,
+    ) -> tuple[Any, dict[str, str], BaseException | None]:
+        hook = hook or AgentHook()
+        context = context or AgentHookContext(iteration=0, messages=[])
+        outcome = ToolAuditOutcome("error", None, "internal_error")
+        try:
+            result = await self._run_tool_inner(
+                spec,
+                tool_call,
+                external_lookup_counts,
+                workspace_violation_counts,
+                hook,
+                context,
+            )
+            payload, event, fatal_error = result
+            status = event.get("status", "error")
+            detail = event.get("detail", "").lower()
+            if status != "ok" and any(
+                marker in detail for marker in ("blocked", "violation", "boundary")
+            ):
+                status = "blocked"
+            outcome = ToolAuditOutcome(
+                status=status,
+                result=payload,
+                error_kind=type(fatal_error).__name__ if fatal_error else None,
+            )
+            return result
+        except asyncio.CancelledError:
+            outcome = ToolAuditOutcome("cancelled", None, "task_cancelled")
+            raise
+        except BaseException as error:
+            outcome = ToolAuditOutcome("error", None, type(error).__name__)
+            raise
+        finally:
+            await hook.after_execute_tool_terminal(
+                context,
+                tool_call,
+                None,
+                tool_call.arguments,
+                outcome,
+            )
+
+    async def _run_tool_inner(
         self,
         spec: AgentRunSpec,
         tool_call: ToolCallRequest,

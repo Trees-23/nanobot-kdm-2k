@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import time
 from datetime import UTC, datetime
 from typing import Any
@@ -17,6 +18,8 @@ from nanobot.agent.hook import (
 from nanobot.audit.context import AuditRunContext
 from nanobot.audit.ids import new_audit_id
 from nanobot.audit.schema import (
+    ContinuationRequestedDraft,
+    FinalizationRequestedDraft,
     IterationFinishedDraft,
     IterationStartedDraft,
     ModelFirstOutputDraft,
@@ -25,11 +28,16 @@ from nanobot.audit.schema import (
     ModelRequestStartedDraft,
     ModelResponsePayloadDraft,
     ModelResponseReceivedDraft,
+    PolicyBlockedDraft,
     ReasoningSummaryPayloadDraft,
     ReasoningSummaryReceivedDraft,
     RunConfigPayloadDraft,
     RunFinishedDraft,
     RunStartedDraft,
+    ToolFinishedDraft,
+    ToolInputPayloadDraft,
+    ToolOutputPayloadDraft,
+    ToolStartedDraft,
 )
 from nanobot.providers.base import LLMResponse
 from nanobot.utils.llm_runtime import LLMRuntime
@@ -54,6 +62,9 @@ class RunnerAuditHook(AgentHook):
         self._first_output: set[tuple[str, str]] = set()
         self._current_model_call_id: str | None = None
         self._run_finished = False
+        self._tool_ids: dict[str, str] = {}
+        self._tool_started_ns: dict[str, int] = {}
+        self._tool_params: dict[str, Any] = {}
 
     def _common(
         self,
@@ -295,7 +306,126 @@ class RunnerAuditHook(AgentHook):
         context: AgentHookContext,
         decision: RuntimeDecision,
     ) -> None:
-        del context, decision
+        if decision.decision_type == "continuation_requested":
+            model_call_id = context.model_call_id or self._current_model_call_id
+            if model_call_id is None:
+                return
+            event = ContinuationRequestedDraft.model_validate(
+                {
+                    **self._common(
+                        "continuation_requested",
+                        iteration=context.iteration,
+                        model_call_id=model_call_id,
+                    ),
+                    **decision.fields,
+                }
+            )
+            await self._emitter.emit(event)
+        elif decision.decision_type == "finalization_requested":
+            event = FinalizationRequestedDraft.model_validate(
+                {
+                    **self._common(
+                        "finalization_requested", iteration=context.iteration
+                    ),
+                    **decision.fields,
+                }
+            )
+            await self._emitter.emit(event)
+
+    @staticmethod
+    def _json_safe(value: Any) -> Any:
+        try:
+            json.dumps(value, allow_nan=False)
+        except (TypeError, ValueError):
+            return repr(value)
+        return value
+
+    async def before_execute_tool(
+        self,
+        context: AgentHookContext,
+        tool_call: Any,
+        tool: Any,
+        params: Any,
+    ) -> None:
+        del tool
+        if tool_call.id in self._tool_ids:
+            return
+        audit_tool_id = new_audit_id()
+        self._tool_ids[tool_call.id] = audit_tool_id
+        self._tool_started_ns[tool_call.id] = time.monotonic_ns()
+        self._tool_params[tool_call.id] = params
+        event = ToolStartedDraft.model_validate(
+            {
+                **self._common("tool_started", iteration=context.iteration),
+                "tool_call_id": audit_tool_id,
+                "tool_name": tool_call.name,
+            }
+        )
+        payload = ToolInputPayloadDraft(
+            payload_id=new_audit_id(),
+            event_id=event.event_id,
+            content={
+                "tool_name": tool_call.name,
+                "arguments": (
+                    self._json_safe(params)
+                    if isinstance(params, dict)
+                    else {"value": self._json_safe(params)}
+                ),
+                "tool_schema_hash": "",
+            },
+        )
+        await self._emitter.emit(event, payload=payload)
+
+    async def after_execute_tool_terminal(
+        self,
+        context: AgentHookContext,
+        tool_call: Any,
+        tool: Any,
+        params: Any,
+        outcome: Any,
+    ) -> None:
+        if tool_call.id not in self._tool_ids:
+            await self.before_execute_tool(context, tool_call, tool, params)
+        audit_tool_id = self._tool_ids.pop(tool_call.id)
+        started = self._tool_started_ns.pop(tool_call.id, time.monotonic_ns())
+        self._tool_params.pop(tool_call.id, None)
+        status = outcome.status
+        if status == "error" and outcome.error_kind in {"TimeoutError", "Timeout"}:
+            status = "timeout"
+        if status == "blocked":
+            policy = PolicyBlockedDraft.model_validate(
+                {
+                    **self._common("policy_blocked", iteration=context.iteration),
+                    "tool_call_id": audit_tool_id,
+                    "policy_name": outcome.error_kind or "tool_boundary",
+                    "policy_version": "v1",
+                    "threshold": 1,
+                    "observed_count": 1,
+                }
+            )
+            await self._emitter.emit(policy)
+        event = ToolFinishedDraft.model_validate(
+            {
+                **self._common("tool_finished", iteration=context.iteration),
+                "tool_call_id": audit_tool_id,
+                "tool_name": tool_call.name,
+                "elapsed_ms": max(0, (time.monotonic_ns() - started) // 1_000_000),
+                "status": status,
+            }
+        )
+        payload = ToolOutputPayloadDraft(
+            payload_id=new_audit_id(),
+            event_id=event.event_id,
+            content={
+                "tool_name": tool_call.name,
+                "result": self._json_safe(outcome.result),
+                "normalized_error": (
+                    {"kind": outcome.error_kind} if outcome.error_kind else None
+                ),
+                "side_effects": [],
+            },
+        )
+        await self._emitter.emit(event, payload=payload, critical=True)
 
     async def on_finally(self, context: AgentRunHookContext) -> None:
         if self._run_finished:

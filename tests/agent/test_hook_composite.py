@@ -14,6 +14,7 @@ from nanobot.agent.hook import (
     CompositeHook,
     ModelRequestSnapshot,
     RuntimeDecision,
+    ToolAuditOutcome,
 )
 from nanobot.providers.base import LLMResponse
 
@@ -109,6 +110,23 @@ async def test_composite_fans_out_model_and_decision_boundaries_with_isolation()
         "error:TimeoutError",
         "decision:continue",
     ]
+
+
+@pytest.mark.asyncio
+async def test_composite_fans_out_guaranteed_tool_terminal():
+    outcomes: list[str] = []
+
+    class Recording(AgentHook):
+        async def after_execute_tool_terminal(
+            self, context, tool_call, tool, params, outcome
+        ) -> None:
+            outcomes.append(outcome.status)
+
+    hook = CompositeHook([Recording(), Recording()])
+    await hook.after_execute_tool_terminal(
+        _ctx(), object(), object(), {}, ToolAuditOutcome("cancelled", None, "task_cancelled")
+    )
+    assert outcomes == ["cancelled", "cancelled"]
 
 
 @pytest.mark.asyncio
