@@ -12,7 +12,10 @@ from nanobot.agent.hook import (
     AgentRunHookContext,
     AgentTurnHookContext,
     CompositeHook,
+    ModelRequestSnapshot,
+    RuntimeDecision,
 )
+from nanobot.providers.base import LLMResponse
 
 
 def _ctx() -> AgentHookContext:
@@ -56,6 +59,56 @@ async def test_composite_fans_out_before_iteration():
     ctx = _ctx()
     await hook.before_iteration(ctx)
     assert calls == ["A:0", "B:0"]
+
+
+@pytest.mark.asyncio
+async def test_composite_fans_out_model_and_decision_boundaries_with_isolation():
+    calls: list[str] = []
+
+    class Bad(AgentHook):
+        async def before_model_request(self, context, request) -> None:
+            raise RuntimeError("request hook failed")
+
+        async def after_model_response(self, context, response) -> None:
+            raise RuntimeError("response hook failed")
+
+        async def on_model_request_error(self, context, error) -> None:
+            raise RuntimeError("error hook failed")
+
+        async def on_runtime_decision(self, context, decision) -> None:
+            raise RuntimeError("decision hook failed")
+
+    class Good(AgentHook):
+        async def before_model_request(self, context, request) -> None:
+            calls.append(f"before:{request.model_call_id}")
+
+        async def after_model_response(self, context, response) -> None:
+            calls.append(f"after:{response.content}")
+
+        async def on_model_request_error(self, context, error) -> None:
+            calls.append(f"error:{type(error).__name__}")
+
+        async def on_runtime_decision(self, context, decision) -> None:
+            calls.append(f"decision:{decision.decision_type}")
+
+    request = ModelRequestSnapshot(
+        model_call_id="model-1",
+        messages=[],
+        tools=[],
+        runtime=MagicMock(),
+    )
+    hook = CompositeHook([Bad(), Good()])
+    await hook.before_model_request(_ctx(), request)
+    await hook.after_model_response(_ctx(), LLMResponse(content="ok"))
+    await hook.on_model_request_error(_ctx(), TimeoutError())
+    await hook.on_runtime_decision(_ctx(), RuntimeDecision("continue", {"count": 1}))
+
+    assert calls == [
+        "before:model-1",
+        "after:ok",
+        "error:TimeoutError",
+        "decision:continue",
+    ]
 
 
 @pytest.mark.asyncio

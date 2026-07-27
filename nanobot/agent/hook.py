@@ -10,6 +10,21 @@ from typing import Any
 from loguru import logger
 
 from nanobot.providers.base import LLMResponse, ToolCallRequest
+from nanobot.utils.llm_runtime import LLMRuntime
+
+
+@dataclass(frozen=True, slots=True)
+class ModelRequestSnapshot:
+    model_call_id: str
+    messages: list[dict[str, Any]]
+    tools: list[dict[str, Any]]
+    runtime: LLMRuntime
+
+
+@dataclass(frozen=True, slots=True)
+class RuntimeDecision:
+    decision_type: str
+    fields: dict[str, Any]
 
 
 @dataclass(slots=True)
@@ -91,6 +106,34 @@ class AgentHook:
         pass
 
     async def before_execute_tools(self, context: AgentHookContext) -> None:
+        pass
+
+    async def before_model_request(
+        self,
+        context: AgentHookContext,
+        request: ModelRequestSnapshot,
+    ) -> None:
+        pass
+
+    async def after_model_response(
+        self,
+        context: AgentHookContext,
+        response: LLMResponse,
+    ) -> None:
+        pass
+
+    async def on_model_request_error(
+        self,
+        context: AgentHookContext,
+        error: BaseException,
+    ) -> None:
+        pass
+
+    async def on_runtime_decision(
+        self,
+        context: AgentHookContext,
+        decision: RuntimeDecision,
+    ) -> None:
         pass
 
     async def before_execute_tool(
@@ -194,6 +237,34 @@ class CompositeHook(AgentHook):
 
     async def before_execute_tools(self, context: AgentHookContext) -> None:
         await self._for_each_hook_safe("before_execute_tools", context)
+
+    async def before_model_request(
+        self,
+        context: AgentHookContext,
+        request: ModelRequestSnapshot,
+    ) -> None:
+        await self._for_each_hook_safe("before_model_request", context, request)
+
+    async def after_model_response(
+        self,
+        context: AgentHookContext,
+        response: LLMResponse,
+    ) -> None:
+        await self._for_each_hook_safe("after_model_response", context, response)
+
+    async def on_model_request_error(
+        self,
+        context: AgentHookContext,
+        error: BaseException,
+    ) -> None:
+        await self._for_each_hook_safe("on_model_request_error", context, error)
+
+    async def on_runtime_decision(
+        self,
+        context: AgentHookContext,
+        decision: RuntimeDecision,
+    ) -> None:
+        await self._for_each_hook_safe("on_runtime_decision", context, decision)
 
     async def before_execute_tool(
         self,
