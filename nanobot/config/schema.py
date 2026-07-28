@@ -400,6 +400,25 @@ class ToolsConfig(Base):
     ssrf_whitelist: list[str] = Field(default_factory=list)  # CIDR ranges to exempt from SSRF blocking (e.g. ["100.64.0.0/10"] for Tailscale)
 
 
+class AuditConfig(Base):
+    """Durable agent audit evidence configuration."""
+
+    mode: Literal["full", "metadata_only", "off"] = "full"
+    path: str | None = None
+    segment_max_bytes: int = Field(default=67_108_864, ge=1_048_576)
+    fsync_interval_seconds: float = Field(default=5.0, gt=0)
+    fsync_record_interval: int = Field(default=100, ge=1)
+    writer_queue_capacity: int = Field(default=4096, ge=1)
+    writer_queue_max_bytes: int = Field(default=268_435_456, ge=1_048_576)
+    enqueue_timeout_ms: int = Field(default=25, ge=0)
+    critical_ack_timeout_ms: int = Field(default=2000, ge=1)
+    preview_max_chars: int = Field(default=512, ge=64)
+    index_enabled: bool = True
+    warn_plaintext_payloads: bool = True
+    additional_secret_keys: list[str] = Field(default_factory=list)
+    additional_secret_patterns: list[str] = Field(default_factory=list)
+
+
 class Config(BaseSettings):
     """Root configuration for nanobot."""
 
@@ -410,6 +429,7 @@ class Config(BaseSettings):
     api: ApiConfig = Field(default_factory=ApiConfig)
     gateway: GatewayConfig = Field(default_factory=GatewayConfig)
     tools: ToolsConfig = Field(default_factory=ToolsConfig)
+    audit: AuditConfig = Field(default_factory=AuditConfig)
     model_presets: dict[str, ModelPresetConfig] = Field(
         default_factory=dict,
         validation_alias=AliasChoices("modelPresets", "model_presets"),

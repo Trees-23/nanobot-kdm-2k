@@ -37,6 +37,24 @@ def _make_loop(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_direct_processing_starts_injected_audit_runtime(tmp_path):
+    runtime = MagicMock()
+    runtime.ensure_started = AsyncMock()
+    runtime.close = AsyncMock()
+    loop = _make_loop(tmp_path)
+    loop.audit_runtime = runtime
+    loop.subagents.close = AsyncMock()
+    loop._connect_mcp = AsyncMock()
+    loop._process_message = AsyncMock(return_value=None)
+
+    await loop.process_direct("hello")
+    await loop.close_mcp()
+
+    runtime.ensure_started.assert_awaited_once()
+    runtime.close.assert_awaited_once()
+
+
+@pytest.mark.asyncio
 async def test_ephemeral_runner_enters_and_restores_turn_scopes(tmp_path):
     loop = _make_loop(tmp_path)
 

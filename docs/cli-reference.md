@@ -293,6 +293,53 @@ remain accepted as no-op compatibility aliases.
 
 See [`providers.md`](./providers.md#oauth-providers) for when OAuth providers need explicit provider/model selection.
 
+## Audit Evidence
+
+`nanobot audit` reads the append-only Agent audit evidence. Commands use the selected instance's
+configured `audit.path`, or its default `<config-directory>/audit/v1`. Pass `--audit-root` to inspect
+an archive or copied evidence bundle directly.
+
+```bash
+# List newest Traces and continue with the returned cursor.
+nanobot audit list --limit 50
+nanobot audit list --limit 50 --cursor '<cursor>'
+
+# Reconstruct a Trace. Payloads are hidden unless explicitly requested.
+nanobot audit show <trace-id>
+nanobot audit show <trace-id> --include-payloads
+
+# Verify one Trace or every discovered process lineage.
+nanobot audit verify <trace-id>
+nanobot audit verify --all
+
+# Export sanitized evidence, full plaintext, or a verification bundle.
+nanobot audit export <trace-id> -o trace.json --mode sanitized
+nanobot audit export <trace-id> -o trace-full.json --mode full
+nanobot audit export <trace-id> -o trace-bundle.json --mode evidence_bundle
+
+# Build/check the disposable index and aggregate all indexed evidence.
+nanobot audit index status
+nanobot audit index rebuild
+nanobot audit stats --all --group-by source_type
+nanobot audit doctor
+```
+
+`show` is sanitized by default. `--include-payloads` and `export --mode full` can expose permanently
+stored plaintext prompts, responses, reasoning, tool inputs, and tool outputs, and therefore print
+a warning. Export files are ordinary files outside the audit hash lineage; protect them separately.
+
+`verify` exits nonzero for non-valid evidence. Verification detects damage and deletion relative to
+the catalogs that remain present. Local hashes are unsigned and cannot prove non-repudiation or
+detect deletion of the entire audit root. No command automatically expires or deletes evidence.
+
+For another instance, pass `--config /path/to/config.json` to every command. `--audit-root` takes
+precedence over `--config` and is useful for offline investigation:
+
+```bash
+nanobot audit verify --all --config ~/.nanobot/config.json
+nanobot audit doctor --audit-root /mnt/audit-archive/v1
+```
+
 ## Useful First Checks
 
 ```bash
