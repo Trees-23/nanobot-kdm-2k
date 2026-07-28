@@ -11,7 +11,6 @@ x-common-config: &common-config
   user: "1000:1000"
   volumes:
     - ./runtime:/home/nanobot/.nanobot
-    - nanobot-audit:/home/nanobot/.nanobot/audit
   environment:
     # Git-over-SSH and GitHub's API are separate authentication paths. Set a
     # fine-grained PAT in an ignored .env file to activate GitHub MCP tools.
@@ -61,6 +60,3 @@ services:
     command: ["status"]
     stdin_open: true
     tty: true
-
-volumes:
-  nanobot-audit:

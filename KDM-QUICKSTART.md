@@ -56,9 +56,12 @@ runtime/workspace/sessions/  # 对话历史和上下文
 runtime/workspace/HEARTBEAT.md
 runtime/cron/                # 定时任务
 runtime/webui/               # WebUI 历史
+runtime/audit/v1/            # Agent 审计事件、完整 payload、catalog 和查询索引
 ```
 
-`runtime/` 包含 API Key、聊天记录和个人记忆，已加入 `.gitignore`，不要提交到 Git。
+`runtime/` 包含 API Key、聊天记录、个人记忆和完整明文审计 payload，已加入
+`.gitignore`，不要提交到 Git。审计记录可通过
+`docker compose run --rm nanobot-cli audit ...` 查询。
 
 修改配置后重启：
 
