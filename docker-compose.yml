@@ -10,7 +10,11 @@ x-common-config: &common-config
   # Starting non-root also keeps cap_drop: ALL compatible with entrypoint.sh.
   user: "1000:1000"
   volumes:
-    - ~/.nanobot:/home/nanobot/.nanobot
+    - ./runtime:/home/nanobot/.nanobot
+  environment:
+    # Git-over-SSH and GitHub's API are separate authentication paths. Set a
+    # fine-grained PAT in an ignored .env file to activate GitHub MCP tools.
+    GITHUB_PERSONAL_ACCESS_TOKEN: ${GITHUB_PERSONAL_ACCESS_TOKEN:-}
   cap_drop:
     - ALL
 

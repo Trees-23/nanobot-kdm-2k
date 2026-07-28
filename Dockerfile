@@ -13,6 +13,26 @@ RUN apt-get update && \
     apt-get install -y --no-install-recommends ca-certificates git bubblewrap openssh-client libmagic1 && \
     rm -rf /var/lib/apt/lists/*
 
+# MCP runtime dependencies. Reuse the Node.js runtime from the WebUI build
+# stage, preinstall the maintained reference servers, and install GitHub's
+# official Go-based MCP server instead of the deprecated npm package.
+COPY --from=webui-builder /usr/local/bin/node /usr/local/bin/node
+COPY --from=webui-builder /usr/local/lib/node_modules/ /usr/local/lib/node_modules/
+RUN ln -sf ../lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm && \
+    ln -sf ../lib/node_modules/npm/bin/npx-cli.js /usr/local/bin/npx && \
+    npm install -g \
+        @modelcontextprotocol/server-filesystem@2026.7.10 \
+        @modelcontextprotocol/server-memory@2026.7.4 && \
+    npm cache clean --force
+
+ARG GITHUB_MCP_VERSION=1.6.0
+# This project currently deploys on x86_64 WSL/Docker. Using Docker's remote
+# ADD avoids rebuilding the slow apt layer solely to install a download client.
+ADD https://github.com/github/github-mcp-server/releases/download/v${GITHUB_MCP_VERSION}/github-mcp-server_Linux_x86_64.tar.gz /tmp/github-mcp-server.tar.gz
+RUN tar -xzf /tmp/github-mcp-server.tar.gz -C /usr/local/bin github-mcp-server && \
+    chmod +x /usr/local/bin/github-mcp-server && \
+    rm -f /tmp/github-mcp-server.tar.gz
+
 WORKDIR /app
 
 # Keep the runtime environment writable by the non-root nanobot user. Enabled
