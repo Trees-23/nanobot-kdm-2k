@@ -1,5 +1,26 @@
 This file provides guidance to AI coding agents working with this repository.
 
+## 仓库 Git 与交付流程
+
+本仓库继承用户的全局 Git 与 PR 偏好，并补充以下规则：
+
+- 面向当前 fork 开发时，任务分支以 `origin/main` 为基线，PR 目标为
+  `Trees-23/nanobot-kdm-2k:main`。
+- 只有用户明确要求向上游贡献时，才以 `upstream/main` 为基线或向 `HKUDS/nanobot` 提交 PR。
+- 不得从脏的本地 `main` 或包含无关本地提交的分支开始任务；必要时从正确的远端目标创建独立
+  worktree。
+- Codex 创建的提交说明、PR 文本和合并里程碑说明必须遵循全局指令并全部使用中文。
+- 每个经过验证的工作单元都要推送，并持续维护同一个 PR。未经用户明确确认，绝不合并到 `main`。
+- 仅文档改动需要审查聚焦的差异，并检查链接和命令是否合理。Python 改动需要运行最接近的
+  `pytest` 测试，并对改动涉及的 Python 路径运行 `ruff check`。WebUI 改动需要运行最接近的
+  `bun run test` 测试；影响构建行为或捆绑产物时还要运行 `bun run build`。混合改动需要验证
+  两套技术栈。
+- 修改 `nanobot/agent/loop.py` 或 `nanobot/agent/runner.py` 时，除非能够证明不影响行为，否则必须
+  补充或运行聚焦的集成测试。修改安全边界时必须验证相应的拒绝或路径约束行为。
+- 不要运行 `ruff format`；本仓库明确避免大范围格式化造成的历史噪声。机械清理不得混入功能提交。
+- 如果改动影响核心 Agent 流程、提示词行为、持久化、安全边界、配置兼容性或 WebUI 协议契约，
+  必须在 PR 正文中明确说明。
+
 ## Project Overview
 
 nanobot is a lightweight, open-source AI agent framework written in Python with a React/TypeScript WebUI. It centers around a small agent loop that receives messages from chat channels, invokes an LLM provider, executes tools, and manages session memory.
