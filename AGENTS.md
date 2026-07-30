@@ -6,11 +6,15 @@ This file provides guidance to AI coding agents working with this repository.
 
 - 面向当前 fork 开发时，任务分支以 `origin/main` 为基线，PR 目标为
   `Trees-23/nanobot-kdm-2k:main`。
+- `upstream` 指向项目所关联的外部上游仓库。除非用户明确说要“拉取上游更新”或“同步上游”，
+  不得对 `upstream` 执行 `fetch`、`pull`，也不得把 `upstream` 的提交 merge 或 rebase 到本项目。
 - 只有用户明确要求向上游贡献时，才以 `upstream/main` 为基线或向 `HKUDS/nanobot` 提交 PR。
 - 不得从脏的本地 `main` 或包含无关本地提交的分支开始任务；必要时从正确的远端目标创建独立
   worktree。
 - Codex 创建的提交说明、PR 文本和合并里程碑说明必须遵循全局指令并全部使用中文。
 - 每个经过验证的工作单元都要推送，并持续维护同一个 PR。未经用户明确确认，绝不合并到 `main`。
+- 同一任务的后续提交都推送到同一个功能分支并自动进入同一个 PR，不需要用户逐个确认提交；任务全部
+  完成后，只在合并整个 PR 到 `main` 前询问一次。
 - 仅文档改动需要审查聚焦的差异，并检查链接和命令是否合理。Python 改动需要运行最接近的
   `pytest` 测试，并对改动涉及的 Python 路径运行 `ruff check`。WebUI 改动需要运行最接近的
   `bun run test` 测试；影响构建行为或捆绑产物时还要运行 `bun run build`。混合改动需要验证
