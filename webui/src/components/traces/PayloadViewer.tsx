@@ -1,17 +1,20 @@
 import { AlertTriangle, LoaderCircle, X } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
+import type { AuditApiError } from "@/lib/audit-api";
 import type { AuditPayloadResponse } from "@/lib/audit-types";
 
 export function PayloadViewer({
   payload,
   loading,
   error,
+  onRetry,
   onClose,
 }: {
   payload: AuditPayloadResponse | null;
   loading: boolean;
-  error: string | null;
+  error: AuditApiError | null;
+  onRetry: () => void;
   onClose: () => void;
 }) {
   return (
@@ -35,9 +38,41 @@ export function PayloadViewer({
             <LoaderCircle className="h-4 w-4 animate-spin motion-reduce:animate-none" />正在读取
           </div>
         ) : error ? (
-          <div className="text-xs text-destructive">{error}</div>
+          <div role="alert" className="text-xs">
+            <p className="font-medium text-destructive">
+              {error.status === 401
+                ? "认证已失效"
+                : error.status === 404
+                  ? "Payload 未找到、已清理或已过期"
+                  : error.status === 413
+                    ? "Payload 超过服务端有界读取上限"
+                    : error.status === 503
+                      ? "Payload 暂时不可用"
+                      : "Payload 读取失败"}
+            </p>
+            <p className="mt-1 text-muted-foreground">
+              {error.status === 401
+                ? "正在复用现有认证入口；若刷新失败将返回认证页。"
+                : error.status === 404
+                  ? "服务端无法可靠区分证据从未存在、定位失效或保留期清理。"
+                  : error.status === 413
+                    ? "不会自动下载或绕过服务端上限。"
+                    : error.status === 503
+                      ? "审计索引可能正在构建、滞后，或本次查找已超时。"
+                      : error.message}
+            </p>
+            {error.retryable || error.status === 503 ? (
+              <Button type="button" variant="outline" size="sm" className="mt-3 h-7 text-[11px]" onClick={onRetry}>
+                重试
+              </Button>
+            ) : null}
+          </div>
         ) : payload && !payload.available ? (
-          <div className="text-xs text-muted-foreground">Payload 不可用：{payload.reason}</div>
+          <div className="text-xs text-muted-foreground">
+            {payload.reason === "metadata_only"
+              ? "当前 Audit 仅保存元数据，没有可读取的 Payload 内容。"
+              : `Payload 不可用：${payload.reason ?? "原因未知"}`}
+          </div>
         ) : payload ? (
           <>
             {payload.truncated ? <p className="mb-2 text-[11px] text-amber-700 dark:text-amber-300">内容已按服务端上限截断</p> : null}

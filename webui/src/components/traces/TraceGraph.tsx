@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactElement } from "react";
 import {
   Background,
   BaseEdge,
@@ -29,6 +29,12 @@ import {
   type CollapseGroupNodeData,
 } from "@/components/traces/nodes/CollapseGroupNode";
 import { Button } from "@/components/ui/button";
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
+} from "@/components/ui/tooltip";
 import type { AuditGraphNode, AuditGraphResponse, TraceEdgeType } from "@/lib/audit-types";
 import { auditNodeTypeLabel, auditStatusLabel } from "@/lib/audit-display";
 import { cn } from "@/lib/utils";
@@ -79,12 +85,17 @@ function AuditEdge(props: EdgeProps) {
 
 const edgeTypes = { audit: AuditEdge };
 
+interface FocusResult {
+  nodeIds: Set<string>;
+  edgeIds: Set<string>;
+}
+
 function relatedIds(
   graph: AuditGraphResponse,
   selectedId: string | null,
   mode: TraceFocusMode,
-): Set<string> {
-  if (!selectedId || !mode) return new Set();
+): FocusResult {
+  if (!selectedId || !mode) return { nodeIds: new Set(), edgeIds: new Set() };
   const allowed: Record<Exclude<TraceFocusMode, null>, TraceEdgeType[]> = {
     causal: ["caused_by", "retry", "retry_of"],
     context: ["sequence"],
@@ -92,6 +103,7 @@ function relatedIds(
     resume: ["result_return", "resumed_from"],
   };
   const result = new Set([selectedId]);
+  const edgeIds = new Set<string>();
   let changed = true;
   while (changed) {
     changed = false;
@@ -101,10 +113,20 @@ function relatedIds(
         if (!result.has(edge.source) || !result.has(edge.target)) changed = true;
         result.add(edge.source);
         result.add(edge.target);
+        edgeIds.add(edge.id);
       }
     });
   }
-  return result;
+  return edgeIds.size
+    ? { nodeIds: result, edgeIds }
+    : { nodeIds: new Set(), edgeIds: new Set() };
+}
+
+function motionDuration(duration: number): number {
+  return typeof window !== "undefined"
+    && window.matchMedia?.("(prefers-reduced-motion: reduce)").matches
+    ? 0
+    : duration;
 }
 
 function fallbackPositions(nodes: AuditGraphNode[]) {
@@ -137,6 +159,9 @@ export function TraceGraph({
   );
   const flowRef = useRef<ReactFlowInstance<RenderNode, Edge> | null>(null);
   const requestId = useRef(0);
+  const legendRef = useRef<HTMLDivElement>(null);
+  const [legendOpen, setLegendOpen] = useState(false);
+  const [feedback, setFeedback] = useState<string | null>(null);
 
   const hiddenAttemptIds = useMemo(() => new Set(
     graph.expansion_groups
@@ -210,10 +235,36 @@ export function TraceGraph({
     return () => worker.terminate();
   }, [activeCollapseGroups, graph.edges, graph.nodes, hiddenAttemptIds, visibleSemantic]);
 
-  const highlighted = useMemo(
+  const focusResult = useMemo(
     () => relatedIds(graph, selectedNodeId, focusMode),
     [focusMode, graph, selectedNodeId],
   );
+  const highlighted = focusResult.nodeIds;
+
+  useEffect(() => {
+    if (!focusMode || !focusResult.nodeIds.size) return;
+    void flowRef.current?.fitView({
+      nodes: [...focusResult.nodeIds].map((id) => ({ id })),
+      duration: motionDuration(220),
+      padding: 0.35,
+    });
+  }, [focusMode, focusResult]);
+
+  useEffect(() => {
+    if (!legendOpen) return;
+    legendRef.current?.focus();
+    const close = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setLegendOpen(false);
+    };
+    window.addEventListener("keydown", close);
+    return () => window.removeEventListener("keydown", close);
+  }, [legendOpen]);
+
+  useEffect(() => {
+    if (!feedback) return;
+    const timer = window.setTimeout(() => setFeedback(null), 2_000);
+    return () => window.clearTimeout(timer);
+  }, [feedback]);
 
   const toggleExpand = useCallback((node: AuditGraphNode) => {
     const group = graph.expansion_groups.find((candidate) => candidate.owner_node_id === node.id);
@@ -311,17 +362,36 @@ export function TraceGraph({
         : "top-target",
       markerEnd: { type: MarkerType.ArrowClosed, width: 12, height: 12 },
       zIndex: ["caused_by", "spawn_branch", "result_return"].includes(edge.type) ? 3 : 1,
-      style: highlighted.size > 0 && (!highlighted.has(edge.source) || !highlighted.has(edge.target))
+      style: highlighted.size > 0 && !focusResult.edgeIds.has(edge.id)
         ? { opacity: 0.16 }
         : undefined,
-    })), [graph.edges, hiddenAttemptIds, hiddenCollapsedIds, highlighted]);
+    })), [focusResult.edgeIds, graph.edges, hiddenAttemptIds, hiddenCollapsedIds, highlighted]);
 
   const locateFirstAnomaly = () => {
     if (!graph.first_anomaly) return;
     onSelectNode(graph.first_anomaly.node_id);
     onFocusMode("causal");
-    void flowRef.current?.fitView({ nodes: [{ id: graph.first_anomaly.node_id }], duration: 260, padding: 0.8 });
+    void flowRef.current?.fitView({ nodes: [{ id: graph.first_anomaly.node_id }], duration: motionDuration(260), padding: 0.8 });
+    const anomaly = graph.nodes.find((node) => node.id === graph.first_anomaly?.node_id);
+    setFeedback(anomaly?.summary.error_summary ?? "已定位首个异常");
   };
+
+  const focusLabels: Record<Exclude<TraceFocusMode, null>, string> = {
+    causal: "因果链",
+    context: "执行上下文",
+    branch: "结构分支",
+    resume: "恢复链路",
+  };
+
+  const toolbarButton = (
+    label: string,
+    button: ReactElement,
+  ) => (
+    <Tooltip>
+      <TooltipTrigger asChild>{button}</TooltipTrigger>
+      <TooltipContent side="bottom">{label}</TooltipContent>
+    </Tooltip>
+  );
 
   return (
     <div
@@ -364,26 +434,73 @@ export function TraceGraph({
         <Controls position="bottom-left" showInteractive={false} />
         {visibleSemantic.length > 24 ? <MiniMap position="bottom-right" pannable zoomable /> : null}
       </ReactFlow>
-      <div className="absolute left-3 top-3 z-10 flex items-center gap-1 rounded-md border border-border/70 bg-background/95 p-1 shadow-sm backdrop-blur">
-        <Button type="button" variant="ghost" size="icon" className="h-8 w-8" aria-label="适配整张图" title="适配整张图" onClick={() => void flowRef.current?.fitView({ padding: 0.2, duration: 200 })}>
-          <Focus className="h-3.5 w-3.5" />
-        </Button>
-        <Button type="button" variant="ghost" size="icon" className="h-8 w-8" aria-label="定位主轴" title="定位主轴" onClick={() => {
-          const main = visibleSemantic.find((node) => node.lane_kind === "main" && node.type !== "run")
-            ?? visibleSemantic.find((node) => node.lane_kind === "main")
-            ?? visibleSemantic[0];
-          if (main) void flowRef.current?.fitView({ nodes: [{ id: main.id }], duration: 200, padding: 0.8 });
-        }}>
-          <LocateFixed className="h-3.5 w-3.5" />
-        </Button>
-        <Button type="button" variant="ghost" size="icon" className={cn("h-8 w-8", graph.first_anomaly && "text-amber-600")} disabled={!graph.first_anomaly} aria-label="定位首个异常" title="定位首个异常" onClick={locateFirstAnomaly}>
-          <AlertTriangle className="h-3.5 w-3.5" />
-        </Button>
-        <Button type="button" variant="ghost" size="icon" className="h-8 w-8" aria-label="图例" title="顺序 / 分支 / 结果回流 / 因果 / 重试">
-          <Network className="h-3.5 w-3.5" />
-        </Button>
-        {visibleSemantic.length > 100 ? <span className="px-1 text-[10px] text-muted-foreground"><MapIcon className="mr-1 inline h-3 w-3" />{visibleSemantic.length}</span> : null}
-      </div>
+      <TooltipProvider delayDuration={180} skipDelayDuration={60}>
+        <div className="absolute left-3 top-3 z-10 flex items-center gap-1 rounded-md border border-border/70 bg-background/95 p-1 shadow-sm backdrop-blur">
+          {toolbarButton("适配整张图", (
+            <Button type="button" variant="ghost" size="icon" className="h-8 w-8" aria-label="适配整张图" onClick={() => {
+              void flowRef.current?.fitView({ padding: 0.2, duration: motionDuration(200) });
+              setFeedback("已适配整张图");
+            }}>
+              <Focus className="h-3.5 w-3.5" />
+            </Button>
+          ))}
+          {toolbarButton("定位 main Run", (
+            <Button type="button" variant="ghost" size="icon" className="h-8 w-8" aria-label="定位 main Run" onClick={() => {
+              const main = visibleSemantic.find((node) => node.type === "run" && node.run_kind === "main")
+                ?? visibleSemantic.find((node) => node.lane_kind === "main")
+                ?? visibleSemantic[0];
+              if (!main) return;
+              onSelectNode(main.id);
+              void flowRef.current?.fitView({ nodes: [{ id: main.id }], duration: motionDuration(200), padding: 0.8 });
+              setFeedback("已定位 main Run");
+            }}>
+              <LocateFixed className="h-3.5 w-3.5" />
+            </Button>
+          ))}
+          {toolbarButton("定位首个异常", (
+            <Button type="button" variant="ghost" size="icon" className={cn("h-8 w-8", graph.first_anomaly && "text-amber-600")} disabled={!graph.first_anomaly} aria-label="定位首个异常" onClick={locateFirstAnomaly}>
+              <AlertTriangle className="h-3.5 w-3.5" />
+            </Button>
+          ))}
+          {toolbarButton("打开图例", (
+            <Button type="button" variant="ghost" size="icon" className="h-8 w-8" aria-label="图例" aria-expanded={legendOpen} onClick={() => setLegendOpen((open) => !open)}>
+              <Network className="h-3.5 w-3.5" />
+            </Button>
+          ))}
+          {visibleSemantic.length > 100 ? <span className="px-1 text-[10px] text-muted-foreground"><MapIcon className="mr-1 inline h-3 w-3" />{visibleSemantic.length}</span> : null}
+        </div>
+      </TooltipProvider>
+      {focusMode ? (
+        <div role="status" className="absolute left-3 top-14 z-10 flex items-center gap-2 rounded-md border border-border/70 bg-background/95 px-2.5 py-1.5 text-[10.5px] shadow-sm">
+          <span>
+            {focusLabels[focusMode]}：{focusResult.edgeIds.size
+              ? `${focusResult.nodeIds.size} 个节点 / ${focusResult.edgeIds.size} 条边`
+              : "零命中"}
+          </span>
+          <Button type="button" variant="ghost" size="sm" className="h-6 px-1.5 text-[10px]" onClick={() => onFocusMode(null)}>清除</Button>
+        </div>
+      ) : null}
+      {feedback ? (
+        <p role="status" className="absolute left-3 top-24 z-10 max-w-sm rounded-md border border-border/70 bg-background/95 px-2.5 py-1.5 text-[10.5px] shadow-sm">
+          {feedback}
+        </p>
+      ) : null}
+      {legendOpen ? (
+        <div ref={legendRef} role="dialog" aria-label="运行轨迹图例" tabIndex={-1} className="absolute left-3 top-14 z-20 w-80 rounded-md border border-border/70 bg-background p-3 text-[10.5px] shadow-lg outline-none">
+          <div className="flex items-center justify-between">
+            <h3 className="text-xs font-semibold">图例</h3>
+            <Button type="button" variant="ghost" size="sm" className="h-6 px-2 text-[10px]" onClick={() => setLegendOpen(false)}>关闭</Button>
+          </div>
+          <p className="mt-2 text-muted-foreground">绿色为成功，红色为失败，琥珀色表示过程警告；节点终态不会因恢复而改写。</p>
+          <div className="mt-2 grid gap-1.5">
+            <p><span className="mr-2 inline-block w-8 border-t border-muted-foreground" />顺序/父子：实线</p>
+            <p><span className="mr-2 inline-block w-8 border-t-2 border-teal-700" />结构分支：绿色实线</p>
+            <p><span className="mr-2 inline-block w-8 border-t-2 border-dashed border-blue-600" />结果回流/恢复：蓝色虚线</p>
+            <p><span className="mr-2 inline-block w-8 border-t-2 border-dashed border-amber-600" />重试：琥珀色虚线</p>
+          </div>
+          <p className="mt-2 text-muted-foreground">箭头从原因、父级或先前尝试指向结果、子级或后续尝试。</p>
+        </div>
+      ) : null}
     </div>
   );
 }

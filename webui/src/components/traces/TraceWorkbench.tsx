@@ -40,11 +40,13 @@ export function TraceWorkbench({
   selection,
   onSelectionChange,
   onOpenConversation,
+  onReauth,
 }: {
   token: string;
   selection: TraceSelection;
   onSelectionChange: (selection: TraceSelection, replace?: boolean) => void;
   onOpenConversation: (sessionKey: string) => void;
+  onReauth?: () => Promise<string | null>;
 }) {
   const sessions = useAuditSessions(token);
   const auditGraph = useAuditGraph(token, selection.traceId, selection.runId);
@@ -53,7 +55,8 @@ export function TraceWorkbench({
   const [payloadId, setPayloadId] = useState<string | null>(null);
   const [payload, setPayload] = useState<AuditPayloadResponse | null>(null);
   const [payloadLoading, setPayloadLoading] = useState(false);
-  const [payloadError, setPayloadError] = useState<string | null>(null);
+  const [payloadError, setPayloadError] = useState<AuditApiError | null>(null);
+  const [timelineNotice, setTimelineNotice] = useState<string | null>(null);
   const [selectedTrace, setSelectedTrace] = useState<AuditTraceListItem | null>(null);
   const wideInspector = useMediaQuery("(min-width: 1440px)", false);
   const selected = selectedTrace?.trace_id === selection.traceId ? selectedTrace : null;
@@ -84,18 +87,52 @@ export function TraceWorkbench({
     return () => window.removeEventListener("keydown", closeInspector);
   }, [onSelectionChange, payloadId, selection]);
 
-  const loadPayload = async (nextPayloadId: string) => {
+  const loadPayload = async (nextPayloadId: string, requestToken = token) => {
     setPayloadId(nextPayloadId);
     setPayload(null);
     setPayloadError(null);
     setPayloadLoading(true);
     try {
-      setPayload(await fetchAuditPayload(token, nextPayloadId));
+      setPayload(await fetchAuditPayload(requestToken, nextPayloadId));
     } catch (reason) {
-      setPayloadError(reason instanceof AuditApiError ? reason.message : String(reason));
+      const apiError = reason instanceof AuditApiError
+        ? reason
+        : new AuditApiError(0, "network_error", String(reason), true);
+      if (apiError.status === 401 && onReauth) {
+        const refreshedToken = await onReauth();
+        if (refreshedToken) {
+          try {
+            setPayload(await fetchAuditPayload(refreshedToken, nextPayloadId));
+            return;
+          } catch (retryReason) {
+            setPayloadError(retryReason instanceof AuditApiError
+              ? retryReason
+              : new AuditApiError(0, "network_error", String(retryReason), true));
+            return;
+          }
+        }
+      }
+      setPayloadError(apiError);
     } finally {
       setPayloadLoading(false);
     }
+  };
+
+  const locateEvent = async (eventId: string) => {
+    setTimelineOpen(true);
+    setTimelineNotice(null);
+    const result = await timeline.ensureEvent(eventId);
+    if (result === "found") {
+      onSelectionChange({ ...selection, eventId });
+      return;
+    }
+    const messages = {
+      cursor_stale: "Event 索引已变化，请刷新轨迹后重试。",
+      limit: "已达到定位上限（5 页、1000 Event 或 10 秒），请缩小范围后重试。",
+      not_found: "该 Event 未找到，可能已清理或不在当前索引中。",
+      error: "定位 Event 时读取失败，请重试。",
+    } as const;
+    setTimelineNotice(messages[result]);
   };
 
   const selectTrace = (trace: AuditTraceListItem) => {
@@ -238,6 +275,7 @@ export function TraceWorkbench({
                     nodeId: nodeId ?? selection.nodeId,
                   })}
                   onLoadPayload={(nextPayloadId) => void loadPayload(nextPayloadId)}
+                  notice={timelineNotice}
                 />
               </>
             ) : (
@@ -249,11 +287,8 @@ export function TraceWorkbench({
           {selectedNode && wideInspector ? (
             <TraceNodeInspector
               node={selectedNode}
-              events={timeline.events}
-              onLocateEvent={(event) => {
-                setTimelineOpen(true);
-                onSelectionChange({ ...selection, eventId: event.event_id });
-              }}
+              onLocateEvent={(event) => void locateEvent(event.event_id)}
+              onLoadPayload={(nextPayloadId) => void loadPayload(nextPayloadId)}
               focusMode={focusMode}
               onFocusMode={setFocusMode}
               onClose={() => onSelectionChange({ ...selection, nodeId: null, eventId: null })}
@@ -273,11 +308,8 @@ export function TraceWorkbench({
             {selectedNode ? (
               <TraceNodeInspector
                 node={selectedNode}
-                events={timeline.events}
-                onLocateEvent={(event) => {
-                  setTimelineOpen(true);
-                  onSelectionChange({ ...selection, eventId: event.event_id });
-                }}
+                onLocateEvent={(event) => void locateEvent(event.event_id)}
+                onLoadPayload={(nextPayloadId) => void loadPayload(nextPayloadId)}
                 focusMode={focusMode}
                 onFocusMode={setFocusMode}
                 onClose={() => onSelectionChange({ ...selection, nodeId: null, eventId: null })}
@@ -293,6 +325,7 @@ export function TraceWorkbench({
             payload={payload}
             loading={payloadLoading}
             error={payloadError}
+            onRetry={() => payloadId && void loadPayload(payloadId)}
             onClose={() => setPayloadId(null)}
           />
         </SheetContent>

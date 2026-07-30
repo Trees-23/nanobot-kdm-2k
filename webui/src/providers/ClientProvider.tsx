@@ -8,6 +8,7 @@ interface ClientContextValue {
   token: string;
   modelName: string | null;
   ingressLimits: WebUIIngressLimits | null;
+  onReauth?: () => Promise<string | null>;
 }
 
 const ClientContext = createContext<ClientContextValue | null>(null);
@@ -17,16 +18,18 @@ export function ClientProvider({
   token,
   modelName = null,
   ingressLimits = null,
+  onReauth,
   children,
 }: {
   client: NanobotClient;
   token: string;
   modelName?: string | null;
   ingressLimits?: WebUIIngressLimits | null;
+  onReauth?: () => Promise<string | null>;
   children: ReactNode;
 }) {
   return (
-    <ClientContext.Provider value={{ client, token, modelName, ingressLimits }}>
+    <ClientContext.Provider value={{ client, token, modelName, ingressLimits, onReauth }}>
       {children}
     </ClientContext.Provider>
   );

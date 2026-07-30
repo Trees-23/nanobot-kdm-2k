@@ -134,6 +134,10 @@ class ToolResult(str):
 
     is_error: bool
     append_retry_hint: bool
+    error_type: str | None
+    error_code: str | None
+    effective_timeout_ms: int | None
+    provider: str | None
 
     def __new__(
         cls,
@@ -141,15 +145,52 @@ class ToolResult(str):
         *,
         is_error: bool = False,
         append_retry_hint: bool = True,
+        error_type: str | None = None,
+        error_code: str | None = None,
+        effective_timeout_ms: int | None = None,
+        provider: str | None = None,
     ) -> ToolResult:
         obj = str.__new__(cls, content)
         obj.is_error = is_error
         obj.append_retry_hint = append_retry_hint
+        obj.error_type = error_type
+        obj.error_code = error_code
+        obj.effective_timeout_ms = effective_timeout_ms
+        obj.provider = provider
         return obj
 
     @classmethod
-    def error(cls, content: str, *, append_retry_hint: bool = True) -> ToolResult:
-        return cls(content, is_error=True, append_retry_hint=append_retry_hint)
+    def error(
+        cls,
+        content: str,
+        *,
+        append_retry_hint: bool = True,
+        error_type: str | None = None,
+        error_code: str | None = None,
+        effective_timeout_ms: int | None = None,
+        provider: str | None = None,
+    ) -> ToolResult:
+        return cls(
+            content,
+            is_error=True,
+            append_retry_hint=append_retry_hint,
+            error_type=error_type,
+            error_code=error_code,
+            effective_timeout_ms=effective_timeout_ms,
+            provider=provider,
+        )
+
+    def with_content(self, content: str) -> ToolResult:
+        """Return the same structured result with replacement string content."""
+        return type(self)(
+            content,
+            is_error=self.is_error,
+            append_retry_hint=self.append_retry_hint,
+            error_type=self.error_type,
+            error_code=self.error_code,
+            effective_timeout_ms=self.effective_timeout_ms,
+            provider=self.provider,
+        )
 
 
 class Tool(ABC):

@@ -62,6 +62,24 @@ class AuditNodeSummary(BaseModel):
     transitions: list[dict[str, str | int | None]] = Field(default_factory=list)
     delivery_result: str | None = None
     suppression_reason: str | None = None
+    failure_kind: str | None = None
+    error_type: str | None = None
+    error_code: str | None = None
+    error_summary: str | None = None
+    failed_event_id: str | None = None
+    effective_timeout_ms: int | None = None
+    safe_input_summary: str | None = None
+    impact: Literal["run_failed", "run_continued", "unknown", "pending"] | None = None
+    recovery_status: Literal["recovered", "unrecovered", "continued", "unknown", "pending"] | None = None
+    recovered_by_event_id: str | None = None
+    evidence_source: Literal["recorded", "legacy_inferred", "unknown"] | None = None
+    fatal_event_id: str | None = None
+    failure_policy: str | None = None
+    fail_on_tool_error: bool | None = None
+    failure_count: int | None = None
+    fatal_failure_count: int | None = None
+    recovered_failure_count: int | None = None
+    continued_failure_count: int | None = None
 
 
 class AuditNodeRelation(BaseModel):
@@ -70,6 +88,14 @@ class AuditNodeRelation(BaseModel):
     raw_target_event_id: str
     resolution: Literal["visible", "suppressed_same_node", "unresolved", "external"]
     other_semantic_node_id: str | None = None
+
+
+class AuditNodeEventRef(BaseModel):
+    event_id: str
+    event_type: str
+    occurred_at: datetime
+    status: str | None = None
+    payload_id: str | None = None
 
 
 class AuditGraphNode(BaseModel):
@@ -81,6 +107,7 @@ class AuditGraphNode(BaseModel):
     finished_at: datetime | None
     elapsed_ms: int | None
     raw_event_ids: list[str]
+    raw_events: list[AuditNodeEventRef] = Field(default_factory=list)
     region_id: str
     parent_node_id: str | None = None
     child_node_ids: list[str] = Field(default_factory=list)

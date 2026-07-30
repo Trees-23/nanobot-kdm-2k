@@ -112,4 +112,80 @@ describe("TraceGraph", () => {
     expect(onSelectNode).toHaveBeenCalledWith("run:1");
     expect(onFocusMode).toHaveBeenCalledWith("causal");
   });
+
+  it("opens a keyboard-accessible legend and renames main Run location", async () => {
+    const onSelectNode = vi.fn();
+    render(
+      <div style={{ width: 900, height: 700 }}>
+        <TraceGraph
+          graph={graphFixture()}
+          selectedNodeId={null}
+          focusMode={null}
+          onSelectNode={onSelectNode}
+          onFocusMode={vi.fn()}
+        />
+      </div>,
+    );
+
+    fireEvent.click(await screen.findByRole("button", { name: "图例" }));
+    expect(screen.getByRole("dialog", { name: "运行轨迹图例" })).toHaveFocus();
+    expect(screen.getByText(/箭头从原因/)).toBeInTheDocument();
+    fireEvent.keyDown(window, { key: "Escape" });
+    expect(screen.queryByRole("dialog", { name: "运行轨迹图例" })).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "定位 main Run" }));
+    expect(onSelectNode).toHaveBeenCalledWith("run:1");
+    expect(screen.queryByRole("button", { name: "定位主轴" })).not.toBeInTheDocument();
+  });
+
+  it("reports zero relation hits without counting the selected node", async () => {
+    const onFocusMode = vi.fn();
+    render(
+      <div style={{ width: 900, height: 700 }}>
+        <TraceGraph
+          graph={graphFixture()}
+          selectedNodeId="run:1"
+          focusMode="causal"
+          onSelectNode={vi.fn()}
+          onFocusMode={onFocusMode}
+        />
+      </div>,
+    );
+
+    expect(await screen.findByText("因果链：零命中")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "清除" }));
+    expect(onFocusMode).toHaveBeenCalledWith(null);
+  });
+
+  it("reports deterministic node and edge counts for a relation focus", async () => {
+    const graph = graphFixture();
+    graph.nodes.push({
+      ...graph.nodes[0],
+      id: "tool:1",
+      type: "tool_call",
+      label: "Read config",
+      parent_node_id: "run:1",
+      summary: { kind: "tool_call", tool_name: "read_file" },
+      order: 1,
+    });
+    graph.edges.push({
+      id: "edge:caused-by",
+      type: "caused_by",
+      source: "run:1",
+      target: "tool:1",
+    });
+    render(
+      <div style={{ width: 900, height: 700 }}>
+        <TraceGraph
+          graph={graph}
+          selectedNodeId="run:1"
+          focusMode="causal"
+          onSelectNode={vi.fn()}
+          onFocusMode={vi.fn()}
+        />
+      </div>,
+    );
+
+    expect(await screen.findByText("因果链：2 个节点 / 1 条边")).toBeInTheDocument();
+  });
 });

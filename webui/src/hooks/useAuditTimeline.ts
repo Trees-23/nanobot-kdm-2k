@@ -3,6 +3,17 @@ import { useCallback, useEffect, useState } from "react";
 import { AuditApiError, fetchAuditEvents } from "@/lib/audit-api";
 import type { AuditEventItem } from "@/lib/audit-types";
 
+const LOCATE_MAX_PAGES = 5;
+const LOCATE_MAX_EVENTS = 1_000;
+const LOCATE_TIMEOUT_MS = 10_000;
+
+export type AuditLocateResult = "found" | "not_found" | "limit" | "cursor_stale" | "error";
+
+function appendUnique(current: AuditEventItem[], incoming: AuditEventItem[]): AuditEventItem[] {
+  const known = new Set(current.map((event) => event.event_id));
+  return [...current, ...incoming.filter((event) => !known.has(event.event_id))];
+}
+
 export function useAuditTimeline(token: string, traceId: string | null, enabled: boolean) {
   const [events, setEvents] = useState<AuditEventItem[]>([]);
   const [nextCursor, setNextCursor] = useState<string | null>(null);
@@ -16,7 +27,7 @@ export function useAuditTimeline(token: string, traceId: string | null, enabled:
     setError(null);
     try {
       const page = await fetchAuditEvents(token, traceId, cursor);
-      setEvents((current) => cursor ? [...current, ...page.items] : page.items);
+      setEvents((current) => cursor ? appendUnique(current, page.items) : page.items);
       setNextCursor(page.next_cursor);
       setTotal(page.total);
     } catch (reason) {
@@ -27,6 +38,44 @@ export function useAuditTimeline(token: string, traceId: string | null, enabled:
       setLoading(false);
     }
   }, [token, traceId]);
+
+  const ensureEvent = useCallback(async (eventId: string): Promise<AuditLocateResult> => {
+    if (!traceId) return "not_found";
+    if (events.some((event) => event.event_id === eventId)) return "found";
+    let collected = events;
+    let cursor = nextCursor;
+    let pages = 0;
+    const startedAt = Date.now();
+    setLoading(true);
+    setError(null);
+    try {
+      while (
+        cursor
+        && pages < LOCATE_MAX_PAGES
+        && collected.length < LOCATE_MAX_EVENTS
+        && Date.now() - startedAt < LOCATE_TIMEOUT_MS
+      ) {
+        const page = await fetchAuditEvents(token, traceId, cursor);
+        collected = appendUnique(collected, page.items).slice(0, LOCATE_MAX_EVENTS);
+        cursor = page.next_cursor;
+        pages += 1;
+        setEvents(collected);
+        setNextCursor(cursor);
+        setTotal(page.total);
+        if (collected.some((event) => event.event_id === eventId)) return "found";
+      }
+      if (!cursor) return "not_found";
+      return "limit";
+    } catch (reason) {
+      const apiError = reason instanceof AuditApiError
+        ? reason
+        : new AuditApiError(0, "network_error", String(reason));
+      setError(apiError);
+      return apiError.code === "cursor_stale" ? "cursor_stale" : "error";
+    } finally {
+      setLoading(false);
+    }
+  }, [events, nextCursor, token, traceId]);
 
   useEffect(() => {
     setEvents([]);
@@ -43,5 +92,6 @@ export function useAuditTimeline(token: string, traceId: string | null, enabled:
     error,
     loadMore: () => nextCursor && load(nextCursor),
     refresh: () => load(),
+    ensureEvent,
   };
 }

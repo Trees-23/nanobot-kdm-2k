@@ -6,6 +6,7 @@ from nanobot.agent.runner import AgentRunner
 from nanobot.agent.tools.await_subagents import AwaitSubagentsTool
 from nanobot.agent.tools.base import ToolResult
 from nanobot.agent.tools.context import RequestContext, request_context
+from nanobot.agent.tools.filesystem import ReadFileTool
 from nanobot.agent.tools.registry import ToolRegistry
 from nanobot.agent.tools.spawn import SpawnTool
 from nanobot.audit.context import AuditRunContext, set_run_cause
@@ -168,6 +169,127 @@ async def test_runner_emits_error_terminal_for_returned_tool_error() -> None:
     assert terminal.status == "error"
     assert result.stop_reason == "completed"
     assert emitter.events[-1].status == "succeeded"
+
+
+async def test_fatal_tool_error_keeps_tool_domain_and_precise_event_link() -> None:
+    provider = MagicMock(spec=LLMProvider)
+    provider.chat_with_retry = AsyncMock(
+        return_value=LLMResponse(
+            content="",
+            tool_calls=[
+                ToolCallRequest(id="provider-call", name="web_search", arguments={})
+            ],
+            finish_reason="tool_calls",
+        )
+    )
+    tools = MagicMock()
+    tools.get_definitions.return_value = []
+    tools.prepare_call.return_value = (None, {}, None)
+    tools.execute = AsyncMock(
+        return_value=ToolResult.error(
+            "Error: DuckDuckGo search timed out after 30s",
+            error_type="TimeoutError",
+            error_code="web_search_timeout",
+            effective_timeout_ms=30_000,
+            provider="duckduckgo",
+        )
+    )
+    emitter = RecordingEmitter()
+
+    result = await AgentRunner(audit_emitter=emitter).run(
+        make_run_spec(
+            provider,
+            initial_messages=[],
+            tools=tools,
+            model="test-model",
+            max_iterations=1,
+            max_tool_result_chars=10_000,
+            fail_on_tool_error=True,
+            audit_context=AuditRunContext("trace", "turn", "run"),
+        )
+    )
+
+    tool_finished = next(
+        event for event in emitter.events if event.event_type == "tool_finished"
+    )
+    run_finished = emitter.events[-1]
+    assert result.stop_reason == "tool_error"
+    assert tool_finished.status == "timeout"
+    assert tool_finished.error_type == "TimeoutError"
+    assert tool_finished.error_code == "web_search_timeout"
+    assert tool_finished.effective_timeout_ms == 30_000
+    assert tool_finished.provider == "duckduckgo"
+    assert run_finished.stop_reason == "tool_error"
+    assert run_finished.fatal_event_id == tool_finished.event_id
+    assert run_finished.failure_policy == "fail_on_tool_error"
+    assert run_finished.fail_on_tool_error is True
+
+
+async def test_read_file_corrections_emit_explicit_recovery_link(tmp_path) -> None:
+    workspace = tmp_path / "workspace"
+    config_root = tmp_path / "home" / ".nanobot"
+    workspace.mkdir()
+    config_root.mkdir(parents=True)
+    (config_root / "config.json").write_text('{"ok": true}', encoding="utf-8")
+    provider = MagicMock(spec=LLMProvider)
+    provider.chat_with_retry = AsyncMock(
+        side_effect=[
+            LLMResponse(
+                content="",
+                tool_calls=[ToolCallRequest(
+                    id="bad-absolute",
+                    name="read_file",
+                    arguments={"path": str(config_root / "runtime" / "config.json")},
+                )],
+                finish_reason="tool_calls",
+            ),
+            LLMResponse(
+                content="",
+                tool_calls=[ToolCallRequest(
+                    id="bad-relative",
+                    name="read_file",
+                    arguments={"path": "config.json"},
+                )],
+                finish_reason="tool_calls",
+            ),
+            LLMResponse(
+                content="",
+                tool_calls=[ToolCallRequest(
+                    id="correct-absolute",
+                    name="read_file",
+                    arguments={"path": str(config_root / "config.json")},
+                )],
+                finish_reason="tool_calls",
+            ),
+            LLMResponse(content="recovered"),
+        ]
+    )
+    tools = ToolRegistry()
+    tools.register(ReadFileTool(workspace=workspace, restrict_to_workspace=False))
+    emitter = RecordingEmitter()
+
+    result = await AgentRunner(audit_emitter=emitter).run(
+        make_run_spec(
+            provider,
+            initial_messages=[],
+            tools=tools,
+            model="test-model",
+            max_iterations=4,
+            max_tool_result_chars=10_000,
+            audit_context=AuditRunContext("trace", "turn", "run"),
+        )
+    )
+
+    terminals = [
+        event for event in emitter.events if event.event_type == "tool_finished"
+    ]
+    assert result.stop_reason == "completed"
+    assert [event.status for event in terminals] == ["error", "error", "ok"]
+    assert terminals[0].error_code == "file_not_found"
+    assert terminals[0].safe_input_summary == "path=<outside-workspace>"
+    assert terminals[1].safe_input_summary == "path=config.json"
+    assert terminals[2].recovery_of_tool_call_ids == [terminals[0].tool_call_id]
+    assert terminals[1].tool_call_id not in terminals[2].recovery_of_tool_call_ids
 
 
 async def test_spawn_concurrency_rejection_is_audited_error_without_child_run() -> None:

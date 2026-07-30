@@ -38,6 +38,7 @@ export function TraceTimeline({
   onOpenChange,
   onSelectEvent,
   onLoadPayload,
+  notice,
 }: {
   timeline: ReturnType<typeof useAuditTimeline>;
   total: number;
@@ -47,6 +48,7 @@ export function TraceTimeline({
   onOpenChange: (open: boolean) => void;
   onSelectEvent: (event: AuditEventItem, nodeId: string | null) => void;
   onLoadPayload: (payloadId: string) => void;
+  notice?: string | null;
 }) {
   const viewportRef = useRef<HTMLDivElement>(null);
   const [scrollTop, setScrollTop] = useState(0);
@@ -134,7 +136,7 @@ export function TraceTimeline({
   return (
     <section
       className={cn(
-        "shrink-0 border-t border-border/60 bg-background",
+        "flex shrink-0 flex-col border-t border-border/60 bg-background",
         open && mobile && "fixed inset-0 z-50 flex h-dvh flex-col border-0",
         !open && "h-8",
       )}
@@ -180,11 +182,18 @@ export function TraceTimeline({
         ) : null}
       </div>
       {open ? (
-        <div
-          ref={viewportRef}
-          className="relative min-h-0 flex-1 overflow-auto"
-          onScroll={(event) => setScrollTop(event.currentTarget.scrollTop)}
-        >
+        <div className="flex min-h-0 flex-1 flex-col">
+          {notice ? (
+            <p role="status" className="shrink-0 border-b border-amber-500/25 px-3 py-2 text-[10.5px] text-amber-700 dark:text-amber-300">
+              {notice}
+            </p>
+          ) : null}
+          <div
+            ref={viewportRef}
+            className="relative min-h-0 flex-1 overflow-y-auto overscroll-contain"
+            data-testid="audit-timeline-viewport"
+            onScroll={(event) => setScrollTop(event.currentTarget.scrollTop)}
+          >
           {timeline.loading && !timeline.events.length ? (
             <div className="flex h-full items-center justify-center gap-2 text-xs text-muted-foreground">
               <LoaderCircle className="h-4 w-4 animate-spin motion-reduce:animate-none" />正在读取 Event
@@ -198,6 +207,8 @@ export function TraceTimeline({
                     role="button"
                     tabIndex={0}
                     key={event.event_id}
+                    data-event-id={event.event_id}
+                    data-event-index={index + 1}
                     className={cn(
                       "absolute left-0 grid w-full grid-cols-[74px_minmax(150px,1fr)_110px_auto] items-center gap-2 border-b border-border/40 px-3 text-left text-[10.5px] hover:bg-muted/35 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring",
                       selectedEventId === event.event_id && "bg-sidebar-accent/70",
@@ -247,6 +258,7 @@ export function TraceTimeline({
               <Button variant="secondary" size="sm" className="h-7 text-[10px] shadow" onClick={() => void timeline.loadMore()} disabled={timeline.loading}>加载更多 Event</Button>
             </div>
           ) : null}
+          </div>
         </div>
       ) : null}
     </section>

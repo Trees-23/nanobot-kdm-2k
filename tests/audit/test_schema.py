@@ -108,6 +108,30 @@ def test_materialize_event_adds_persistence_fields() -> None:
     assert event.segment_sequence == 1
 
 
+def test_tool_finished_accepts_additive_diagnostics_and_recovery_link() -> None:
+    draft = ToolFinishedDraft.model_validate(
+        {
+            **_common_event("tool_finished"),
+            "tool_call_id": "call-1",
+            "tool_name": "web_search",
+            "elapsed_ms": 30_000,
+            "status": "timeout",
+            "error_type": "TimeoutError",
+            "error_code": "web_search_timeout",
+            "effective_timeout_ms": 30_000,
+            "provider": "duckduckgo",
+            "error_summary": "DuckDuckGo search timed out after 30s",
+            "safe_input_summary": "query omitted; provider=duckduckgo",
+            "resource_key": None,
+            "resource_correction_keys": [],
+            "recovery_of_tool_call_ids": ["prior-call"],
+        }
+    )
+
+    assert draft.error_code == "web_search_timeout"
+    assert draft.recovery_of_tool_call_ids == ["prior-call"]
+
+
 def test_rejects_naive_event_timestamp() -> None:
     raw = {
         **_common_event("tool_finished"),

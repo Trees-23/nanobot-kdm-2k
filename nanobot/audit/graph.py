@@ -14,6 +14,7 @@ from nanobot.audit.graph_types import (
     AuditGraphEdge,
     AuditGraphNode,
     AuditGraphRegion,
+    AuditNodeEventRef,
     AuditNodeRelation,
     AuditNodeSummary,
     CollapseGroup,
@@ -25,7 +26,7 @@ from nanobot.audit.graph_types import (
 from nanobot.audit.read_service import DisplayStatus, expected_delivery_suppression
 from nanobot.audit.schema import AuditEventBase
 
-GRAPH_BUILDER_VERSION = 2
+GRAPH_BUILDER_VERSION = 3
 _ABNORMAL = {"error", "failed", "timeout", "blocked", "cancelled", "interrupted", "exhausted"}
 _DECISIONS = {
     "provider_route_decision",
@@ -52,6 +53,117 @@ _PROCESS_EVENTS = {
 }
 
 
+def _tool_failure_summary(
+    grouped: Sequence[AuditEventBase], trace_events: Sequence[AuditEventBase]
+) -> dict[str, Any]:
+    failure = next(
+        (
+            event
+            for event in reversed(grouped)
+            if getattr(event, "status", None) in _ABNORMAL
+        ),
+        None,
+    )
+    if failure is None:
+        return {}
+    run_events = [event for event in trace_events if event.run_id == failure.run_id]
+    finish = next(
+        (event for event in reversed(run_events) if event.event_type == "run_finished"),
+        None,
+    )
+    recovered_by = next(
+        (
+            event
+            for event in run_events
+            if failure.tool_call_id
+            in (getattr(event, "recovery_of_tool_call_ids", None) or [])
+        ),
+        None,
+    )
+    fatal = finish is not None and getattr(finish, "fatal_event_id", None) == failure.event_id
+    if fatal:
+        impact = "run_failed"
+    elif finish is None:
+        impact = "pending"
+    elif getattr(finish, "status", None) == "succeeded":
+        impact = "run_continued"
+    else:
+        impact = "unknown"
+    if recovered_by is not None:
+        recovery_status = "recovered"
+    elif fatal:
+        recovery_status = "unrecovered"
+    elif finish is None:
+        recovery_status = "pending"
+    elif getattr(finish, "status", None) == "succeeded":
+        recovery_status = "continued"
+    else:
+        recovery_status = "unknown"
+    status = getattr(failure, "status", None)
+    failure_kind = "policy_error" if status == "blocked" else "tool_error"
+    recorded = any(
+        getattr(failure, field, None) is not None
+        for field in ("error_type", "error_code", "error_summary")
+    )
+    return {
+        "failure_kind": failure_kind,
+        "error_type": getattr(failure, "error_type", None),
+        "error_code": getattr(failure, "error_code", None),
+        "error_summary": getattr(failure, "error_summary", None),
+        "failed_event_id": failure.event_id,
+        "effective_timeout_ms": getattr(failure, "effective_timeout_ms", None),
+        "safe_input_summary": getattr(failure, "safe_input_summary", None),
+        "impact": impact,
+        "recovery_status": recovery_status,
+        "recovered_by_event_id": recovered_by.event_id if recovered_by else None,
+        "evidence_source": "recorded" if recorded else "unknown",
+    }
+
+
+def _run_failure_summary(grouped: Sequence[AuditEventBase]) -> dict[str, Any]:
+    finish = next(
+        (event for event in reversed(grouped) if event.event_type == "run_finished"),
+        None,
+    )
+    tool_groups: dict[str, list[AuditEventBase]] = defaultdict(list)
+    for event in grouped:
+        if event.tool_call_id and event.event_type in {"tool_started", "tool_finished"}:
+            tool_groups[event.tool_call_id].append(event)
+    failures = [
+        _tool_failure_summary(events, grouped)
+        for events in tool_groups.values()
+        if any(getattr(event, "status", None) in _ABNORMAL for event in events)
+    ]
+    fatal_event_id = getattr(finish, "fatal_event_id", None) if finish else None
+    primary = next(
+        (item for item in failures if item.get("failed_event_id") == fatal_event_id),
+        failures[0] if failures else {},
+    )
+    summary = {
+        **primary,
+        "fatal_event_id": fatal_event_id,
+        "failure_policy": getattr(finish, "failure_policy", None) if finish else None,
+        "fail_on_tool_error": getattr(finish, "fail_on_tool_error", None) if finish else None,
+        "failure_count": len(failures),
+        "fatal_failure_count": sum(item.get("impact") == "run_failed" for item in failures),
+        "recovered_failure_count": sum(
+            item.get("recovery_status") == "recovered" for item in failures
+        ),
+        "continued_failure_count": sum(
+            item.get("recovery_status") == "continued" for item in failures
+        ),
+    }
+    if (
+        finish is not None
+        and getattr(finish, "stop_reason", None) == "model_error"
+        and len(failures) == 1
+        and not any(event.event_type == "model_request_failed" for event in grouped)
+    ):
+        summary["failure_kind"] = "tool_error"
+        summary["evidence_source"] = "legacy_inferred"
+    return summary
+
+
 def _order(event: AuditEventBase) -> tuple[Any, ...]:
     return (
         event.occurred_at,
@@ -61,6 +173,19 @@ def _order(event: AuditEventBase) -> tuple[Any, ...]:
         event.segment_sequence,
         event.event_id,
     )
+
+
+def _event_refs(events: Sequence[AuditEventBase]) -> list[AuditNodeEventRef]:
+    return [
+        AuditNodeEventRef(
+            event_id=event.event_id,
+            event_type=event.event_type,
+            occurred_at=event.occurred_at,
+            status=getattr(event, "status", None),
+            payload_id=event.payload_id,
+        )
+        for event in events
+    ]
 
 
 def _status(
@@ -577,6 +702,7 @@ class AuditGraphBuilder:
                     finished_at=finishes[-1].occurred_at if finishes else None,
                     elapsed_ms=_elapsed(grouped),
                     raw_event_ids=[event.event_id for event in lifecycle],
+                    raw_events=_event_refs(lifecycle),
                     region_id=lane_id,
                     parent_node_id=(
                         f"run:{trace_id}:{item.parent_run_id}"
@@ -602,6 +728,7 @@ class AuditGraphBuilder:
                         ),
                         subtype="lifecycle_mismatch" if len(starts) != 1 or len(finishes) > 1 else None,
                         identifier=run_id,
+                        **_run_failure_summary(grouped),
                     ),
                     order=0,
                     run_id=run_id,
@@ -822,6 +949,11 @@ class AuditGraphBuilder:
                 parent_id = f"model:{trace_id}:{run_id}:{first.model_call_id}"
                 by_model[parent_id].append(node_id)
             node_status = _status(grouped, trace_events=trace_events)
+            if node_type == "tool_call" and any(
+                getattr(event, "status", None) in {"error", "timeout", "blocked"}
+                for event in grouped
+            ):
+                node_status = "failed"
             if node_type == "checkpoint":
                 transition_types = {event.event_type for event in grouped}
                 node_status = (
@@ -893,6 +1025,11 @@ class AuditGraphBuilder:
                     if node_type == "delivery"
                     else None
                 ),
+                **(
+                    _tool_failure_summary(grouped, trace_events)
+                    if node_type == "tool_call"
+                    else {}
+                ),
             )
             state.add(
                 AuditGraphNode(
@@ -904,6 +1041,7 @@ class AuditGraphBuilder:
                     finished_at=terminals[-1].occurred_at if terminals else None,
                     elapsed_ms=_elapsed(grouped),
                     raw_event_ids=[event.event_id for event in grouped],
+                    raw_events=_event_refs(grouped),
                     region_id=region.id,
                     parent_node_id=parent_id,
                     expandable=node_type == "model_call",

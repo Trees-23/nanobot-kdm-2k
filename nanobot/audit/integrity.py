@@ -37,9 +37,17 @@ def canonical_json_bytes(value: Any) -> bytes:
     ).encode("utf-8")
 
 
+def _record_dict(record: Mapping[str, Any] | BaseModel) -> dict[str, Any]:
+    if isinstance(record, BaseModel):
+        # Preserve the field set from the persisted record. Newly added optional
+        # schema fields must not alter hashes of older records that omitted them.
+        return record.model_dump(mode="json", exclude_unset=True)
+    return dict(record)
+
+
 def hash_record(record: Mapping[str, Any] | BaseModel, *, hash_field: str) -> str:
     """Hash a record while excluding its own hash field."""
-    raw = record.model_dump(mode="json") if isinstance(record, BaseModel) else dict(record)
+    raw = _record_dict(record)
     payload = {key: value for key, value in raw.items() if key != hash_field}
     return "sha256:" + hashlib.sha256(canonical_json_bytes(payload)).hexdigest()
 
@@ -79,7 +87,7 @@ def verify_chain(
     seen: set[int] = set()
     checked = 0
     for model in records:
-        record = model.model_dump(mode="json") if isinstance(model, BaseModel) else dict(model)
+        record = _record_dict(model)
         sequence = record.get(sequence_field)
         if not isinstance(sequence, int):
             return ChainVerification(False, checked, "invalid_sequence", None)
