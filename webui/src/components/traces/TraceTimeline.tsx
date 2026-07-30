@@ -136,7 +136,7 @@ export function TraceTimeline({
   return (
     <section
       className={cn(
-        "shrink-0 border-t border-border/60 bg-background",
+        "flex shrink-0 flex-col border-t border-border/60 bg-background",
         open && mobile && "fixed inset-0 z-50 flex h-dvh flex-col border-0",
         !open && "h-8",
       )}
@@ -207,6 +207,8 @@ export function TraceTimeline({
                     role="button"
                     tabIndex={0}
                     key={event.event_id}
+                    data-event-id={event.event_id}
+                    data-event-index={index + 1}
                     className={cn(
                       "absolute left-0 grid w-full grid-cols-[74px_minmax(150px,1fr)_110px_auto] items-center gap-2 border-b border-border/40 px-3 text-left text-[10.5px] hover:bg-muted/35 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring",
                       selectedEventId === event.event_id && "bg-sidebar-accent/70",
