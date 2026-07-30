@@ -170,6 +170,9 @@ class GatewayHTTPHandler:
         local_trigger_pending_ids: Callable[[str], set[str]] | None = None,
         channel_feature_action: Callable[..., Any] | None = None,
         channel_runtime_status: Callable[[], dict[str, Any]] | None = None,
+        audit_read_service: Any | None = None,
+        audit_mode: str = "off",
+        audit_root: Path | None = None,
         log: Any = logger,
     ) -> None:
         self.config = config
@@ -189,6 +192,20 @@ class GatewayHTTPHandler:
         self.local_trigger_pending_ids = local_trigger_pending_ids
         self._log = log
         self._runtime_surface = runtime_surface
+        self.audit_read_service = audit_read_service
+        self.audit_mode = audit_mode
+        self.audit_routes = None
+        if audit_read_service is not None:
+            from nanobot.webui.audit_api import WebUIAuditRouter
+
+            self.audit_routes = WebUIAuditRouter(
+                read_service=audit_read_service,
+                audit_root=audit_root or Path("."),
+                audit_mode=audit_mode,
+                check_api_token=self.check_api_token,
+                logger=self._log,
+                resolve_session_title=self._resolve_audit_session_title,
+            )
 
         from nanobot.webui.settings_api import runtime_capabilities as _rc
         from nanobot.webui.settings_routes import WebUISettingsRouter
@@ -206,6 +223,17 @@ class GatewayHTTPHandler:
             channel_feature_action=channel_feature_action,
             channel_runtime_status=channel_runtime_status,
         )
+
+    def _resolve_audit_session_title(self, session_key: str) -> str | None:
+        if self.session_manager is None or not session_key.startswith("websocket:"):
+            return None
+        from nanobot.webui.session_list_index import list_webui_sessions
+
+        for row in list_webui_sessions(self.session_manager):
+            if row.get("key") == session_key:
+                title = row.get("title")
+                return title.strip() if isinstance(title, str) and title.strip() else None
+        return None
 
     def workspace_controls_available(self, connection: Any) -> bool:
         return self._runtime_surface == "native" or _is_localhost(connection)
@@ -254,6 +282,12 @@ class GatewayHTTPHandler:
         response = await self._dispatch_session_routes(request, got)
         if response is not None:
             return response
+
+        # Audit workbench routes (delegated, authenticated, read-only)
+        if self.audit_routes is not None:
+            response = await self.audit_routes.dispatch(request, got)
+            if response is not None:
+                return response
 
         # Media routes
         response = self._dispatch_media_routes(request, got)

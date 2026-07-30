@@ -31,6 +31,7 @@ class GatewayServices:
     local_trigger_store: Any | None
     cron_pending_job_ids: Callable[[str], set[str]] | None
     local_trigger_pending_ids: Callable[[str], set[str]] | None
+    audit_index: Any | None
 
 
 def build_gateway_services(
@@ -51,6 +52,9 @@ def build_gateway_services(
     local_trigger_pending_ids: Callable[[str], set[str]] | None = None,
     channel_feature_action: Callable[..., Any] | None = None,
     channel_runtime_status: Callable[[], dict[str, Any]] | None = None,
+    audit_config: Any | None = None,
+    audit_root: Path | None = None,
+    active_audit_run_ids: Callable[[], set[str]] | None = None,
     logger: Any = default_logger,
 ) -> GatewayServices:
     tokens = GatewayTokenStore()
@@ -74,6 +78,17 @@ def build_gateway_services(
         default_workspace=workspace_path,
         default_restrict_to_workspace=default_restrict_to_workspace,
     )
+    audit_index = None
+    if audit_config is not None and audit_root is not None:
+        from nanobot.audit.index_service import AuditIndexService
+
+        audit_index = AuditIndexService(
+            audit_root,
+            enabled=audit_config.index_enabled,
+            audit_mode=audit_config.mode,
+            active_run_ids=active_audit_run_ids,
+            logger=logger,
+        )
     http = GatewayHTTPHandler(
         config=config,
         session_manager=session_manager,
@@ -94,6 +109,9 @@ def build_gateway_services(
         local_trigger_pending_ids=local_trigger_pending_ids,
         channel_feature_action=channel_feature_action,
         channel_runtime_status=channel_runtime_status,
+        audit_read_service=audit_index.read_service if audit_index is not None else None,
+        audit_mode=audit_config.mode if audit_config is not None else "off",
+        audit_root=audit_root,
         log=logger,
     )
     return GatewayServices(
@@ -108,4 +126,5 @@ def build_gateway_services(
         local_trigger_store=local_trigger_store,
         cron_pending_job_ids=cron_pending_job_ids,
         local_trigger_pending_ids=local_trigger_pending_ids,
+        audit_index=audit_index,
     )

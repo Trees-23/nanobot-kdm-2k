@@ -16,6 +16,7 @@ from nanobot.agent.hook import (
     ModelRequestSnapshot,
     RuntimeDecision,
 )
+from nanobot.agent.tools.context import bind_audit_tool_call_id, reset_audit_tool_call_id
 from nanobot.audit.context import AuditRunContext, clear_run_cause, run_cause
 from nanobot.audit.ids import new_audit_id
 from nanobot.audit.schema import (
@@ -83,6 +84,7 @@ class RunnerAuditHook(AgentHook):
         self._tool_params: dict[str, Any] = {}
         self._tool_side_effects: dict[str, SideEffectSnapshot] = {}
         self._attempt_counts: dict[str, int] = {}
+        self._tool_context_tokens: dict[str, Any] = {}
 
     def _common(
         self,
@@ -110,7 +112,7 @@ class RunnerAuditHook(AgentHook):
             "delivery_id": None,
             "session_key": self._session_key,
             "source_type": self._run.source_type,
-            "source_metadata": {},
+            "source_metadata": dict(self._run.source_metadata or {}),
             "iteration": iteration,
         }
 
@@ -374,6 +376,7 @@ class RunnerAuditHook(AgentHook):
             return
         audit_tool_id = new_audit_id()
         self._tool_ids[tool_call.id] = audit_tool_id
+        self._tool_context_tokens[tool_call.id] = bind_audit_tool_call_id(audit_tool_id)
         self._tool_started_ns[tool_call.id] = time.monotonic_ns()
         self._tool_params[tool_call.id] = params
         workspace = getattr(tool, "_workspace", None)
@@ -417,6 +420,9 @@ class RunnerAuditHook(AgentHook):
         if tool_call.id not in self._tool_ids:
             await self.before_execute_tool(context, tool_call, tool, params)
         audit_tool_id = self._tool_ids.pop(tool_call.id)
+        token = self._tool_context_tokens.pop(tool_call.id, None)
+        if token is not None:
+            reset_audit_tool_call_id(token)
         started = self._tool_started_ns.pop(tool_call.id, time.monotonic_ns())
         self._tool_params.pop(tool_call.id, None)
         side_effect_snapshot = self._tool_side_effects.pop(tool_call.id, None)

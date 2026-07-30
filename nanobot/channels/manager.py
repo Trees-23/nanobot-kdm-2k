@@ -100,6 +100,7 @@ class ChannelManager:
         webui_static_dist: bool = True,
         webui_runtime_surface: str = "browser",
         webui_runtime_capabilities: dict[str, Any] | None = None,
+        webui_active_audit_run_ids: Callable[[], set[str]] | None = None,
         audit_emitter: Any | None = None,
     ):
         self.config = config
@@ -113,6 +114,7 @@ class ChannelManager:
         self._webui_static_dist = webui_static_dist
         self._webui_runtime_surface = webui_runtime_surface
         self._webui_runtime_capabilities = dict(webui_runtime_capabilities or {})
+        self._webui_active_audit_run_ids = webui_active_audit_run_ids
         self._audit_emitter = audit_emitter or DisabledAuditEmitter()
         self.channels: dict[str, BaseChannel] = {}
         self._channel_owners: dict[str, str] = {}
@@ -158,6 +160,7 @@ class ChannelManager:
         kwargs: dict[str, Any] = {}
         if cls.name == "websocket":
             from nanobot.channels.websocket.runtime import WebSocketConfig
+            from nanobot.config.paths import get_audit_dir
             from nanobot.webui.gateway_services import build_gateway_services
 
             parsed = WebSocketConfig.model_validate(section)
@@ -180,6 +183,9 @@ class ChannelManager:
                 local_trigger_pending_ids=self._webui_local_trigger_pending_ids,
                 channel_feature_action=self.apply_channel_feature_action,
                 channel_runtime_status=self.get_status,
+                audit_config=self.config.audit,
+                audit_root=get_audit_dir(self.config.audit.path),
+                active_audit_run_ids=self._webui_active_audit_run_ids,
                 logger=logger,
             )
             kwargs["gateway"] = gateway
@@ -729,7 +735,11 @@ class ChannelManager:
                             logger.info("Suppressing duplicate outbound message to {}:{}", msg.channel, msg.chat_id)
                             await DeliveryAuditRecorder(
                                 self._audit_emitter, msg
-                            ).finished(0, "suppressed")
+                            ).finished(
+                                0,
+                                "suppressed",
+                                suppression_reason="duplicate_outbound",
+                            )
                             continue
                     await self._send_with_retry(channel, msg)
                 else:
@@ -892,7 +902,11 @@ class ChannelManager:
             getattr(self, "_audit_emitter", DisabledAuditEmitter()), msg
         )
         if isinstance(outbound_event_from_message(msg), StreamedResponseEvent):
-            await audit.finished(0, "suppressed")
+            await audit.finished(
+                0,
+                "suppressed",
+                suppression_reason="webui_stream_already_delivered",
+            )
             return
         adapter_msg = replace(
             msg,

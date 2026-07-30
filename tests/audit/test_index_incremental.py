@@ -58,3 +58,38 @@ async def test_deleted_index_rebuilds_to_same_rows(tmp_path) -> None:
         rebuilt.close()
 
     assert [tuple(row) for row in actual] == [tuple(row) for row in expected]
+
+
+async def test_v2_projects_typed_event_revision_integrity_and_payload_locator(tmp_path) -> None:
+    writer = AuditWriter(tmp_path, fsync_interval_seconds=0.01)
+    await writer.start()
+    await writer.submit(_item(1, payload=True))
+    await writer.close()
+
+    indexer = AuditIndexer(tmp_path)
+    report = indexer.update()
+    index = AuditIndex.open(indexer.index_path)
+    try:
+        event = index.connection.execute(
+            "SELECT durability_epoch, event_json, payload_id FROM events WHERE event_id = 'e1'"
+        ).fetchone()
+        locator = index.connection.execute(
+            "SELECT payload_id, path_token, line_offset, line_length FROM payload_locators"
+        ).fetchone()
+        integrity = index.connection.execute("SELECT status FROM process_integrity").fetchone()
+        revision = index.connection.execute(
+            "SELECT value FROM meta WHERE key = 'revision'"
+        ).fetchone()[0]
+    finally:
+        index.close()
+
+    assert report.coverage_complete is True
+    assert event[0] == 1
+    assert json.loads(event[1])["event_id"] == "e1"
+    assert "content" not in event[1]
+    assert locator[0] == event[2]
+    assert locator[1].startswith("payloads/")
+    assert locator[2] == 0
+    assert locator[3] > 0
+    assert integrity[0] in {"valid", "degraded"}
+    assert int(revision) >= 1

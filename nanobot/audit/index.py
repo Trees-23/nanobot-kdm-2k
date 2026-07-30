@@ -7,13 +7,15 @@ import sqlite3
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 from filelock import FileLock, Timeout
 
 from nanobot.audit.index_schema import SCHEMA_SQL, SCHEMA_VERSION
 from nanobot.audit.integrity import verify_chain
 from nanobot.audit.reader import AuditReader
-from nanobot.audit.schema import audit_event_adapter
+from nanobot.audit.schema import audit_event_adapter, audit_payload_adapter
+from nanobot.audit.verify import AuditVerifier
 
 
 class IndexRebuildRequired(RuntimeError):  # noqa: N818 - public design contract
@@ -61,9 +63,20 @@ class AuditIndex:
             "SELECT value FROM meta WHERE key = 'schema_version'"
         ).fetchone()
         if row is None:
+            now = datetime.now(UTC).isoformat()
             connection.executemany(
                 "INSERT INTO meta(key, value) VALUES (?, ?)",
-                (("schema_version", str(SCHEMA_VERSION)), ("source_format", "audit-v1")),
+                (
+                    ("schema_version", str(SCHEMA_VERSION)),
+                    ("source_format", "audit-v1"),
+                    ("revision", "0"),
+                    ("updated_at", now),
+                    ("newest_catalog_commit_at", ""),
+                    ("coverage_complete", "false"),
+                    ("last_error_code", ""),
+                    ("last_error_message", ""),
+                    ("last_error_at", ""),
+                ),
             )
             connection.commit()
         elif int(row[0]) != SCHEMA_VERSION:
@@ -148,16 +161,40 @@ class _EventPrefix:
     durable_offset: int
     final_hash: str
     durability_epoch: int
+    committed_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class _PayloadPrefix:
+    process_instance_id: str
+    segment_id: str
+    path: Path
+    path_token: str
+    durable_offset: int
+    final_hash: str
+    durability_epoch: int
+    committed_at: datetime
 
 
 class AuditIndexer:
     def __init__(self, root: Path, *, index_path: Path | None = None) -> None:
         self.root = root
         self.reader = AuditReader(root)
+        self.verifier = AuditVerifier(root)
         self.index_path = index_path or root / "state" / "audit-index.sqlite"
 
-    def _prefixes(self) -> list[_EventPrefix]:
+    def _resolve_path_token(self, path_token: str) -> Path:
+        root = self.root.resolve()
+        path = (root / path_token).resolve()
+        try:
+            path.relative_to(root)
+        except ValueError as error:
+            raise ValueError("catalog path escapes audit root") from error
+        return path
+
+    def _prefixes(self) -> tuple[list[_EventPrefix], list[_PayloadPrefix]]:
         prefixes: dict[tuple[str, str], _EventPrefix] = {}
+        payload_prefixes: dict[tuple[str, str], _PayloadPrefix] = {}
         for process_id in self.reader.process_ids():
             records, _ = self.reader._read_catalog(process_id)
             paths: dict[str, str] = {}
@@ -172,21 +209,49 @@ class AuditIndexer:
                     candidate = _EventPrefix(
                         process_id,
                         record.event_segment_id,
-                        self.root / path_token,
+                        self._resolve_path_token(path_token),
                         record.event_durable_offset,
                         record.event_final_hash,
                         record.durability_epoch,
+                        record.occurred_at,
                     )
                     current = prefixes.get(key)
                     if current is None or candidate.durability_epoch > current.durability_epoch:
                         prefixes[key] = candidate
-        return sorted(
+                    if record.payload_segment_id and record.payload_final_hash:
+                        payload_path_token = paths.get(record.payload_segment_id)
+                        if payload_path_token is None:
+                            continue
+                        payload_key = (process_id, record.payload_segment_id)
+                        payload_candidate = _PayloadPrefix(
+                            process_id,
+                            record.payload_segment_id,
+                            self._resolve_path_token(payload_path_token),
+                            payload_path_token,
+                            record.payload_durable_offset,
+                            record.payload_final_hash,
+                            record.durability_epoch,
+                            record.occurred_at,
+                        )
+                        current_payload = payload_prefixes.get(payload_key)
+                        if (
+                            current_payload is None
+                            or payload_candidate.durability_epoch
+                            > current_payload.durability_epoch
+                        ):
+                            payload_prefixes[payload_key] = payload_candidate
+        events = sorted(
             prefixes.values(),
             key=lambda item: (item.process_instance_id, item.durability_epoch, item.segment_id),
         )
+        payloads = sorted(
+            payload_prefixes.values(),
+            key=lambda item: (item.process_instance_id, item.durability_epoch, item.segment_id),
+        )
+        return events, payloads
 
     @staticmethod
-    def _event_row(event) -> tuple[object, ...]:
+    def _event_row(event: Any) -> tuple[object, ...]:
         usage = getattr(event, "usage", {}) or {}
         return (
             event.event_id,
@@ -220,7 +285,43 @@ class AuditIndexer:
             event.process_instance_id,
             event.segment_id,
             event.segment_sequence,
+            event.durability_epoch,
+            json.dumps(event.model_dump(mode="json"), sort_keys=True, separators=(",", ":")),
         )
+
+    @staticmethod
+    def _payload_rows(prefix: _PayloadPrefix, committed: bytes) -> list[tuple[object, ...]]:
+        rows: list[tuple[object, ...]] = []
+        offset = 0
+        payloads = []
+        for line in committed.splitlines(keepends=True):
+            payload = audit_payload_adapter.validate_json(line)
+            payloads.append(payload)
+            rows.append(
+                (
+                    payload.payload_id,
+                    payload.event_id,
+                    payload.payload_kind,
+                    payload.process_instance_id,
+                    payload.payload_segment_id,
+                    payload.payload_segment_sequence,
+                    prefix.path_token,
+                    offset,
+                    len(line),
+                )
+            )
+            offset += len(line)
+        chain = verify_chain(payloads, hash_field="payload_hash")
+        if not chain.valid:
+            raise ValueError(chain.error_code or "payload_chain_invalid")
+        if not payloads or payloads[-1].payload_hash != prefix.final_hash:
+            raise ValueError("payload_committed_prefix_hash_mismatch")
+        return rows
+
+    @staticmethod
+    def _meta(index: AuditIndex, key: str, default: str = "") -> str:
+        row = index.connection.execute("SELECT value FROM meta WHERE key = ?", (key,)).fetchone()
+        return str(row[0]) if row is not None else default
 
     def update(self) -> IndexUpdateReport:
         inserted = 0
@@ -230,7 +331,13 @@ class AuditIndexer:
         with AuditIndexWriter.acquire(self.root):
             index = AuditIndex.open(self.index_path)
             try:
-                for prefix in self._prefixes():
+                event_prefixes, payload_prefixes = self._prefixes()
+                changed_processes: set[str] = set()
+                newest_commit = max(
+                    (prefix.committed_at for prefix in [*event_prefixes, *payload_prefixes]),
+                    default=None,
+                )
+                for prefix in event_prefixes:
                     if prefix.process_instance_id in blocked_processes:
                         continue
                     cursor = index.get_cursor(prefix.segment_id) or SegmentCursor.zero(
@@ -268,9 +375,17 @@ class AuditIndexer:
                     before = index.connection.total_changes
                     index.connection.executemany(
                         """
-                        INSERT OR IGNORE INTO events VALUES (
+                        INSERT OR IGNORE INTO events (
+                          event_id, event_type, occurred_at, trace_id, turn_id, run_id,
+                          parent_run_id, resumed_from_run_id, caused_by_event_id, model_call_id,
+                          attempt_id, tool_call_id, checkpoint_id, goal_id, delivery_id,
+                          session_key, source_type, iteration, status, stop_reason, provider,
+                          model, tool_name, elapsed_ms, prompt_tokens, completion_tokens,
+                          total_tokens, payload_id, process_instance_id, segment_id,
+                          segment_sequence, durability_epoch, event_json
+                        ) VALUES (
                           ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                          ?, ?, ?, ?, ?, ?, ?, ?
+                          ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
                         )
                         """,
                         (self._event_row(event) for event in events),
@@ -293,13 +408,112 @@ class AuditIndexer:
                         ),
                     )
                     indexed_segments += 1
+                    changed_processes.add(prefix.process_instance_id)
+
+                for prefix in payload_prefixes:
+                    if prefix.process_instance_id in blocked_processes:
+                        continue
+                    cursor = index.get_cursor(prefix.segment_id) or SegmentCursor.zero(
+                        process_instance_id=prefix.process_instance_id,
+                        stream_kind="payload",
+                        segment_id=prefix.segment_id,
+                    )
+                    if cursor.durable_offset > prefix.durable_offset:
+                        raise IndexRebuildRequired("source payload prefix moved backwards")
+                    if (
+                        cursor.durable_offset == prefix.durable_offset
+                        and cursor.final_hash == prefix.final_hash
+                    ):
+                        continue
+                    try:
+                        data = prefix.path.read_bytes()
+                        committed = data[: prefix.durable_offset]
+                        if len(data) < prefix.durable_offset or not committed.endswith(b"\n"):
+                            raise ValueError("invalid_committed_payload_prefix")
+                        rows = self._payload_rows(prefix, committed)
+                    except Exception as error:
+                        failures.append(
+                            f"{prefix.process_instance_id}:{prefix.segment_id}:{type(error).__name__}"
+                        )
+                        blocked_processes.add(prefix.process_instance_id)
+                        continue
+                    index.connection.executemany(
+                        """
+                        INSERT OR IGNORE INTO payload_locators (
+                          payload_id, event_id, payload_kind, process_instance_id, segment_id,
+                          segment_sequence, path_token, line_offset, line_length
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        rows,
+                    )
+                    index.connection.execute(
+                        """
+                        INSERT INTO segment_cursors VALUES (?, 'payload', ?, ?, ?, ?)
+                        ON CONFLICT(process_instance_id, stream_kind, segment_id) DO UPDATE SET
+                          durable_offset=excluded.durable_offset,
+                          final_hash=excluded.final_hash,
+                          durability_epoch=excluded.durability_epoch
+                        """,
+                        (
+                            prefix.process_instance_id,
+                            prefix.segment_id,
+                            prefix.durable_offset,
+                            prefix.final_hash,
+                            prefix.durability_epoch,
+                        ),
+                    )
+                    indexed_segments += 1
+                    changed_processes.add(prefix.process_instance_id)
+
+                current_revision = int(self._meta(index, "revision", "0"))
+                coverage_value = "true" if not failures else "false"
+                failures_value = json.dumps(failures, separators=(",", ":"))
+                state_changed = bool(changed_processes) or (
+                    self._meta(index, "coverage_complete", "false") != coverage_value
+                    or self._meta(index, "coverage_failures", "[]") != failures_value
+                )
+                next_revision = current_revision + int(state_changed)
+                verified_at = datetime.now(UTC).isoformat()
+                for process_id in sorted(changed_processes):
+                    report = self.verifier.verify_process(process_id)
+                    index.connection.execute(
+                        """
+                        INSERT INTO process_integrity VALUES (?, ?, ?, ?, ?, ?)
+                        ON CONFLICT(process_instance_id) DO UPDATE SET
+                          status=excluded.status,
+                          error_codes_json=excluded.error_codes_json,
+                          warning_codes_json=excluded.warning_codes_json,
+                          verified_revision=excluded.verified_revision,
+                          verified_at=excluded.verified_at
+                        """,
+                        (
+                            process_id,
+                            report.status.value,
+                            json.dumps(report.error_codes, separators=(",", ":")),
+                            json.dumps(report.warning_codes, separators=(",", ":")),
+                            next_revision,
+                            verified_at,
+                        ),
+                    )
                 index.connection.execute(
                     "INSERT OR REPLACE INTO meta(key, value) VALUES ('coverage_complete', ?)",
-                    ("true" if not failures else "false",),
+                    (coverage_value,),
                 )
                 index.connection.execute(
                     "INSERT OR REPLACE INTO meta(key, value) VALUES ('coverage_failures', ?)",
-                    (json.dumps(failures, separators=(",", ":")),),
+                    (failures_value,),
+                )
+                now = datetime.now(UTC).isoformat()
+                metadata = {
+                    "revision": str(next_revision),
+                    "updated_at": now,
+                    "newest_catalog_commit_at": newest_commit.isoformat() if newest_commit else "",
+                    "last_error_code": "index_refresh_failed" if failures else "",
+                    "last_error_message": failures[0] if failures else "",
+                    "last_error_at": now if failures else "",
+                }
+                index.connection.executemany(
+                    "INSERT OR REPLACE INTO meta(key, value) VALUES (?, ?)", metadata.items()
                 )
                 index.connection.commit()
             except BaseException:

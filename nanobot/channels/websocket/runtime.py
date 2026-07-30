@@ -397,6 +397,8 @@ class WebSocketChannel(BaseChannel):
 
         self._running = True
         self._stop_event = asyncio.Event()
+        if self.gateway.audit_index is not None:
+            await self.gateway.audit_index.start()
 
         ssl_context = self._build_ssl_context()
         scheme = "wss" if ssl_context else "ws"
@@ -748,6 +750,8 @@ class WebSocketChannel(BaseChannel):
         self._conn_chats.clear()
         self._conn_default.clear()
         self._tokens.clear()
+        if self.gateway.audit_index is not None:
+            await self.gateway.audit_index.stop()
 
     async def _safe_send_to(self, connection: Any, raw: str, *, label: str = "") -> None:
         """Send a raw frame to one connection, cleaning up on ConnectionClosed."""

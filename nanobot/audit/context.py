@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
+from typing import Any
 
 from nanobot.audit.ids import new_audit_id
 
@@ -47,14 +48,21 @@ class AuditRunContext:
     parent_run_id: str | None = None
     resumed_from_run_id: str | None = None
     source_type: str = "agent"
+    source_metadata: dict[str, Any] | None = None
 
-    def child_run(self, *, source_type: str) -> AuditRunContext:
+    def child_run(
+        self,
+        *,
+        source_type: str,
+        source_metadata: dict[str, Any] | None = None,
+    ) -> AuditRunContext:
         return replace(
             self,
             run_id=new_audit_id(),
             parent_run_id=self.run_id,
             resumed_from_run_id=None,
             source_type=source_type,
+            source_metadata=source_metadata,
         )
 
 
@@ -73,6 +81,7 @@ class AuditTurnContext:
         *,
         source_type: str = "agent",
         resumed_from_run_id: str | None = None,
+        source_metadata: dict[str, Any] | None = None,
     ) -> AuditRunContext:
         return AuditRunContext(
             trace_id=self.trace_id,
@@ -81,6 +90,7 @@ class AuditTurnContext:
             parent_run_id=None,
             resumed_from_run_id=resumed_from_run_id,
             source_type=source_type,
+            source_metadata=source_metadata,
         )
 
 

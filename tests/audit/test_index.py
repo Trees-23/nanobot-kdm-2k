@@ -9,7 +9,7 @@ def test_index_uses_wal_and_schema_version(tmp_path) -> None:
     index = AuditIndex.open(tmp_path / "index.sqlite")
     try:
         assert index.connection.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
-        assert index.schema_version == 1
+        assert index.schema_version == 2
         assert index.connection.execute(
             "SELECT value FROM meta WHERE key = 'source_format'"
         ).fetchone()[0] == "audit-v1"
@@ -42,3 +42,15 @@ def test_unknown_schema_requires_rebuild(tmp_path) -> None:
     assert sqlite3.connect(path).execute(
         "SELECT value FROM meta WHERE key = 'schema_version'"
     ).fetchone()[0] == "99"
+
+
+def test_v1_schema_requires_explicit_rebuild(tmp_path) -> None:
+    path = tmp_path / "index.sqlite"
+    connection = sqlite3.connect(path)
+    connection.execute("CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
+    connection.execute("INSERT INTO meta VALUES ('schema_version', '1')")
+    connection.commit()
+    connection.close()
+
+    with pytest.raises(IndexRebuildRequired):
+        AuditIndex.open(path)

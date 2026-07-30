@@ -167,7 +167,9 @@ class DeliveryAuditRecorder:
         )
         await self.emitter.emit(event)
 
-    async def finished(self, ordinal: int, status: str) -> None:
+    async def finished(
+        self, ordinal: int, status: str, *, suppression_reason: str | None = None
+    ) -> None:
         if self.context is None:
             return
         event = DeliveryFinishedDraft.model_validate(
@@ -180,6 +182,7 @@ class DeliveryAuditRecorder:
                 "final_attempt_ordinal": ordinal,
                 "status": status,
                 "remote_receipt_id": None,
+                "suppression_reason": suppression_reason,
             }
         )
         await self.emitter.emit(event, critical=True)

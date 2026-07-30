@@ -318,8 +318,9 @@ class AgentLoop:
         local_trigger_store: Any | None = None,
         audit_runtime: AuditRuntime | None = None,
     ):
-        from nanobot.config.schema import ToolsConfig
+        from nanobot.config.schema import ToolsConfig, _resolve_tool_config_refs
 
+        _resolve_tool_config_refs()
         _tc = tools_config or ToolsConfig()
         defaults = AgentDefaults()
         self.bus = bus
@@ -1470,7 +1471,7 @@ class AgentLoop:
         elif local_trigger(msg.metadata) is not None:
             source_type = "local_trigger"
         elif msg.sender_id == "subagent":
-            source_type = "subagent"
+            source_type = "continuation"
         else:
             source_type = "system" if kind is TurnKind.SYSTEM else "user"
         audit_turn = self.audit_runtime.context_resolver.resolve_turn(
@@ -1486,7 +1487,7 @@ class AgentLoop:
                 injected_run_id=inherited.get("run_id"),
             )
         )
-        if inherited.get("run_id"):
+        if inherited.get("run_id") and msg.sender_id != "subagent":
             audit_run = AuditRunContext(
                 trace_id=audit_turn.trace_id,
                 turn_id=audit_turn.turn_id,
@@ -1498,6 +1499,14 @@ class AgentLoop:
             audit_run = audit_turn.new_run(
                 source_type=source_type,
                 resumed_from_run_id=checkpoint.get("_audit_run_id"),
+                source_metadata=(
+                    {
+                        "continuation_of_run_id": inherited["run_id"],
+                        "injection_source": "subagent_result",
+                    }
+                    if msg.sender_id == "subagent" and inherited.get("run_id")
+                    else None
+                ),
             )
         audit = TurnAuditRecorder(self.audit_runtime.emitter, audit_turn)
         t0 = time.time()
@@ -1629,6 +1638,14 @@ class AgentLoop:
             len(ctx.trace),
         )
         return ctx.outbound
+
+    def active_audit_run_ids(self) -> set[str]:
+        """Return a point-in-time runtime ownership snapshot for read-only consumers."""
+        return {
+            run_id
+            for runs_by_id in self._active_audit_runs.values()
+            for run_id in runs_by_id
+        }
 
     def _assemble_outbound(
         self,

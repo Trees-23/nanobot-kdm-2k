@@ -145,6 +145,7 @@ _EVENT_SPECS: dict[EventType, tuple[str, dict[str, tuple[Any, Any]]]] = {
         "final_attempt_ordinal": _required(int),
         "status": _required(Literal["accepted_by_adapter", "failed", "cancelled", "suppressed"]),
         "remote_receipt_id": _optional(str),
+        "suppression_reason": _optional(str),
     }),
     EventType.RUN_STARTED: ("TUR", {}),
     EventType.RUN_FINISHED: ("TUR", {
