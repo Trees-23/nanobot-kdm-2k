@@ -8,38 +8,31 @@ cd /home/kdm/TL-WorkSpace/TL-Project/AIworker/nanobot-kdm-2k
 
 ## 启动与停止
 
-前台启动（终端持续显示日志，同时可以在浏览器中对话）：
+日常使用前台启动，终端会持续显示日志：
 
 ```bash
 docker compose up nanobot-gateway
 ```
 
-保持这个终端窗口开启，然后访问 `http://localhost:8765`。按 `Ctrl+C` 会停止 nanobot。
+保持这个终端窗口开启，然后访问 `http://localhost:8765`。按 `Ctrl+C` 会停止
+nanobot。正常使用不需要加 `-d`。
 
-后台运行方式：
+常用管理命令：
 
 ```bash
-# 后台启动
-docker compose up -d nanobot-gateway
-
 # 查看运行状态
 docker compose ps
-
-# 实时查看日志（Ctrl+C 退出日志，不停止服务）
-docker compose logs -f --tail=100 nanobot-gateway
-
-# 重启
-docker compose restart nanobot-gateway
 
 # 停止
 docker compose down
 ```
 
-更新代码或 Dockerfile 后重新构建：
+修改配置后，在运行日志的终端按 `Ctrl+C`，再重新执行前台启动命令。
+
+更新代码、依赖或 Dockerfile 后，在前台重新构建并启动：
 
 ```bash
-docker compose build
-docker compose up -d --force-recreate nanobot-gateway
+docker compose up --build --force-recreate nanobot-gateway
 ```
 
 ## 配置文件
@@ -48,25 +41,69 @@ docker compose up -d --force-recreate nanobot-gateway
 /home/kdm/TL-WorkSpace/TL-Project/AIworker/nanobot-kdm-2k/runtime/config.json
 ```
 
+Docker Compose 会把宿主机的 `./runtime` 挂载为容器内的
+`/home/nanobot/.nanobot`。因此配置中的 workspace 应保持：
+
+```json
+"workspace": "~/.nanobot/workspace"
+```
+
+它在宿主机上实际对应 `runtime/workspace/`，不要改成宿主机绝对路径。
+
 主要运行数据：
 
 ```text
 runtime/workspace/memory/    # 长期记忆
 runtime/workspace/sessions/  # 对话历史和上下文
+runtime/workspace/skills/    # 工作区技能
+runtime/workspace/cron/      # 当前定时任务
 runtime/workspace/HEARTBEAT.md
-runtime/cron/                # 定时任务
 runtime/webui/               # WebUI 历史
 runtime/audit/v1/            # Agent 审计事件、完整 payload、catalog 和查询索引
+runtime/media/               # 上传和生成的媒体文件
 ```
 
 `runtime/` 包含 API Key、聊天记录、个人记忆和完整明文审计 payload，已加入
 `.gitignore`，不要提交到 Git。审计记录可通过
 `docker compose run --rm nanobot-cli audit ...` 查询。
 
-修改配置后重启：
+## OpenAI API 配置
+
+模型与 Provider 在 `runtime/config.json` 中配置，例如：
+
+```json
+{
+  "agents": {
+    "defaults": {
+      "model": "gpt-5.5",
+      "provider": "openai"
+    }
+  },
+  "providers": {
+    "openai": {
+      "apiKey": "填写实际 API Key",
+      "apiBase": "https://ai.klinkw.com",
+      "apiType": "responses"
+    }
+  }
+}
+```
+
+`apiType` 必须与中转服务实际提供的接口一致：
+
+- `"responses"`：强制请求 `{apiBase}/responses`，适用于支持 OpenAI Responses API
+  的 GPT-5.x 服务；失败时不会退回 Chat Completions。
+- `"chat_completions"`：请求 `{apiBase}/chat/completions`。
+- `"auto"`：对 OpenAI 官方地址可自动选择；对第三方地址通常会选择 Chat
+  Completions，不适合用来确认第三方 Responses API。
+
+Klink 明确提供的 `apiBase` 是 `https://ai.klinkw.com`，不要自行追加 `/v1`。
+使用 `"responses"` 时，nanobot 会请求 `https://ai.klinkw.com/responses`。
+
+修改配置后重新前台启动：
 
 ```bash
-docker compose restart nanobot-gateway
+docker compose up nanobot-gateway
 ```
 
 ## 浏览器与健康检查
