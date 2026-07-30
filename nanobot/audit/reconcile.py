@@ -25,6 +25,45 @@ from nanobot.audit.schema import (
 Liveness = Literal["alive", "dead", "uncertain"]
 
 
+def _windows_pid_liveness(pid: int) -> Liveness:
+    """Check a Windows PID without sending a signal to the process."""
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        open_process = kernel32.OpenProcess
+        open_process.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
+        open_process.restype = wintypes.HANDLE
+        close_handle = kernel32.CloseHandle
+        close_handle.argtypes = (wintypes.HANDLE,)
+        close_handle.restype = wintypes.BOOL
+        handle = open_process(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
+        if handle:
+            close_handle(handle)
+            return "alive"
+        error = ctypes.get_last_error()
+    except (AttributeError, OSError, ValueError):
+        return "uncertain"
+    if error == 87:  # ERROR_INVALID_PARAMETER: the PID does not exist.
+        return "dead"
+    if error == 5:  # ERROR_ACCESS_DENIED: a protected process still exists.
+        return "alive"
+    return "uncertain"
+
+
+def _local_pid_liveness(pid: int) -> Liveness:
+    if os.name == "nt":
+        return _windows_pid_liveness(pid)
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return "dead"
+    except (PermissionError, OSError):
+        return "uncertain"
+    return "alive"
+
+
 @dataclass(frozen=True, slots=True)
 class ReconcileReport:
     emitted_types: tuple[str, ...]
@@ -68,13 +107,7 @@ class AuditReconciler:
             return "alive" if age <= STALE_AFTER_S else "uncertain"
         if boot != _boot_id():
             return "dead"
-        try:
-            os.kill(pid, 0)
-        except ProcessLookupError:
-            return "dead"
-        except (PermissionError, OSError):
-            return "uncertain"
-        return "alive"
+        return _local_pid_liveness(pid)
 
     @staticmethod
     def _common(event_type: str, source: Any) -> dict[str, Any]:

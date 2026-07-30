@@ -1,2 +1,5 @@
 # Ensure shell scripts always use LF line endings (Docker/Linux compat)
 *.sh text eol=lf
+
+# Audit fixtures contain byte offsets and byte-for-byte export expectations.
+tests/fixtures/audit_v1/** text eol=lf
