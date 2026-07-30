@@ -122,6 +122,32 @@ export interface AuditNodeSummary {
   transitions?: Array<{ event_type: string; occurred_at: string; version: number | null }>;
   delivery_result?: string | null;
   suppression_reason?: string | null;
+  failure_kind?: string | null;
+  error_type?: string | null;
+  error_code?: string | null;
+  error_summary?: string | null;
+  failed_event_id?: string | null;
+  effective_timeout_ms?: number | null;
+  safe_input_summary?: string | null;
+  impact?: "run_failed" | "run_continued" | "unknown" | "pending" | null;
+  recovery_status?: "recovered" | "unrecovered" | "continued" | "unknown" | "pending" | null;
+  recovered_by_event_id?: string | null;
+  evidence_source?: "recorded" | "legacy_inferred" | "unknown" | null;
+  fatal_event_id?: string | null;
+  failure_policy?: string | null;
+  fail_on_tool_error?: boolean | null;
+  failure_count?: number | null;
+  fatal_failure_count?: number | null;
+  recovered_failure_count?: number | null;
+  continued_failure_count?: number | null;
+}
+
+export interface AuditNodeEventRef {
+  event_id: string;
+  event_type: string;
+  occurred_at: string;
+  status: string | null;
+  payload_id: string | null;
 }
 
 export interface AuditGraphNode {
@@ -133,6 +159,7 @@ export interface AuditGraphNode {
   finished_at: string | null;
   elapsed_ms: number | null;
   raw_event_ids: string[];
+  raw_events?: AuditNodeEventRef[];
   region_id: string;
   parent_node_id: string | null;
   child_node_ids: string[];

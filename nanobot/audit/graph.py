@@ -14,6 +14,7 @@ from nanobot.audit.graph_types import (
     AuditGraphEdge,
     AuditGraphNode,
     AuditGraphRegion,
+    AuditNodeEventRef,
     AuditNodeRelation,
     AuditNodeSummary,
     CollapseGroup,
@@ -172,6 +173,19 @@ def _order(event: AuditEventBase) -> tuple[Any, ...]:
         event.segment_sequence,
         event.event_id,
     )
+
+
+def _event_refs(events: Sequence[AuditEventBase]) -> list[AuditNodeEventRef]:
+    return [
+        AuditNodeEventRef(
+            event_id=event.event_id,
+            event_type=event.event_type,
+            occurred_at=event.occurred_at,
+            status=getattr(event, "status", None),
+            payload_id=event.payload_id,
+        )
+        for event in events
+    ]
 
 
 def _status(
@@ -688,6 +702,7 @@ class AuditGraphBuilder:
                     finished_at=finishes[-1].occurred_at if finishes else None,
                     elapsed_ms=_elapsed(grouped),
                     raw_event_ids=[event.event_id for event in lifecycle],
+                    raw_events=_event_refs(lifecycle),
                     region_id=lane_id,
                     parent_node_id=(
                         f"run:{trace_id}:{item.parent_run_id}"
@@ -1026,6 +1041,7 @@ class AuditGraphBuilder:
                     finished_at=terminals[-1].occurred_at if terminals else None,
                     elapsed_ms=_elapsed(grouped),
                     raw_event_ids=[event.event_id for event in grouped],
+                    raw_events=_event_refs(grouped),
                     region_id=region.id,
                     parent_node_id=parent_id,
                     expandable=node_type == "model_call",

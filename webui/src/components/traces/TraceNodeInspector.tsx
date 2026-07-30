@@ -1,6 +1,7 @@
 import {
   Activity,
   Copy,
+  Eye,
   GitBranch,
   Link2,
   LocateFixed,
@@ -10,31 +11,25 @@ import {
 } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
-import type { AuditGraphNode, TraceEdgeType } from "@/lib/audit-types";
-import type { AuditEventItem } from "@/lib/audit-types";
-import { auditNodeTypeLabel, auditStatusLabel, auditValueLabel } from "@/lib/audit-display";
+import type { AuditGraphNode, AuditNodeEventRef, TraceEdgeType } from "@/lib/audit-types";
+import { auditStatusLabel, auditValueLabel } from "@/lib/audit-display";
 
 export type TraceFocusMode = "causal" | "context" | "branch" | "resume" | null;
-
-function valueOrDash(value: unknown): string {
-  if (value == null || value === "") return "-";
-  return String(value);
-}
 
 export function TraceNodeInspector({
   node,
   focusMode,
   onFocusMode,
   onClose,
-  events,
   onLocateEvent,
+  onLoadPayload,
 }: {
   node: AuditGraphNode;
   focusMode: TraceFocusMode;
   onFocusMode: (mode: TraceFocusMode) => void;
   onClose: () => void;
-  events: AuditEventItem[];
-  onLocateEvent: (event: AuditEventItem) => void;
+  onLocateEvent: (event: AuditNodeEventRef) => void;
+  onLoadPayload: (payloadId: string) => void;
 }) {
   const focusButtons: Array<{
     mode: Exclude<TraceFocusMode, null>;
@@ -52,31 +47,78 @@ export function TraceNodeInspector({
       ? auditValueLabel(node.summary.suppression_reason)
       : "历史记录未提供原因"
     : null;
-  const summaryRows = [
-    ["类型", auditNodeTypeLabel(node.type)],
+  const commonRows: Array<[string, unknown]> = [
     ["终态", auditStatusLabel(node.terminal_status ?? node.status)],
-    ["过程健康", auditStatusLabel(node.health_status ?? node.status)],
-    ["Run 类型", node.run_kind],
-    ["Lane", node.lane_id],
-    ["Run ID", node.run_id],
-    ["Iteration", node.iteration],
-    ["Spawn Tool Call", node.spawn_tool_call_id],
-    ["Continuation 来源", node.continuation_of_run_id],
-    ["注入来源", node.injection_source],
-    ["过程异常数", node.anomaly_count],
-    ["耗时", node.elapsed_ms == null ? "-" : `${node.elapsed_ms} ms`],
-    ["Provider", node.summary.provider],
-    ["Model", node.summary.model],
-    ["Tool", node.summary.tool_name],
-    ["停止原因", node.summary.stop_reason ? auditValueLabel(node.summary.stop_reason) : null],
-    ["Checkpoint 阶段", node.summary.checkpoint_phase ? auditValueLabel(node.summary.checkpoint_phase) : null],
-    ["Checkpoint 版本", node.summary.checkpoint_version],
-    ["Delivery 结果", node.summary.delivery_result ? auditValueLabel(node.summary.delivery_result) : null],
-    ["抑制原因", suppressionReason],
+    ["耗时", node.elapsed_ms == null ? null : `${node.elapsed_ms} ms`],
   ];
-  const contributingEvents = node.raw_event_ids
-    .map((eventId) => events.find((event) => event.event_id === eventId))
-    .filter((event): event is AuditEventItem => Boolean(event));
+  const rowsByType: Partial<Record<AuditGraphNode["type"], Array<[string, unknown]>>> = {
+    tool_call: [
+      ["Tool", node.summary.tool_name],
+      ["安全输入", node.summary.safe_input_summary],
+      ["错误类型", node.summary.error_type],
+      ["错误码", node.summary.error_code],
+      ["有效 timeout", node.summary.effective_timeout_ms == null ? null : `${node.summary.effective_timeout_ms} ms`],
+      ["Iteration", node.iteration],
+      ["Run ID", node.run_id],
+    ],
+    run: [
+      ["Run 类型", node.run_kind],
+      ["停止原因", node.summary.stop_reason ? auditValueLabel(node.summary.stop_reason) : null],
+      ["工具错误数", node.summary.failure_count],
+      ["致命错误数", node.summary.fatal_failure_count],
+      ["已恢复数", node.summary.recovered_failure_count],
+      ["继续运行数", node.summary.continued_failure_count],
+      ["失败策略", node.summary.failure_policy],
+      ["failOnToolError", node.summary.fail_on_tool_error],
+    ],
+    model_call: [
+      ["Provider", node.summary.provider],
+      ["Model", node.summary.model],
+      ["Prompt tokens", node.summary.prompt_tokens],
+      ["Completion tokens", node.summary.completion_tokens],
+      ["Attempt", node.summary.attempt_count],
+    ],
+    model_attempt: [
+      ["Provider", node.summary.provider],
+      ["Model", node.summary.model],
+      ["Attempt", node.summary.attempt_count],
+    ],
+    delivery: [
+      ["Delivery 结果", node.summary.delivery_result ? auditValueLabel(node.summary.delivery_result) : null],
+      ["抑制原因", suppressionReason],
+    ],
+    checkpoint: [
+      ["阶段", node.summary.checkpoint_phase ? auditValueLabel(node.summary.checkpoint_phase) : null],
+      ["版本", node.summary.checkpoint_version],
+      ["已恢复", node.summary.checkpoint_restored],
+      ["已清理", node.summary.checkpoint_cleared],
+    ],
+    decision: [
+      ["决策类型", node.summary.decision_type ? auditValueLabel(node.summary.decision_type) : null],
+      ["原因", node.summary.reason],
+      ["Iteration", node.iteration],
+    ],
+    goal: [["标识", node.summary.identifier]],
+    turn_result: [["标识", node.summary.identifier]],
+    anomaly: [["异常类型", node.summary.subtype]],
+    external_reference: [["标识", node.summary.identifier]],
+  };
+  const summaryRows = [...commonRows, ...(rowsByType[node.type] ?? [])]
+    .filter((row) => row[1] != null && row[1] !== "");
+  const contributingEvents = node.raw_events ?? [];
+  const impactLabel = {
+    run_failed: "导致 Run 失败",
+    run_continued: "Run 继续执行",
+    unknown: "影响未知",
+    pending: "影响待定",
+  }[node.summary.impact ?? "unknown"];
+  const recoveryLabel = {
+    recovered: "已由后续确定性调用恢复",
+    unrecovered: "未恢复",
+    continued: "未证明恢复，但 Run 已继续",
+    unknown: "恢复状态未知",
+    pending: "恢复状态待定",
+  }[node.summary.recovery_status ?? "unknown"];
 
   return (
     <aside className="flex h-full min-h-0 w-full flex-col border-l border-border/60 bg-background" aria-label="节点检查器">
@@ -90,6 +132,17 @@ export function TraceNodeInspector({
         </Button>
       </div>
       <div className="min-h-0 flex-1 overflow-y-auto px-3 py-3 text-xs">
+        {node.summary.error_summary ? (
+          <section className="mb-4 rounded-md border border-destructive/30 bg-destructive/5 p-3">
+            <h3 className="text-[11px] font-semibold text-destructive">根因</h3>
+            <p className="mt-1 text-[12px] font-medium">{node.summary.error_summary}</p>
+            <p className="mt-2 text-[10.5px] text-muted-foreground">影响：{impactLabel}</p>
+            <p className="mt-1 text-[10.5px] text-muted-foreground">恢复：{recoveryLabel}</p>
+            {node.summary.evidence_source === "legacy_inferred" ? (
+              <p className="mt-2 text-[10px] text-amber-700 dark:text-amber-300">此分类由历史唯一证据保守推断。</p>
+            ) : null}
+          </section>
+        ) : null}
         <section>
           <h3 className="mb-2 flex items-center gap-1.5 text-[11px] font-semibold uppercase text-muted-foreground">
             <Timer className="h-3.5 w-3.5" />摘要
@@ -98,7 +151,7 @@ export function TraceNodeInspector({
             {summaryRows.map(([label, value]) => (
               <div key={label} className="grid grid-cols-[92px_minmax(0,1fr)] gap-3 py-2">
                 <dt className="text-muted-foreground">{label}</dt>
-                <dd className="min-w-0 break-words text-foreground">{valueOrDash(value)}</dd>
+                <dd className="min-w-0 break-words text-foreground">{String(value)}</dd>
               </div>
             ))}
           </dl>
@@ -114,6 +167,8 @@ export function TraceNodeInspector({
                 size="sm"
                 className="h-8 justify-start gap-1.5 px-2 text-[11px]"
                 onClick={() => onFocusMode(focusMode === mode ? null : mode)}
+                aria-pressed={focusMode === mode}
+                title={`聚焦${label}`}
               >
                 <Icon className="h-3.5 w-3.5" />{label}
               </Button>
@@ -130,15 +185,16 @@ export function TraceNodeInspector({
                   <span className="mt-0.5 block text-[10px] text-muted-foreground">
                     {new Date(event.occurred_at).toLocaleString()} · {auditValueLabel(event.status)}
                   </span>
-                  <span className="mt-0.5 block truncate font-mono text-[10px] text-muted-foreground">
-                    Turn {event.turn_id?.slice(0, 8) ?? "-"} · Run {event.run_id?.slice(0, 8) ?? "-"}
-                    {event.iteration == null ? " · Run 级" : ` · Iteration ${event.iteration}`}
-                  </span>
                   <span className="mt-0.5 block font-mono text-[10px] text-muted-foreground">
                     {event.event_id.slice(0, 12)} · {event.payload_id ? "Payload 可用" : "无 Payload"}
                   </span>
                 </button>
                 <div className="flex items-start gap-1">
+                  {event.payload_id ? (
+                    <Button type="button" variant="ghost" size="icon" className="h-7 w-7" aria-label="查看 Payload" title="查看 Payload" onClick={() => onLoadPayload(event.payload_id!)}>
+                      <Eye className="h-3.5 w-3.5" />
+                    </Button>
+                  ) : null}
                   <Button type="button" variant="ghost" size="icon" className="h-7 w-7" aria-label="复制 Event ID" title="复制 Event ID" onClick={() => void navigator.clipboard?.writeText(event.event_id)}>
                     <Copy className="h-3.5 w-3.5" />
                   </Button>
@@ -149,7 +205,7 @@ export function TraceNodeInspector({
               </div>
             ))}
             {!contributingEvents.length ? (
-              <p className="py-2 text-[10.5px] text-muted-foreground">展开时间线后可查看结构化 Event 证据。</p>
+              <p className="py-2 text-[10.5px] text-muted-foreground">当前 Graph 未提供原始 Event 导航信息。</p>
             ) : null}
           </div>
         </section>

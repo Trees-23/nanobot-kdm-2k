@@ -176,7 +176,13 @@ async def test_trace_full_graph_is_additive_and_payload_free(tmp_path) -> None:
     assert body["nodes"][0]["lane_kind"] == "main"
     assert body["nodes"][0]["terminal_status"]
     assert body["nodes"][0]["health_status"]
+    raw_event = body["nodes"][0]["raw_events"][0]
+    assert set(raw_event) == {
+        "event_id", "event_type", "occurred_at", "status", "payload_id"
+    }
     assert "content" not in body
+    assert "resource_key" not in json.dumps(body)
+    assert "resource_correction_keys" not in json.dumps(body)
     assert b"payload content" not in response.body
 
 

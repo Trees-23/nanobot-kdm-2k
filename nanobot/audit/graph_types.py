@@ -90,6 +90,14 @@ class AuditNodeRelation(BaseModel):
     other_semantic_node_id: str | None = None
 
 
+class AuditNodeEventRef(BaseModel):
+    event_id: str
+    event_type: str
+    occurred_at: datetime
+    status: str | None = None
+    payload_id: str | None = None
+
+
 class AuditGraphNode(BaseModel):
     id: str
     type: AuditNodeType
@@ -99,6 +107,7 @@ class AuditGraphNode(BaseModel):
     finished_at: datetime | None
     elapsed_ms: int | None
     raw_event_ids: list[str]
+    raw_events: list[AuditNodeEventRef] = Field(default_factory=list)
     region_id: str
     parent_node_id: str | None = None
     child_node_ids: list[str] = Field(default_factory=list)

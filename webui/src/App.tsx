@@ -892,6 +892,19 @@ export default function App() {
     setState({ status: "auth" });
   };
 
+  const handleApiReauth = async (): Promise<string | null> => {
+    if (state.status !== "ready") return null;
+    try {
+      const refreshed = await refreshReadyClient(state.client, state.runtimeSurface);
+      return refreshed.token;
+    } catch (error) {
+      if (isBootstrapAuthRequired(error)) {
+        setState({ status: "auth", failed: !!bootstrapSecretRef.current });
+      }
+      return null;
+    }
+  };
+
   const handleNativeEngineRestart = async (): Promise<string> => {
     const runtimeHost = createRuntimeHost(state.runtimeSurface);
     if (!runtimeHost.restartEngine) {
@@ -923,6 +936,7 @@ export default function App() {
       token={state.token}
       modelName={state.modelName}
       ingressLimits={state.ingressLimits}
+      onReauth={handleApiReauth}
     >
       <Shell
         runtimeSurface={state.runtimeSurface}
@@ -946,7 +960,7 @@ function Shell({
   onNativeEngineRestart: () => Promise<string>;
 }) {
   const { t, i18n } = useTranslation();
-  const { client, token } = useClient();
+  const { client, token, onReauth } = useClient();
   const { theme, toggle } = useTheme();
   const {
     sessions,
@@ -2124,6 +2138,7 @@ function Shell({
               <div className="absolute inset-0 flex flex-col">
                 <TraceWorkbench
                   token={token}
+                  onReauth={onReauth}
                   selection={traceSelection}
                   onSelectionChange={onTraceSelectionChange}
                   onOpenConversation={onOpenTraceConversation}
