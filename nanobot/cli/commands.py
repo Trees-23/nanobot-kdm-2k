@@ -1928,7 +1928,7 @@ def _run_gateway(
         webui_static_dist=webui_static_dist,
         webui_runtime_surface=webui_runtime_surface,
         webui_runtime_capabilities=webui_runtime_capabilities,
-        webui_active_audit_run_ids=agent.active_audit_run_ids,
+        webui_active_audit_run_ids=getattr(agent, "active_audit_run_ids", None),
         audit_emitter=getattr(getattr(agent, "audit_runtime", None), "emitter", None),
     )
 
