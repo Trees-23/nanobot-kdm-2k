@@ -67,7 +67,7 @@ class AuditExporter:
             return self._write_bundle(trace_id, output)
         include_payloads = mode is ExportMode.FULL
         view = self.query.load_trace(trace_id, include_payloads=include_payloads)
-        raw = view.model_dump(mode="json")
+        raw = view.model_dump(mode="json", exclude_unset=True)
         if not include_payloads:
             raw.pop("payloads", None)
         written, largest = self._write_json(raw, output)
@@ -88,7 +88,7 @@ class AuditExporter:
         for process_id in process_ids:
             result = self.query.reader.read_process(process_id)
             catalog_epochs.extend(
-                record.model_dump(mode="json")
+                record.model_dump(mode="json", exclude_unset=True)
                 for record in result.catalog_records
                 if record.catalog_record_type == "epoch_committed"
             )
@@ -114,16 +114,19 @@ class AuditExporter:
         }
         files = {
             "manifest.json": manifest,
-            "trace.json": view.model_dump(mode="json"),
+            "trace.json": view.model_dump(mode="json", exclude_unset=True),
             "verification.json": {
                 "status": view.integrity.status,
                 "error_codes": view.integrity.error_codes,
                 "warning_codes": view.integrity.warning_codes,
             },
             "catalog-epochs.json": catalog_epochs,
-            "events.json": [event.model_dump(mode="json") for event in view.timeline],
+            "events.json": [
+                event.model_dump(mode="json", exclude_unset=True)
+                for event in view.timeline
+            ],
             "payloads.json": {
-                key: payload.model_dump(mode="json")
+                key: payload.model_dump(mode="json", exclude_unset=True)
                 for key, payload in (view.payloads or {}).items()
             },
         }

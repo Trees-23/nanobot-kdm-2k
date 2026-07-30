@@ -1,5 +1,7 @@
 from datetime import UTC, datetime
 
+from pydantic import BaseModel
+
 from nanobot.audit.integrity import canonical_json_bytes, hash_record, verify_chain
 
 
@@ -17,6 +19,27 @@ def test_hash_record_excludes_own_hash_field() -> None:
     assert hash_record(record, hash_field="event_hash") == hash_record(
         {**record, "event_hash": "different"}, hash_field="event_hash"
     )
+
+
+def test_model_verification_ignores_optional_fields_absent_from_persisted_record() -> None:
+    class HistoricalRecord(BaseModel):
+        segment_sequence: int
+        previous_event_hash: str | None
+        value: int
+        event_hash: str
+        additive_field: str | None = None
+
+    raw = {
+        "segment_sequence": 1,
+        "previous_event_hash": None,
+        "value": 3,
+        "event_hash": "",
+    }
+    raw["event_hash"] = hash_record(raw, hash_field="event_hash")
+
+    report = verify_chain([HistoricalRecord.model_validate(raw)], hash_field="event_hash")
+
+    assert report.valid is True
 
 
 def _chained_records(count: int) -> list[dict[str, object]]:
