@@ -6,9 +6,9 @@ import os
 import time
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from agent.runner_helpers import make_run_spec
 from nanobot.config.schema import AgentDefaults
 from nanobot.providers.base import LLMResponse, ToolCallRequest
+from tests.agent.runner_helpers import make_run_spec
 
 _MAX_TOOL_RESULT_CHARS = AgentDefaults().max_tool_result_chars
 

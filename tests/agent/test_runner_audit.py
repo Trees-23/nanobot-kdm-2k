@@ -2,7 +2,6 @@ import asyncio
 import json
 from unittest.mock import AsyncMock, MagicMock
 
-from agent.runner_helpers import make_run_spec
 from nanobot.agent.runner import AgentRunner
 from nanobot.agent.tools.await_subagents import AwaitSubagentsTool
 from nanobot.agent.tools.base import ToolResult
@@ -14,6 +13,7 @@ from nanobot.providers.base import LLMProvider, LLMResponse, ToolCallRequest
 from nanobot.session.goal_orchestration import GoalOrchestrationStore
 from nanobot.session.goal_state import GOAL_STATE_KEY
 from nanobot.session.manager import SessionManager
+from tests.agent.runner_helpers import make_run_spec
 from tests.providers.test_provider_retry import ScriptedProvider
 
 
