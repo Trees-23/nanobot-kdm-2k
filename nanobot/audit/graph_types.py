@@ -62,6 +62,24 @@ class AuditNodeSummary(BaseModel):
     transitions: list[dict[str, str | int | None]] = Field(default_factory=list)
     delivery_result: str | None = None
     suppression_reason: str | None = None
+    failure_kind: str | None = None
+    error_type: str | None = None
+    error_code: str | None = None
+    error_summary: str | None = None
+    failed_event_id: str | None = None
+    effective_timeout_ms: int | None = None
+    safe_input_summary: str | None = None
+    impact: Literal["run_failed", "run_continued", "unknown", "pending"] | None = None
+    recovery_status: Literal["recovered", "unrecovered", "continued", "unknown", "pending"] | None = None
+    recovered_by_event_id: str | None = None
+    evidence_source: Literal["recorded", "legacy_inferred", "unknown"] | None = None
+    fatal_event_id: str | None = None
+    failure_policy: str | None = None
+    fail_on_tool_error: bool | None = None
+    failure_count: int | None = None
+    fatal_failure_count: int | None = None
+    recovered_failure_count: int | None = None
+    continued_failure_count: int | None = None
 
 
 class AuditNodeRelation(BaseModel):

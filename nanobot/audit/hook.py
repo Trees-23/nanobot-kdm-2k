@@ -18,6 +18,7 @@ from nanobot.agent.hook import (
 )
 from nanobot.agent.tools.context import bind_audit_tool_call_id, reset_audit_tool_call_id
 from nanobot.audit.context import AuditRunContext, clear_run_cause, run_cause
+from nanobot.audit.diagnostics import SafeToolInput, safe_error_summary, safe_tool_input
 from nanobot.audit.ids import new_audit_id
 from nanobot.audit.schema import (
     ContinuationRequestedDraft,
@@ -85,6 +86,8 @@ class RunnerAuditHook(AgentHook):
         self._tool_side_effects: dict[str, SideEffectSnapshot] = {}
         self._attempt_counts: dict[str, int] = {}
         self._tool_context_tokens: dict[str, Any] = {}
+        self._tool_safe_inputs: dict[str, SafeToolInput] = {}
+        self._pending_resource_failures: list[tuple[str, SafeToolInput]] = []
         self._fatal_event_id: str | None = None
         self._failure_policy: str | None = None
 
@@ -381,6 +384,9 @@ class RunnerAuditHook(AgentHook):
         self._tool_context_tokens[tool_call.id] = bind_audit_tool_call_id(audit_tool_id)
         self._tool_started_ns[tool_call.id] = time.monotonic_ns()
         self._tool_params[tool_call.id] = params
+        self._tool_safe_inputs[tool_call.id] = safe_tool_input(
+            tool_call.name, tool, params
+        )
         workspace = getattr(tool, "_workspace", None)
         self._tool_side_effects[tool_call.id] = capture_side_effect_before(
             call_id=tool_call.id,
@@ -427,6 +433,7 @@ class RunnerAuditHook(AgentHook):
             reset_audit_tool_call_id(token)
         started = self._tool_started_ns.pop(tool_call.id, time.monotonic_ns())
         self._tool_params.pop(tool_call.id, None)
+        safe_input = self._tool_safe_inputs.pop(tool_call.id, SafeToolInput())
         side_effect_snapshot = self._tool_side_effects.pop(tool_call.id, None)
         status = outcome.status
         if status == "error" and (
@@ -446,6 +453,28 @@ class RunnerAuditHook(AgentHook):
                 }
             )
             await self._emitter.emit(policy)
+        recovery_of_tool_call_ids: list[str] = []
+        if status == "ok" and safe_input.resource_key:
+            remaining: list[tuple[str, SafeToolInput]] = []
+            for failed_tool_call_id, failed_input in self._pending_resource_failures:
+                related = (
+                    failed_input.resource_key == safe_input.resource_key
+                    or safe_input.resource_key in failed_input.correction_keys
+                    or failed_input.resource_key in safe_input.correction_keys
+                )
+                if related:
+                    recovery_of_tool_call_ids.append(failed_tool_call_id)
+                else:
+                    remaining.append((failed_tool_call_id, failed_input))
+            self._pending_resource_failures = remaining
+        error_summary = safe_error_summary(
+            tool_call.name,
+            error_code=outcome.error_code,
+            error_type=outcome.error_type or outcome.error_kind,
+            effective_timeout_ms=outcome.effective_timeout_ms,
+            provider=outcome.provider,
+            safe_input_summary=safe_input.summary,
+        )
         event = ToolFinishedDraft.model_validate(
             {
                 **self._common("tool_finished", iteration=context.iteration),
@@ -457,6 +486,11 @@ class RunnerAuditHook(AgentHook):
                 "error_code": outcome.error_code,
                 "effective_timeout_ms": outcome.effective_timeout_ms,
                 "provider": outcome.provider,
+                "error_summary": error_summary,
+                "safe_input_summary": safe_input.summary,
+                "resource_key": safe_input.resource_key,
+                "resource_correction_keys": list(safe_input.correction_keys),
+                "recovery_of_tool_call_ids": recovery_of_tool_call_ids,
             }
         )
         payload = ToolOutputPayloadDraft(
@@ -483,6 +517,8 @@ class RunnerAuditHook(AgentHook):
             },
         )
         await self._emitter.emit(event, payload=payload, critical=True)
+        if status in {"error", "timeout"} and safe_input.resource_key:
+            self._pending_resource_failures.append((audit_tool_id, safe_input))
         if outcome.fatal and self._fatal_event_id is None:
             self._fatal_event_id = event.event_id
             self._failure_policy = outcome.failure_policy

@@ -387,6 +387,130 @@ def test_trace_full_exposes_terminal_and_process_health_separately() -> None:
     assert run.anomaly_count == 1
 
 
+def test_explicit_recovery_distinguishes_three_config_paths() -> None:
+    events = [
+        _event(1, "run_started"),
+        _event(2, "tool_started", tool_call_id="absolute-runtime", tool_name="read_file"),
+        _event(
+            3,
+            "tool_finished",
+            tool_call_id="absolute-runtime",
+            tool_name="read_file",
+            elapsed_ms=1,
+            status="error",
+            error_type="FileNotFoundError",
+            error_code="file_not_found",
+            error_summary="File not found (path=<outside-workspace>)",
+            safe_input_summary="path=<outside-workspace>",
+            resource_key="sha256:absolute-runtime",
+            resource_correction_keys=["sha256:absolute-config"],
+            recovery_of_tool_call_ids=[],
+        ),
+        _event(4, "tool_started", tool_call_id="relative", tool_name="read_file"),
+        _event(
+            5,
+            "tool_finished",
+            tool_call_id="relative",
+            tool_name="read_file",
+            elapsed_ms=1,
+            status="error",
+            error_type="FileNotFoundError",
+            error_code="file_not_found",
+            error_summary="File not found (path=config.json)",
+            safe_input_summary="path=config.json",
+            resource_key="sha256:workspace-config",
+            resource_correction_keys=[],
+            recovery_of_tool_call_ids=[],
+        ),
+        _event(6, "tool_started", tool_call_id="absolute-config", tool_name="read_file"),
+        _event(
+            7,
+            "tool_finished",
+            tool_call_id="absolute-config",
+            tool_name="read_file",
+            elapsed_ms=1,
+            status="ok",
+            safe_input_summary="path=<outside-workspace>",
+            resource_key="sha256:absolute-config",
+            resource_correction_keys=["sha256:absolute-runtime"],
+            recovery_of_tool_call_ids=["absolute-runtime"],
+        ),
+        _event(8, "run_finished", status="succeeded", stop_reason="completed"),
+    ]
+    graph = AuditGraphBuilder().build(
+        trace_id="trace-1", level="trace_full", events=events
+    )
+    tools = {
+        node.summary.identifier: node
+        for node in graph.nodes
+        if node.type == "tool_call"
+    }
+
+    recovered = tools["absolute-runtime"].summary
+    unresolved = tools["relative"].summary
+    assert recovered.recovery_status == "recovered"
+    assert recovered.recovered_by_event_id == "e7"
+    assert recovered.impact == "run_continued"
+    assert unresolved.recovery_status == "continued"
+    assert unresolved.recovered_by_event_id is None
+    assert unresolved.impact == "run_continued"
+
+
+def test_fatal_tool_timeout_drives_run_diagnostics_without_payload_content() -> None:
+    events = [
+        _event(1, "run_started", run_id="child"),
+        _event(
+            2,
+            "tool_started",
+            run_id="child",
+            tool_call_id="search",
+            tool_name="web_search",
+        ),
+        _event(
+            3,
+            "tool_finished",
+            run_id="child",
+            tool_call_id="search",
+            tool_name="web_search",
+            elapsed_ms=30_000,
+            status="timeout",
+            error_type="TimeoutError",
+            error_code="web_search_timeout",
+            error_summary="DuckDuckGo search timed out after 30s",
+            effective_timeout_ms=30_000,
+            provider="duckduckgo",
+            safe_input_summary="query omitted; provider=duckduckgo",
+            recovery_of_tool_call_ids=[],
+        ),
+        _event(
+            4,
+            "run_finished",
+            run_id="child",
+            status="failed",
+            stop_reason="tool_error",
+            fatal_event_id="e3",
+            failure_policy="fail_on_tool_error",
+            fail_on_tool_error=True,
+        ),
+    ]
+    graph = AuditGraphBuilder().build(
+        trace_id="trace-1", level="trace_full", events=events
+    )
+    tool = next(node for node in graph.nodes if node.type == "tool_call")
+    run = next(node for node in graph.nodes if node.type == "run")
+
+    assert tool.status == "failed"
+    assert tool.summary.failure_kind == "tool_error"
+    assert tool.summary.impact == "run_failed"
+    assert tool.summary.recovery_status == "unrecovered"
+    assert tool.summary.error_summary == "DuckDuckGo search timed out after 30s"
+    assert run.summary.failure_kind == "tool_error"
+    assert run.summary.fatal_event_id == "e3"
+    assert run.summary.failure_policy == "fail_on_tool_error"
+    assert run.summary.fail_on_tool_error is True
+    assert "secret query" not in graph.model_dump_json().lower()
+
+
 def test_region_membership_and_event_ownership_are_bidirectional() -> None:
     graph = AuditGraphBuilder().build(
         trace_id="trace-1", level="run", run_id="run-1", events=_retry_trace()

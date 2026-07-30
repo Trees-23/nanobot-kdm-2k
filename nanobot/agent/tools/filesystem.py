@@ -287,7 +287,11 @@ class ReadFileTool(_FsTool):
             if _is_blocked_device(fp):
                 return ToolResult.error(f"Error: Reading {fp} is blocked (device path that could hang or produce infinite output).")
             if not fp.exists():
-                return ToolResult.error(f"Error: File not found: {path}")
+                return ToolResult.error(
+                    f"Error: File not found: {path}",
+                    error_type="FileNotFoundError",
+                    error_code="file_not_found",
+                )
             if not fp.is_file():
                 return ToolResult.error(f"Error: Not a file: {path}")
 

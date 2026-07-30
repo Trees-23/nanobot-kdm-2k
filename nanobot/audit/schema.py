@@ -210,6 +210,9 @@ _EVENT_SPECS: dict[EventType, tuple[str, dict[str, tuple[Any, Any]]]] = {
         "status": _required(Literal["ok", "error", "cancelled", "timeout", "blocked"]),
         "error_type": _optional(str), "error_code": _optional(str),
         "effective_timeout_ms": _optional(int), "provider": _optional(str),
+        "error_summary": _optional(str), "safe_input_summary": _optional(str),
+        "resource_key": _optional(str), "resource_correction_keys": _optional(list[str]),
+        "recovery_of_tool_call_ids": _optional(list[str]),
     }),
     EventType.POLICY_BLOCKED: ("TUR", {
         "policy_name": _required(str), "policy_version": _required(str),
