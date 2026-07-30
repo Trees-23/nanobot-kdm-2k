@@ -386,6 +386,9 @@ class AgentLoop:
 
         self.context = ContextBuilder(workspace, timezone=timezone, disabled_skills=disabled_skills)
         self.sessions = session_manager or SessionManager(workspace)
+        from nanobot.session.goal_orchestration import GoalOrchestrationStore
+
+        self.goal_orchestration = GoalOrchestrationStore(self.sessions)
         self.sessions.set_file_cap_archiver(self.context.memory.raw_archive)
         self.tools = ToolRegistry()
         # One file-read/write tracker per logical session. The tool registry is
@@ -405,6 +408,7 @@ class AgentLoop:
             fail_on_tool_error=fail_on_tool_error,
             llm_wall_timeout_for_session=lambda sk: runner_wall_llm_timeout_s(self.sessions, sk),
             audit_emitter=self.audit_runtime.emitter,
+            goal_orchestration=self.goal_orchestration,
         )
         self._unified_session = unified_session
         self._running = False
@@ -594,6 +598,7 @@ class AgentLoop:
             workspace_sandbox=self.workspace_scopes.sandbox_status,
             runtime_events=self.runtime_events,
             audit_emitter=self.audit_runtime.emitter,
+            goal_orchestration=self.goal_orchestration,
         )
         loader = ToolLoader()
         registered = loader.load(ctx, self.tools)

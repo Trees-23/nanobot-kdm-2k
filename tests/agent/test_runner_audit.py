@@ -1,11 +1,19 @@
 import asyncio
+import json
 from unittest.mock import AsyncMock, MagicMock
 
 from agent.runner_helpers import make_run_spec
 from nanobot.agent.runner import AgentRunner
+from nanobot.agent.tools.await_subagents import AwaitSubagentsTool
 from nanobot.agent.tools.base import ToolResult
+from nanobot.agent.tools.context import RequestContext, request_context
+from nanobot.agent.tools.registry import ToolRegistry
+from nanobot.agent.tools.spawn import SpawnTool
 from nanobot.audit.context import AuditRunContext, set_run_cause
 from nanobot.providers.base import LLMProvider, LLMResponse, ToolCallRequest
+from nanobot.session.goal_orchestration import GoalOrchestrationStore
+from nanobot.session.goal_state import GOAL_STATE_KEY
+from nanobot.session.manager import SessionManager
 from tests.providers.test_provider_retry import ScriptedProvider
 
 
@@ -160,6 +168,223 @@ async def test_runner_emits_error_terminal_for_returned_tool_error() -> None:
     assert terminal.status == "error"
     assert result.stop_reason == "completed"
     assert emitter.events[-1].status == "succeeded"
+
+
+async def test_spawn_concurrency_rejection_is_audited_error_without_child_run() -> None:
+    class AtCapacityManager:
+        max_concurrent_subagents = 1
+
+        def __init__(self) -> None:
+            self.spawn = AsyncMock()
+
+        def get_running_count(self) -> int:
+            return 1
+
+    provider = MagicMock(spec=LLMProvider)
+    provider.chat_with_retry = AsyncMock(
+        side_effect=[
+            LLMResponse(
+                content="",
+                tool_calls=[
+                    ToolCallRequest(id="provider-spawn", name="spawn", arguments={"task": "x"})
+                ],
+                finish_reason="tool_calls",
+            ),
+            LLMResponse(content="capacity rejection handled"),
+        ]
+    )
+    manager = AtCapacityManager()
+    tools = ToolRegistry()
+    tools.register(SpawnTool(manager))  # type: ignore[arg-type]
+    emitter = RecordingEmitter()
+    spec = make_run_spec(
+        provider,
+        initial_messages=[],
+        tools=tools,
+        model="test-model",
+        max_iterations=2,
+        max_tool_result_chars=10_000,
+        session_key="test:c1",
+        audit_context=AuditRunContext("trace", "turn", "main-run"),
+    )
+
+    with request_context(
+        RequestContext(
+            channel="test",
+            chat_id="c1",
+            session_key="test:c1",
+            runtime=spec.runtime,
+            metadata={
+                "_audit_context": {
+                    "trace_id": "trace",
+                    "turn_id": "turn",
+                    "run_id": "main-run",
+                }
+            },
+        )
+    ):
+        result = await AgentRunner(audit_emitter=emitter).run(spec)
+
+    terminal = next(
+        event
+        for event in emitter.events
+        if event.event_type == "tool_finished" and event.tool_name == "spawn"
+    )
+    assert terminal.status == "error"
+    assert manager.spawn.await_count == 0
+    assert len([event for event in emitter.events if event.event_type == "run_started"]) == 1
+    assert result.stop_reason == "completed"
+
+
+async def test_successful_spawn_output_binds_audit_call_task_and_child_ids() -> None:
+    class RecordingManager:
+        max_concurrent_subagents = 3
+
+        def __init__(self) -> None:
+            self.kwargs = None
+
+        def get_running_count(self) -> int:
+            return 0
+
+        async def spawn(self, **kwargs):
+            self.kwargs = kwargs
+            return {
+                "started": True,
+                "task_id": "task-a",
+                "required": True,
+                "task_group": "research",
+                "child_run_id": "child-a",
+            }
+
+    provider = MagicMock(spec=LLMProvider)
+    provider.chat_with_retry = AsyncMock(
+        side_effect=[
+            LLMResponse(
+                content="",
+                tool_calls=[
+                    ToolCallRequest(
+                        id="provider-spawn",
+                        name="spawn",
+                        arguments={"task": "x", "required": True, "task_group": "research"},
+                    )
+                ],
+                finish_reason="tool_calls",
+            ),
+            LLMResponse(content="spawned"),
+        ]
+    )
+    manager = RecordingManager()
+    tools = ToolRegistry()
+    tools.register(SpawnTool(manager))  # type: ignore[arg-type]
+    emitter = RecordingEmitter()
+    spec = make_run_spec(
+        provider,
+        initial_messages=[],
+        tools=tools,
+        model="test-model",
+        max_iterations=2,
+        max_tool_result_chars=10_000,
+        session_key="test:c1",
+        audit_context=AuditRunContext("trace", "turn", "main-run"),
+    )
+    with request_context(
+        RequestContext(
+            channel="test",
+            chat_id="c1",
+            session_key="test:c1",
+            runtime=spec.runtime,
+            metadata={
+                "_audit_context": {
+                    "trace_id": "trace",
+                    "turn_id": "turn",
+                    "run_id": "main-run",
+                }
+            },
+        )
+    ):
+        result = await AgentRunner(audit_emitter=emitter).run(spec)
+
+    terminal = next(
+        event
+        for event in emitter.events
+        if event.event_type == "tool_finished" and event.tool_name == "spawn"
+    )
+    output = next(message for message in result.messages if message.get("name") == "spawn")
+    assert manager.kwargs["spawn_tool_call_id"] == terminal.tool_call_id
+    assert json.loads(output["content"])["task_id"] == "task-a"
+    assert json.loads(output["content"])["child_run_id"] == "child-a"
+
+
+async def test_failed_await_subagents_is_nonfatal_and_structured_for_recovery(tmp_path) -> None:
+    sessions = SessionManager(tmp_path)
+    session = sessions.get_or_create("test:c1")
+    session.metadata[GOAL_STATE_KEY] = {"status": "active", "objective": "deliver"}
+    sessions.save(session)
+    store = GoalOrchestrationStore(sessions)
+    await store.register(
+        "test:c1",
+        task_id="failed-a",
+        label="failed-a",
+        group="research",
+        child_run_id="child-a",
+        spawn_tool_call_id="spawn-a",
+    )
+    await store.finish("test:c1", "failed-a", "failed", "controlled failure")
+    manager = MagicMock()
+    manager.wait_for = AsyncMock()
+    manager.running_task_ids.return_value = set()
+    tools = ToolRegistry()
+    tools.register(AwaitSubagentsTool(manager, store))
+    provider = MagicMock(spec=LLMProvider)
+    provider.chat_with_retry = AsyncMock(
+        side_effect=[
+            LLMResponse(
+                content="",
+                tool_calls=[
+                    ToolCallRequest(
+                        id="provider-await",
+                        name="await_subagents",
+                        arguments={"task_group": "research", "timeout_seconds": 0},
+                    )
+                ],
+                finish_reason="tool_calls",
+            ),
+            LLMResponse(content="I will replace the failed task or block the Goal."),
+        ]
+    )
+    emitter = RecordingEmitter()
+    spec = make_run_spec(
+        provider,
+        initial_messages=[],
+        tools=tools,
+        model="test-model",
+        max_iterations=2,
+        max_tool_result_chars=10_000,
+        session_key="test:c1",
+        audit_context=AuditRunContext("trace", "turn", "main-run"),
+    )
+
+    with request_context(
+        RequestContext(
+            channel="test", chat_id="c1", session_key="test:c1", runtime=spec.runtime
+        )
+    ):
+        result = await AgentRunner(audit_emitter=emitter).run(spec)
+
+    output = next(
+        message for message in result.messages if message.get("name") == "await_subagents"
+    )
+    payload = json.loads(output["content"])
+    assert payload["barrier_satisfied"] is False
+    assert payload["tasks"]["failed-a"]["status"] == "failed"
+    assert result.stop_reason == "completed"
+    assert "replace" in result.final_content
+    terminal = next(
+        event
+        for event in emitter.events
+        if event.event_type == "tool_finished" and event.tool_name == "await_subagents"
+    )
+    assert terminal.status == "error"
 
 
 async def test_runner_cancellation_closes_tool_and_run_spans() -> None:

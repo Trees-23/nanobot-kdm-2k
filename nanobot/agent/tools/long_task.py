@@ -26,6 +26,7 @@ from nanobot.audit.schema import (
 from nanobot.bus.events import AUDIT_CONTEXT_META
 from nanobot.bus.runtime_events import GoalStateChanged, RuntimeEventBus, RuntimeEventContext
 from nanobot.runtime_context import RuntimeContextBlock, wrap_runtime_context_lines
+from nanobot.session.goal_orchestration import required_gate
 from nanobot.session.goal_state import (
     GOAL_STATE_KEY,
     MAX_GOAL_OBJECTIVE_CHARS,
@@ -362,8 +363,10 @@ class UpdateGoalTool(Tool, _GoalToolsMixin):
         sessions: Any,
         runtime_events: RuntimeEventBus | None = None,
         audit_emitter: Any | None = None,
+        subagent_manager: Any | None = None,
     ) -> None:
         _GoalToolsMixin.__init__(self, sessions, runtime_events, audit_emitter)
+        self._subagent_manager = subagent_manager
 
     @classmethod
     def create(cls, ctx: Any) -> Tool:
@@ -373,6 +376,7 @@ class UpdateGoalTool(Tool, _GoalToolsMixin):
             sessions=sess,
             runtime_events=getattr(ctx, "runtime_events", None),
             audit_emitter=getattr(ctx, "audit_emitter", None),
+            subagent_manager=getattr(ctx, "subagent_manager", None),
         )
 
     @classmethod
@@ -425,6 +429,11 @@ class UpdateGoalTool(Tool, _GoalToolsMixin):
                 return ToolResult.error(
                     f"Error: objective must not exceed {MAX_GOAL_OBJECTIVE_CHARS} characters."
                 )
+            if self._subagent_manager is not None:
+                request = current_request_context()
+                if request is not None and request.session_key:
+                    await self._subagent_manager.cancel_by_session(request.session_key)
+                    prior = parse_goal_state(goal_state_raw(sess.metadata)) or prior
             summary = (ui_summary or "").strip()[:120]
             blob = {
                 "status": "active",
@@ -434,6 +443,7 @@ class UpdateGoalTool(Tool, _GoalToolsMixin):
                 "replaced_at": _iso_now(),
                 "previous_objective": str(prior.get("objective") or ""),
                 "recap": (recap or "").strip(),
+                "previous_orchestration": deepcopy(prior.get("orchestration")),
                 "_audit_goal_id": prior.get("_audit_goal_id") or new_audit_id(),
                 "_audit_trace_id": prior.get("_audit_trace_id"),
                 "_audit_goal_version": int(prior.get("_audit_goal_version") or 1) + 1,
@@ -449,6 +459,20 @@ class UpdateGoalTool(Tool, _GoalToolsMixin):
             return "Goal replaced. Continue toward the new objective using ordinary tools." + extra
 
         ended = _iso_now()
+        if normalized == "complete":
+            satisfied, unresolved = required_gate(prior)
+            if not satisfied:
+                details = ", ".join(
+                    f"{item['task_id']}={item['status']}" for item in unresolved
+                )
+                return ToolResult.error(
+                    "Error: required subagent barrier is not satisfied; " + details
+                )
+        if normalized in {"cancel", "block"} and self._subagent_manager is not None:
+            request = current_request_context()
+            if request is not None and request.session_key:
+                await self._subagent_manager.cancel_by_session(request.session_key)
+                prior = parse_goal_state(goal_state_raw(sess.metadata)) or prior
         status = {
             "complete": "completed",
             "cancel": "cancelled",
@@ -475,6 +499,10 @@ class UpdateGoalTool(Tool, _GoalToolsMixin):
             blob,
         )
         revoke_goal_mutation_permission()
+        if self._subagent_manager is not None:
+            request = current_request_context()
+            if request is not None and request.session_key:
+                self._subagent_manager.clear_terminal_statuses_by_session(request.session_key)
         await self._publish_goal_state_changed(sess.metadata)
 
         tail = (recap or "").strip()

@@ -568,7 +568,7 @@ async def test_next_turn_after_llm_error_keeps_turn_boundary(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_subagent_max_iterations_announces_existing_fallback(tmp_path, monkeypatch):
+async def test_subagent_max_iterations_announces_failure_not_completion(tmp_path, monkeypatch):
     from nanobot.agent.subagent import SubagentManager, SubagentStatus
     from nanobot.bus.queue import MessageBus
 
@@ -604,5 +604,5 @@ async def test_subagent_max_iterations_announces_existing_fallback(tmp_path, mon
 
     mgr._announce_result.assert_awaited_once()
     args = mgr._announce_result.await_args.args
-    assert args[3] == "Task completed but no final response was generated."
-    assert args[5] == "ok"
+    assert args[3] == "Iteration budget exhausted before task completion."
+    assert args[5] == "error"

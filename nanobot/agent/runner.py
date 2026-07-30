@@ -106,6 +106,7 @@ class AgentRunResult:
     usage: dict[str, int] = field(default_factory=dict)
     stop_reason: str = "completed"
     error: str | None = None
+    error_kind: str | None = None
     tool_events: list[dict[str, str]] = field(default_factory=list)
     had_injections: bool = False
 
@@ -357,6 +358,7 @@ class AgentRunner:
         tools_used: list[str] = []
         usage: dict[str, int] = {"prompt_tokens": 0, "completion_tokens": 0}
         error: str | None = None
+        error_kind: str | None = None
         stop_reason = "completed"
         tool_events: list[dict[str, str]] = []
         external_lookup_counts: dict[str, int] = {}
@@ -643,6 +645,7 @@ class AgentRunner:
                     final_content = clean or spec.error_message or _DEFAULT_ERROR_MESSAGE
                 stop_reason = "error"
                 error = final_content
+                error_kind = response.error_kind
                 self._append_model_error_placeholder(messages)
                 context.final_content = final_content
                 context.error = error
@@ -741,6 +744,7 @@ class AgentRunner:
             usage=usage,
             stop_reason=stop_reason,
             error=error,
+            error_kind=error_kind,
             tool_events=tool_events,
             had_injections=had_injections,
         )
@@ -1393,9 +1397,10 @@ class AgentRunner:
             )
             if handled is not None:
                 return handled
+            suffix = hint if getattr(result, "append_retry_hint", True) else ""
             if spec.fail_on_tool_error:
-                return result + hint, event, RuntimeError(result)
-            return result + hint, event, None
+                return result + suffix, event, RuntimeError(result)
+            return result + suffix, event, None
 
         await hook.after_execute_tool(context, tool_call, tool, params, result)
 
