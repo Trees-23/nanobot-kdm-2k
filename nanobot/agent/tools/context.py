@@ -14,6 +14,9 @@ _CURRENT_REQUEST_CONTEXT: ContextVar["RequestContext | None"] = ContextVar(
     "nanobot_tool_request_context",
     default=None,
 )
+_CURRENT_AUDIT_TOOL_CALL_ID: ContextVar[str | None] = ContextVar(
+    "nanobot_audit_tool_call_id", default=None
+)
 
 
 @dataclass(frozen=True)
@@ -64,6 +67,18 @@ def current_request_session_key() -> str | None:
     return ctx.session_key if ctx else None
 
 
+def bind_audit_tool_call_id(value: str) -> Token[str | None]:
+    return _CURRENT_AUDIT_TOOL_CALL_ID.set(value)
+
+
+def reset_audit_tool_call_id(token: Token[str | None]) -> None:
+    _CURRENT_AUDIT_TOOL_CALL_ID.reset(token)
+
+
+def current_audit_tool_call_id() -> str | None:
+    return _CURRENT_AUDIT_TOOL_CALL_ID.get()
+
+
 @dataclass
 class ToolContext:
     config: Any
@@ -79,3 +94,5 @@ class ToolContext:
     timezone: str = "UTC"
     workspace_sandbox: Any | None = None
     runtime_events: Any | None = None
+    audit_emitter: Any | None = None
+    goal_orchestration: Any | None = None

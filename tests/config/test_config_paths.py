@@ -1,6 +1,7 @@
 from pathlib import Path
 
 from nanobot.config.paths import (
+    get_audit_dir,
     get_cli_history_path,
     get_cron_dir,
     get_data_dir,
@@ -11,6 +12,14 @@ from nanobot.config.paths import (
     get_workspace_path,
     is_default_workspace,
 )
+
+
+def test_audit_dir_follows_instance_config(monkeypatch, tmp_path: Path) -> None:
+    config_file = tmp_path / "instance" / "config.json"
+    monkeypatch.setattr("nanobot.config.paths.get_config_path", lambda: config_file)
+
+    assert get_audit_dir() == config_file.parent / "audit" / "v1"
+    assert get_audit_dir(str(tmp_path / "custom")) == tmp_path / "custom"
 
 
 def test_runtime_dirs_follow_config_path(monkeypatch, tmp_path: Path) -> None:

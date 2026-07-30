@@ -2190,3 +2190,65 @@ Set `agents.defaults.toolHintMaxLength` to control the truncation threshold:
 | Option | Default | Description |
 |--------|---------|-------------|
 | `agents.defaults.toolHintMaxLength` | `40` | Maximum characters for tool hint display. Range: 20–500. Higher values show more of the command or path; lower values keep hints compact. |
+
+## Agent Audit Evidence
+
+The audit layer records durable, queryable execution evidence for chat, SDK, scheduled, tool,
+provider, subagent, Goal, cancellation, and delivery activity. It is enabled in `full` mode by
+default. For the default config, evidence is stored under `~/.nanobot/audit/v1`; a config at a
+custom path uses `<config-directory>/audit/v1`. This is instance data, not Agent workspace data.
+
+```json
+{
+  "audit": {
+    "mode": "full",
+    "path": null,
+    "additionalSecretKeys": ["tenantCredential"],
+    "additionalSecretPatterns": ["(?i)internal-key-[a-z0-9]+"],
+    "warnPlaintextPayloads": true
+  }
+}
+```
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `audit.mode` | `full` | `full` writes events and complete payloads, `metadata_only` writes events without payload bodies, and `off` disables audit construction and writes. |
+| `audit.path` | `null` | Optional dedicated audit root. Use an absolute path or a path managed consistently by every process in the instance. |
+| `audit.additionalSecretKeys` | `[]` | Extra structured field names whose entire values are replaced. Matching ignores case and punctuation. |
+| `audit.additionalSecretPatterns` | `[]` | Extra Python regular expressions replaced in every string field before persistence. Invalid expressions reject configuration. |
+| `audit.warnPlaintextPayloads` | `true` | Log a startup warning when `full` mode is active. |
+| `audit.segmentMaxBytes` | `67108864` | Maximum event or payload segment size before rotation. |
+| `audit.fsyncIntervalSeconds` | `5.0` | Maximum periodic durability interval for non-critical evidence. |
+| `audit.fsyncRecordInterval` | `100` | Non-critical records per durability epoch. |
+| `audit.writerQueueCapacity` | `4096` | Maximum queued evidence items. The Agent remains fail-open if audit cannot keep up. |
+| `audit.writerQueueMaxBytes` | `268435456` | Estimated byte limit for queued evidence. |
+| `audit.enqueueTimeoutMs` | `25` | Non-critical enqueue timeout before evidence is marked lost. |
+| `audit.criticalAckTimeoutMs` | `2000` | Wait for critical evidence durability acknowledgement. |
+| `audit.indexEnabled` | `true` | Enable the disposable SQLite read index. JSONL evidence and catalogs remain authoritative. |
+
+### Plaintext and redaction boundary
+
+`full` intentionally preserves rich prompts, responses, reasoning summaries, tool arguments,
+tool results, checkpoints, and side-effect details as permanent plaintext payloads. Protect the
+audit directory as sensitive local data and put it on a dedicated persistent volume when using
+containers. `metadata_only` is available when payload retention is not acceptable.
+
+Redaction removes recognized structured credential keys, bearer tokens, OpenAI-style keys, AWS
+access key IDs, and configured keys or patterns. It cannot determine whether every arbitrary
+opaque string is a credential. Unknown values are intentionally retained in `full` mode. Configure
+organization-specific formats before enabling producers, and do not describe this boundary as
+"credentials can never reach disk."
+
+### Integrity and retention boundary
+
+Sequence numbers, hash links, catalogs, and committed durability prefixes detect modification,
+reordering, missing cataloged segments, and damage inside the evidence set that remains available.
+The hashes are local and unsigned: they do not provide external timestamping or non-repudiation,
+and deletion of the entire audit root cannot be detected from that same deleted root.
+
+V1 does not automatically delete evidence. Back up, retain, or remove the audit root according to
+your local policy. Deleting cataloged files is reported as an integrity failure; planned wholesale
+removal should operate on the complete audit root or a separately archived instance.
+
+Use `nanobot audit doctor`, `nanobot audit verify --all`, and `nanobot audit index status` for
+routine operational checks. See the [CLI reference](./cli-reference.md#audit-evidence).

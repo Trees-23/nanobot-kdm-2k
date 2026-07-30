@@ -15,7 +15,7 @@ export const supportedLocales = [
 
 export type SupportedLocale = (typeof supportedLocales)[number]["code"];
 
-export const defaultLocale: SupportedLocale = "en";
+export const defaultLocale: SupportedLocale = "zh-CN";
 export const fallbackLocale: SupportedLocale = "en";
 
 export function normalizeLocale(

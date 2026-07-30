@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+import time
 from copy import deepcopy
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
 from nanobot.agent.goal_permission import (
@@ -13,8 +14,19 @@ from nanobot.agent.goal_permission import (
 from nanobot.agent.tools.base import Tool, ToolResult, tool_parameters
 from nanobot.agent.tools.context import RequestContext, current_request_context
 from nanobot.agent.tools.schema import StringSchema, tool_parameters_schema
+from nanobot.audit.ids import new_audit_id
+from nanobot.audit.schema import (
+    GoalBlockedDraft,
+    GoalCancelledDraft,
+    GoalCompletedDraft,
+    GoalCreatedDraft,
+    GoalStatePayloadDraft,
+    GoalUpdatedDraft,
+)
+from nanobot.bus.events import AUDIT_CONTEXT_META
 from nanobot.bus.runtime_events import GoalStateChanged, RuntimeEventBus, RuntimeEventContext
 from nanobot.runtime_context import RuntimeContextBlock, wrap_runtime_context_lines
+from nanobot.session.goal_orchestration import required_gate
 from nanobot.session.goal_state import (
     GOAL_STATE_KEY,
     MAX_GOAL_OBJECTIVE_CHARS,
@@ -54,9 +66,11 @@ class _GoalToolsMixin:
         self,
         sessions: SessionManager,
         runtime_events: RuntimeEventBus | None = None,
+        audit_emitter: Any | None = None,
     ) -> None:
         self._sessions = sessions
         self._runtime_events = runtime_events
+        self._audit_emitter = audit_emitter
 
     def _session(self):
         request_ctx = current_request_context()
@@ -109,6 +123,81 @@ class _GoalToolsMixin:
             )
         )
 
+    async def _emit_goal_change(
+        self,
+        event_type: str,
+        blob: dict[str, Any],
+        *,
+        previous_version: int | None = None,
+    ) -> None:
+        rc = current_request_context()
+        emitter = self._audit_emitter
+        audit = rc.metadata.get(AUDIT_CONTEXT_META) if rc is not None else None
+        if (
+            emitter is None
+            or getattr(emitter, "audit_disabled", False)
+            or rc is None
+            or not isinstance(audit, dict)
+        ):
+            return
+        trace_id = audit.get("trace_id")
+        turn_id = audit.get("turn_id")
+        goal_id = blob.get("_audit_goal_id")
+        if not all(isinstance(value, str) and value for value in (trace_id, turn_id, goal_id)):
+            return
+        version = int(blob.get("_audit_goal_version") or 1)
+        fields: dict[str, Any] = {
+            "event_id": new_audit_id(),
+            "event_type": event_type,
+            "occurred_at": datetime.now(UTC),
+            "monotonic_ns": time.monotonic_ns(),
+            "trace_id": trace_id,
+            "turn_id": turn_id,
+            "run_id": None,
+            "parent_run_id": None,
+            "resumed_from_run_id": None,
+            "caused_by_event_id": None,
+            "model_call_id": None,
+            "attempt_id": None,
+            "tool_call_id": None,
+            "checkpoint_id": None,
+            "goal_id": goal_id,
+            "delivery_id": None,
+            "session_key": rc.session_key,
+            "source_type": "goal_tool",
+            "source_metadata": {},
+            "iteration": None,
+            "actor_type": "agent",
+            "goal_version": version,
+        }
+        models = {
+            "goal_created": GoalCreatedDraft,
+            "goal_updated": GoalUpdatedDraft,
+            "goal_completed": GoalCompletedDraft,
+            "goal_blocked": GoalBlockedDraft,
+            "goal_cancelled": GoalCancelledDraft,
+        }
+        if event_type == "goal_updated":
+            fields["previous_goal_version"] = previous_version or max(1, version - 1)
+        if event_type == "goal_blocked":
+            fields["blocker_kind"] = "reported_blocker"
+        event = models[event_type].model_validate(fields)
+        payload = GoalStatePayloadDraft.model_validate(
+            {
+                "payload_id": new_audit_id(),
+                "event_id": event.event_id,
+                "payload_kind": "goal_state",
+                "content": {
+                    "goal_version": version,
+                    "goal_status": str(blob.get("status") or "unknown"),
+                    "objective": str(blob.get("objective") or ""),
+                    "budget": blob.get("budget"),
+                    "blocker": blob.get("recap") if event_type == "goal_blocked" else None,
+                },
+            }
+        )
+        await emitter.emit(event, payload=payload, critical=True)
+
 
 @tool_parameters(
     tool_parameters_schema(
@@ -134,8 +223,9 @@ class CreateGoalTool(Tool, _GoalToolsMixin):
         self,
         sessions: Any,
         runtime_events: RuntimeEventBus | None = None,
+        audit_emitter: Any | None = None,
     ) -> None:
-        _GoalToolsMixin.__init__(self, sessions, runtime_events)
+        _GoalToolsMixin.__init__(self, sessions, runtime_events, audit_emitter)
 
     @classmethod
     def create(cls, ctx: Any) -> Tool:
@@ -144,6 +234,7 @@ class CreateGoalTool(Tool, _GoalToolsMixin):
         return cls(
             sessions=sess,
             runtime_events=getattr(ctx, "runtime_events", None),
+            audit_emitter=getattr(ctx, "audit_emitter", None),
         )
 
     @classmethod
@@ -216,13 +307,20 @@ class CreateGoalTool(Tool, _GoalToolsMixin):
                 f"Error: objective must not exceed {MAX_GOAL_OBJECTIVE_CHARS} characters."
             )
         summary = (ui_summary or "").strip()[:120]
+        request = current_request_context()
+        audit = request.metadata.get(AUDIT_CONTEXT_META) if request is not None else None
+        audit = audit if isinstance(audit, dict) else {}
         blob = {
             "status": "active",
             "objective": objective_text,
             "ui_summary": summary,
             "started_at": _iso_now(),
+            "_audit_goal_id": new_audit_id(),
+            "_audit_trace_id": audit.get("trace_id"),
+            "_audit_goal_version": 1,
         }
         self._save_goal_state(sess, blob, reset_continuation=True)
+        await self._emit_goal_change("goal_created", blob)
         await self._publish_goal_state_changed(sess.metadata)
         extra = f"\nSummary line: {summary}" if summary else ""
         return (
@@ -264,8 +362,11 @@ class UpdateGoalTool(Tool, _GoalToolsMixin):
         self,
         sessions: Any,
         runtime_events: RuntimeEventBus | None = None,
+        audit_emitter: Any | None = None,
+        subagent_manager: Any | None = None,
     ) -> None:
-        _GoalToolsMixin.__init__(self, sessions, runtime_events)
+        _GoalToolsMixin.__init__(self, sessions, runtime_events, audit_emitter)
+        self._subagent_manager = subagent_manager
 
     @classmethod
     def create(cls, ctx: Any) -> Tool:
@@ -274,6 +375,8 @@ class UpdateGoalTool(Tool, _GoalToolsMixin):
         return cls(
             sessions=sess,
             runtime_events=getattr(ctx, "runtime_events", None),
+            audit_emitter=getattr(ctx, "audit_emitter", None),
+            subagent_manager=getattr(ctx, "subagent_manager", None),
         )
 
     @classmethod
@@ -326,6 +429,11 @@ class UpdateGoalTool(Tool, _GoalToolsMixin):
                 return ToolResult.error(
                     f"Error: objective must not exceed {MAX_GOAL_OBJECTIVE_CHARS} characters."
                 )
+            if self._subagent_manager is not None:
+                request = current_request_context()
+                if request is not None and request.session_key:
+                    await self._subagent_manager.cancel_by_session(request.session_key)
+                    prior = parse_goal_state(goal_state_raw(sess.metadata)) or prior
             summary = (ui_summary or "").strip()[:120]
             blob = {
                 "status": "active",
@@ -335,13 +443,36 @@ class UpdateGoalTool(Tool, _GoalToolsMixin):
                 "replaced_at": _iso_now(),
                 "previous_objective": str(prior.get("objective") or ""),
                 "recap": (recap or "").strip(),
+                "previous_orchestration": deepcopy(prior.get("orchestration")),
+                "_audit_goal_id": prior.get("_audit_goal_id") or new_audit_id(),
+                "_audit_trace_id": prior.get("_audit_trace_id"),
+                "_audit_goal_version": int(prior.get("_audit_goal_version") or 1) + 1,
             }
             self._save_goal_state(sess, blob, reset_continuation=True)
+            await self._emit_goal_change(
+                "goal_updated",
+                blob,
+                previous_version=int(prior.get("_audit_goal_version") or 1),
+            )
             await self._publish_goal_state_changed(sess.metadata)
             extra = f"\nSummary line: {summary}" if summary else ""
             return "Goal replaced. Continue toward the new objective using ordinary tools." + extra
 
         ended = _iso_now()
+        if normalized == "complete":
+            satisfied, unresolved = required_gate(prior)
+            if not satisfied:
+                details = ", ".join(
+                    f"{item['task_id']}={item['status']}" for item in unresolved
+                )
+                return ToolResult.error(
+                    "Error: required subagent barrier is not satisfied; " + details
+                )
+        if normalized in {"cancel", "block"} and self._subagent_manager is not None:
+            request = current_request_context()
+            if request is not None and request.session_key:
+                await self._subagent_manager.cancel_by_session(request.session_key)
+                prior = parse_goal_state(goal_state_raw(sess.metadata)) or prior
         status = {
             "complete": "completed",
             "cancel": "cancelled",
@@ -352,11 +483,26 @@ class UpdateGoalTool(Tool, _GoalToolsMixin):
             "status": status,
             "ended_at": ended,
             "recap": (recap or "").strip(),
+            "_audit_goal_id": prior.get("_audit_goal_id") or new_audit_id(),
+            "_audit_trace_id": prior.get("_audit_trace_id"),
+            "_audit_goal_version": int(prior.get("_audit_goal_version") or 1) + 1,
         }
         if normalized == "complete":
             blob["completed_at"] = ended
         self._save_goal_state(sess, blob)
+        await self._emit_goal_change(
+            {
+                "complete": "goal_completed",
+                "cancel": "goal_cancelled",
+                "block": "goal_blocked",
+            }[normalized],
+            blob,
+        )
         revoke_goal_mutation_permission()
+        if self._subagent_manager is not None:
+            request = current_request_context()
+            if request is not None and request.session_key:
+                self._subagent_manager.clear_terminal_statuses_by_session(request.session_key)
         await self._publish_goal_state_changed(sess.metadata)
 
         tail = (recap or "").strip()

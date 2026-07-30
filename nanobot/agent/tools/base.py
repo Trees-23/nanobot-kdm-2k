@@ -133,15 +133,23 @@ class ToolResult(str):
     """String-compatible tool output with structured status."""
 
     is_error: bool
+    append_retry_hint: bool
 
-    def __new__(cls, content: str, *, is_error: bool = False) -> ToolResult:
+    def __new__(
+        cls,
+        content: str,
+        *,
+        is_error: bool = False,
+        append_retry_hint: bool = True,
+    ) -> ToolResult:
         obj = str.__new__(cls, content)
         obj.is_error = is_error
+        obj.append_retry_hint = append_retry_hint
         return obj
 
     @classmethod
-    def error(cls, content: str) -> ToolResult:
-        return cls(content, is_error=True)
+    def error(cls, content: str, *, append_retry_hint: bool = True) -> ToolResult:
+        return cls(content, is_error=True, append_retry_hint=append_retry_hint)
 
 
 class Tool(ABC):

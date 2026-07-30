@@ -72,6 +72,7 @@ from nanobot.bus.outbound_events import (  # noqa: E402
     StreamEndEvent,
     outbound_event_from_message,
 )
+from nanobot.cli.audit import create_audit_app  # noqa: E402
 from nanobot.cli.gateway import create_gateway_app  # noqa: E402
 from nanobot.cli.stream import StreamRenderer, ThinkingSpinner  # noqa: E402
 from nanobot.config.paths import get_workspace_path, is_default_workspace  # noqa: E402
@@ -227,6 +228,7 @@ app = typer.Typer(
 )
 
 console = Console()
+app.add_typer(create_audit_app(console=console), name="audit")
 EXIT_COMMANDS = {"exit", "quit", "/exit", "/quit", ":q"}
 _REASONING_SENTENCE_ENDINGS = (".", "!", "?", "。", "！", "？")
 _REASONING_FLUSH_CHARS = 60
@@ -1926,6 +1928,8 @@ def _run_gateway(
         webui_static_dist=webui_static_dist,
         webui_runtime_surface=webui_runtime_surface,
         webui_runtime_capabilities=webui_runtime_capabilities,
+        webui_active_audit_run_ids=getattr(agent, "active_audit_run_ids", None),
+        audit_emitter=getattr(getattr(agent, "audit_runtime", None), "emitter", None),
     )
 
     def _pick_heartbeat_target() -> tuple[str, str]:

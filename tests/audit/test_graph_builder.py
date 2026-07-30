@@ -1,0 +1,561 @@
+from datetime import UTC, datetime, timedelta
+
+from nanobot.audit.graph import AuditGraphBuilder
+from nanobot.audit.schema import audit_event_adapter
+
+
+def _event(sequence: int, event_type: str, **extra):
+    raw = {
+        "schema_version": 1,
+        "event_id": f"e{sequence}",
+        "event_type": event_type,
+        "occurred_at": datetime(2026, 1, 1, tzinfo=UTC) + timedelta(seconds=sequence),
+        "monotonic_ns": sequence,
+        "trace_id": "trace-1",
+        "turn_id": "turn-1",
+        "run_id": "run-1",
+        "parent_run_id": None,
+        "resumed_from_run_id": None,
+        "caused_by_event_id": None,
+        "model_call_id": None,
+        "attempt_id": None,
+        "tool_call_id": None,
+        "checkpoint_id": None,
+        "goal_id": None,
+        "delivery_id": None,
+        "session_key": "websocket:chat-1",
+        "source_type": "websocket",
+        "source_metadata": {},
+        "iteration": 1,
+        "process_instance_id": "process-1",
+        "segment_id": "segment-1",
+        "segment_sequence": sequence,
+        "durability_epoch": sequence,
+        "previous_event_hash": None,
+        "payload_id": None,
+        "payload_sha256": None,
+        "event_hash": f"hash-{sequence}",
+        **extra,
+    }
+    return audit_event_adapter.validate_python(raw)
+
+
+def _retry_trace():
+    return [
+        _event(1, "run_started"),
+        _event(
+            2,
+            "model_request_started",
+            model_call_id="model-1",
+            requested_provider="openai",
+            requested_model="gpt-test",
+        ),
+        _event(
+            3,
+            "model_attempt_started",
+            model_call_id="model-1",
+            attempt_id="attempt-1",
+            attempt_ordinal=1,
+            provider="openai",
+            model="gpt-test",
+            input_variant="primary",
+        ),
+        _event(
+            4,
+            "model_attempt_finished",
+            model_call_id="model-1",
+            attempt_id="attempt-1",
+            attempt_ordinal=1,
+            provider="openai",
+            model="gpt-test",
+            elapsed_ms=900,
+            status="timeout",
+        ),
+        _event(
+            5,
+            "retry_scheduled",
+            model_call_id="model-1",
+            prior_attempt_id="attempt-1",
+            delay_ms=50,
+            policy_name="bounded",
+        ),
+        _event(
+            6,
+            "model_attempt_started",
+            model_call_id="model-1",
+            attempt_id="attempt-2",
+            attempt_ordinal=2,
+            provider="openai",
+            model="gpt-test",
+            input_variant="retry",
+        ),
+        _event(
+            7,
+            "model_attempt_finished",
+            model_call_id="model-1",
+            attempt_id="attempt-2",
+            attempt_ordinal=2,
+            provider="openai",
+            model="gpt-test",
+            elapsed_ms=300,
+            status="ok",
+        ),
+        _event(
+            8,
+            "model_response_received",
+            model_call_id="model-1",
+            finish_reason="stop",
+            usage={"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
+        ),
+        _event(9, "run_finished", status="succeeded", stop_reason="final_answer"),
+    ]
+
+
+def _unified_branch_trace():
+    events = [
+        _event(1, "run_started"),
+        _event(
+            2,
+            "tool_started",
+            tool_call_id="spawn-a",
+            tool_name="spawn",
+        ),
+        _event(
+            3,
+            "tool_finished",
+            tool_call_id="spawn-a",
+            tool_name="spawn",
+            elapsed_ms=1,
+            status="ok",
+        ),
+        _event(
+            4,
+            "run_started",
+            run_id="child-a",
+            parent_run_id="run-1",
+            source_type="subagent",
+        ),
+        _event(
+            5,
+            "tool_started",
+            tool_call_id="spawn-rejected",
+            tool_name="spawn",
+        ),
+        _event(
+            6,
+            "tool_finished",
+            tool_call_id="spawn-rejected",
+            tool_name="spawn",
+            elapsed_ms=1,
+            status="ok",
+        ),
+        _event(
+            7,
+            "model_request_started",
+            run_id="child-a",
+            parent_run_id="run-1",
+            source_type="subagent",
+            model_call_id="child-a-model",
+            requested_provider="openai",
+            requested_model="gpt-test",
+        ),
+        _event(
+            8,
+            "model_request_failed",
+            run_id="child-a",
+            parent_run_id="run-1",
+            source_type="subagent",
+            model_call_id="child-a-model",
+            status="error",
+            error_kind="provider",
+            attempt_count=1,
+        ),
+        _event(
+            9,
+            "run_finished",
+            run_id="child-a",
+            parent_run_id="run-1",
+            source_type="subagent",
+            status="failed",
+            stop_reason="model_error",
+        ),
+        _event(
+            10,
+            "input_injected",
+            injection_source="subagent_result",
+            target_run_id="run-1",
+        ),
+        _event(
+            11,
+            "tool_started",
+            tool_call_id="spawn-b",
+            tool_name="spawn",
+        ),
+        _event(
+            12,
+            "tool_finished",
+            tool_call_id="spawn-b",
+            tool_name="spawn",
+            elapsed_ms=1,
+            status="ok",
+        ),
+        _event(
+            13,
+            "run_started",
+            run_id="child-b",
+            parent_run_id="run-1",
+            source_type="subagent",
+        ),
+        _event(14, "run_finished", status="succeeded", stop_reason="final_answer"),
+        _event(
+            15,
+            "model_request_started",
+            run_id="child-b",
+            parent_run_id="run-1",
+            source_type="subagent",
+            model_call_id="child-b-model",
+            requested_provider="openai",
+            requested_model="gpt-test",
+        ),
+        _event(
+            16,
+            "model_response_received",
+            run_id="child-b",
+            parent_run_id="run-1",
+            source_type="subagent",
+            model_call_id="child-b-model",
+            finish_reason="stop",
+            usage={"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+        ),
+        _event(
+            17,
+            "run_finished",
+            run_id="child-b",
+            parent_run_id="run-1",
+            source_type="subagent",
+            status="succeeded",
+            stop_reason="final_answer",
+        ),
+        _event(
+            18,
+            "trace_linked",
+            run_id=None,
+            parent_run_id=None,
+            source_type="subagent",
+            actor_type="system",
+            link_reason="active_run_injection",
+            linked_source_id="child-b",
+        ),
+        _event(
+            19,
+            "run_started",
+            run_id="continuation-b",
+            parent_run_id="child-b",
+            source_type="subagent",
+        ),
+        _event(
+            20,
+            "run_finished",
+            run_id="continuation-b",
+            parent_run_id="child-b",
+            source_type="subagent",
+            status="succeeded",
+            stop_reason="final_answer",
+        ),
+    ]
+    return events
+
+
+def test_run_graph_is_deterministic_and_declares_attempt_expansion() -> None:
+    builder = AuditGraphBuilder()
+    first = builder.build(trace_id="trace-1", level="run", run_id="run-1", events=_retry_trace())
+    second = builder.build(trace_id="trace-1", level="run", run_id="run-1", events=_retry_trace())
+
+    assert first.model_dump_json() == second.model_dump_json()
+    assert len(first.expansion_groups) == 1
+    assert first.expansion_groups[0].default_expanded is True
+    assert first.first_anomaly is not None
+    assert first.first_anomaly.event_id == "e4"
+    assert any(edge.type == "retry_of" for edge in first.edges)
+
+
+def test_trace_full_uses_spawn_evidence_and_separates_continuation() -> None:
+    events = _unified_branch_trace()
+    graph = AuditGraphBuilder().build(
+        trace_id="trace-1", level="trace_full", events=events
+    )
+    run_nodes = {node.run_id: node for node in graph.nodes if node.type == "run"}
+
+    assert run_nodes["run-1"].run_kind == "main"
+    assert run_nodes["child-a"].run_kind == "child_agent"
+    assert run_nodes["child-b"].run_kind == "child_agent"
+    assert run_nodes["continuation-b"].run_kind == "continuation"
+    assert run_nodes["child-a"].spawn_tool_call_id == "spawn-a"
+    assert run_nodes["child-b"].spawn_tool_call_id == "spawn-b"
+    assert run_nodes["continuation-b"].continuation_of_run_id == "child-b"
+    assert run_nodes["continuation-b"].spawn_tool_call_id is None
+    assert [node.lane_order for node in run_nodes.values()].count(-1) == 1
+    assert [node.lane_order for node in run_nodes.values()].count(1) == 2
+    assert sum(edge.type == "spawn_branch" for edge in graph.edges) == 2
+    assert sum(edge.type == "result_return" for edge in graph.edges) == 2
+    assert all(edge.source in {node.id for node in graph.nodes} for edge in graph.edges)
+    assert all(edge.target in {node.id for node in graph.nodes} for edge in graph.edges)
+    assert len(graph.event_owners) + len(graph.ignored_event_ids) == len(events)
+
+
+def test_trace_full_keeps_parented_run_unknown_without_spawn_evidence() -> None:
+    graph = AuditGraphBuilder().build(
+        trace_id="trace-1",
+        level="trace_full",
+        events=[
+            _event(1, "run_started"),
+            _event(2, "run_finished", status="succeeded", stop_reason="done"),
+            _event(3, "run_started", run_id="unproven", parent_run_id="run-1"),
+            _event(
+                4,
+                "run_finished",
+                run_id="unproven",
+                parent_run_id="run-1",
+                status="succeeded",
+                stop_reason="done",
+            ),
+        ],
+    )
+
+    unproven = next(node for node in graph.nodes if node.run_id == "unproven")
+    assert unproven.run_kind == "unknown"
+    assert not any(edge.type == "spawn_branch" for edge in graph.edges)
+
+
+def test_trace_full_prefers_exact_spawn_task_child_metadata() -> None:
+    events = [
+        _event(1, "run_started"),
+        _event(2, "tool_started", tool_call_id="spawn-a", tool_name="spawn"),
+        _event(3, "tool_finished", tool_call_id="spawn-a", tool_name="spawn", elapsed_ms=1, status="ok"),
+        _event(4, "tool_started", tool_call_id="spawn-b", tool_name="spawn"),
+        _event(5, "tool_finished", tool_call_id="spawn-b", tool_name="spawn", elapsed_ms=1, status="ok"),
+        _event(
+            6,
+            "run_started",
+            run_id="child-a",
+            parent_run_id="run-1",
+            source_type="subagent",
+            source_metadata={"spawn_tool_call_id": "spawn-a", "subagent_task_id": "task-a"},
+        ),
+        _event(7, "run_finished", run_id="child-a", parent_run_id="run-1", source_type="subagent", status="succeeded", stop_reason="done"),
+        _event(8, "run_finished", status="succeeded", stop_reason="done"),
+        _event(
+            9,
+            "run_started",
+            run_id="continuation-a",
+            source_type="continuation",
+            source_metadata={"continuation_of_run_id": "child-a", "injection_source": "subagent_result"},
+        ),
+        _event(10, "run_finished", run_id="continuation-a", source_type="continuation", status="succeeded", stop_reason="done"),
+    ]
+    graph = AuditGraphBuilder().build(trace_id="trace-1", level="trace_full", events=events)
+    runs = {node.run_id: node for node in graph.nodes if node.type == "run"}
+
+    assert runs["child-a"].run_kind == "child_agent"
+    assert runs["child-a"].spawn_tool_call_id == "spawn-a"
+    assert runs["continuation-a"].run_kind == "continuation"
+    assert runs["continuation-a"].parent_node_id is None
+    assert runs["continuation-a"].continuation_of_run_id == "child-a"
+
+
+def test_trace_full_exposes_terminal_and_process_health_separately() -> None:
+    events = [
+        _event(1, "run_started"),
+        _event(2, "tool_started", tool_call_id="tool-1", tool_name="exec"),
+        _event(
+            3,
+            "tool_finished",
+            tool_call_id="tool-1",
+            tool_name="exec",
+            elapsed_ms=5,
+            status="error",
+        ),
+        _event(4, "run_finished", status="succeeded", stop_reason="final_answer"),
+    ]
+    graph = AuditGraphBuilder().build(
+        trace_id="trace-1", level="trace_full", events=events
+    )
+    run = next(node for node in graph.nodes if node.type == "run")
+
+    assert run.terminal_status == "succeeded"
+    assert run.health_status == "warning"
+    assert run.anomaly_count == 1
+
+
+def test_region_membership_and_event_ownership_are_bidirectional() -> None:
+    graph = AuditGraphBuilder().build(
+        trace_id="trace-1", level="run", run_id="run-1", events=_retry_trace()
+    )
+    region_members = {member for region in graph.regions for member in region.member_node_ids}
+
+    assert region_members == {node.id for node in graph.nodes}
+    assert len(graph.event_owners) + len(graph.ignored_event_ids) == len(_retry_trace())
+    assert set(graph.event_owners).isdisjoint(graph.ignored_event_ids)
+
+
+def test_trace_graph_uses_parent_and_resume_edges_without_time_inference() -> None:
+    events = [
+        _event(1, "run_started"),
+        _event(2, "run_finished", status="interrupted", stop_reason="cancel"),
+        _event(
+            3,
+            "run_started",
+            run_id="run-2",
+            resumed_from_run_id="run-1",
+            parent_run_id="run-1",
+        ),
+        _event(
+            4,
+            "run_finished",
+            run_id="run-2",
+            resumed_from_run_id="run-1",
+            parent_run_id="run-1",
+            status="succeeded",
+            stop_reason="final_answer",
+        ),
+    ]
+    graph = AuditGraphBuilder().build(trace_id="trace-1", level="trace", events=events)
+
+    assert {edge.type for edge in graph.edges} == {"parent_run", "resumed_from"}
+    assert all(edge.source.endswith("run-1") for edge in graph.edges)
+
+
+def test_duplicate_lifecycle_start_is_the_first_anomaly() -> None:
+    graph = AuditGraphBuilder().build(
+        trace_id="trace-1",
+        level="trace",
+        events=[
+            _event(1, "run_started"),
+            _event(2, "run_started"),
+            _event(3, "run_finished", status="failed", stop_reason="model_error"),
+        ],
+    )
+
+    assert graph.first_anomaly is not None
+    assert graph.first_anomaly.event_id == "e2"
+    assert graph.first_anomaly.category == "lifecycle_mismatch"
+    assert graph.nodes[0].summary.subtype == "lifecycle_mismatch"
+
+
+def test_checkpoint_transitions_merge_without_downgrading_successful_run() -> None:
+    events = [
+        _event(1, "run_started"),
+        _event(
+            2,
+            "checkpoint_written",
+            checkpoint_id="cp-1",
+            checkpoint_version=1,
+            checkpoint_phase="final_response",
+            iteration=None,
+        ),
+        _event(
+            3,
+            "checkpoint_restored",
+            checkpoint_id="cp-1",
+            checkpoint_version=1,
+            source_run_id="run-1",
+            iteration=None,
+        ),
+        _event(
+            4,
+            "checkpoint_cleared",
+            checkpoint_id="cp-1",
+            clear_reason="turn_completed",
+            iteration=None,
+        ),
+        _event(5, "run_finished", status="succeeded", stop_reason="final_answer"),
+    ]
+    graph = AuditGraphBuilder().build(
+        trace_id="trace-1", level="run", run_id="run-1", events=events
+    )
+
+    checkpoints = [node for node in graph.nodes if node.type == "checkpoint"]
+    assert len(checkpoints) == 1
+    assert checkpoints[0].status == "succeeded"
+    assert checkpoints[0].raw_event_ids == ["e2", "e3", "e4"]
+    assert checkpoints[0].summary.checkpoint_restored is True
+    assert checkpoints[0].summary.checkpoint_cleared is True
+    assert graph.trace.display_status == "succeeded"
+    assert graph.trace.event_count == 5
+
+
+def test_delivery_suppression_supports_legacy_webui_evidence_without_hiding_unknowns() -> None:
+    start = _event(1, "run_started")
+    finish = _event(4, "run_finished", status="succeeded", stop_reason="final_answer")
+    expected = _event(
+        2,
+        "delivery_finished",
+        delivery_id="d1",
+        final_attempt_ordinal=0,
+        status="suppressed",
+        suppression_reason="webui_stream_already_delivered",
+        iteration=None,
+    )
+    legacy_webui = _event(
+        3,
+        "delivery_finished",
+        delivery_id="d2",
+        final_attempt_ordinal=0,
+        status="suppressed",
+        iteration=None,
+    )
+    non_webui_start = _event(1, "run_started", source_type="slack", session_key="slack:chat-1")
+    non_webui_finish = _event(
+        4,
+        "run_finished",
+        status="succeeded",
+        stop_reason="final_answer",
+        source_type="slack",
+        session_key="slack:chat-1",
+    )
+    unknown = _event(
+        3,
+        "delivery_finished",
+        delivery_id="d3",
+        final_attempt_ordinal=0,
+        status="suppressed",
+        iteration=None,
+        source_type="delivery",
+        session_key="slack:chat-1",
+    )
+
+    successful = AuditGraphBuilder().build(
+        trace_id="trace-1", level="run", run_id="run-1", events=[start, expected, finish]
+    )
+    legacy = AuditGraphBuilder().build(
+        trace_id="trace-1",
+        level="run",
+        run_id="run-1",
+        events=[start, legacy_webui, finish],
+    )
+    warning = AuditGraphBuilder().build(
+        trace_id="trace-1",
+        level="run",
+        run_id="run-1",
+        events=[non_webui_start, unknown, non_webui_finish],
+    )
+    assert successful.trace.display_status == "succeeded"
+    assert next(node for node in successful.nodes if node.type == "delivery").status == "succeeded"
+    assert legacy.trace.display_status == "succeeded"
+    assert next(node for node in legacy.nodes if node.type == "delivery").status == "succeeded"
+    assert warning.trace.display_status == "warning"
+    assert next(node for node in warning.nodes if node.type == "delivery").status == "warning"
+
+
+def test_trace_title_prefers_inbound_source_over_delivery() -> None:
+    graph = AuditGraphBuilder().build(
+        trace_id="trace-1",
+        level="trace",
+        events=[
+            _event(1, "run_started", source_type="delivery"),
+            _event(2, "turn_started", source_type="websocket"),
+            _event(3, "run_finished", status="succeeded", stop_reason="final_answer"),
+        ],
+    )
+
+    assert graph.trace.title.startswith("websocket / ")

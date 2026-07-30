@@ -1,0 +1,302 @@
+import { useEffect, useState } from "react";
+import { ArrowLeft, ExternalLink, LoaderCircle, RefreshCw, Workflow } from "lucide-react";
+
+import { TraceGraph } from "@/components/traces/TraceGraph";
+import { SessionTraceList } from "@/components/traces/SessionTraceList";
+import { PayloadViewer } from "@/components/traces/PayloadViewer";
+import { TraceTimeline } from "@/components/traces/TraceTimeline";
+import {
+  TraceNodeInspector,
+  type TraceFocusMode,
+} from "@/components/traces/TraceNodeInspector";
+import { Button } from "@/components/ui/button";
+import { Sheet, SheetContent, SheetTitle } from "@/components/ui/sheet";
+import { useAuditGraph } from "@/hooks/useAuditGraph";
+import { useAuditSessions } from "@/hooks/useAuditSessions";
+import { useAuditTimeline } from "@/hooks/useAuditTimeline";
+import { useMediaQuery } from "@/hooks/useMediaQuery";
+import { AuditApiError, fetchAuditPayload } from "@/lib/audit-api";
+import type { AuditPayloadResponse, AuditTraceListItem } from "@/lib/audit-types";
+import { cn } from "@/lib/utils";
+
+export interface TraceSelection {
+  traceId: string | null;
+  turnId: string | null;
+  runId: string | null;
+  nodeId: string | null;
+  eventId: string | null;
+}
+
+export const EMPTY_TRACE_SELECTION: TraceSelection = {
+  traceId: null,
+  turnId: null,
+  runId: null,
+  nodeId: null,
+  eventId: null,
+};
+
+export function TraceWorkbench({
+  token,
+  selection,
+  onSelectionChange,
+  onOpenConversation,
+}: {
+  token: string;
+  selection: TraceSelection;
+  onSelectionChange: (selection: TraceSelection, replace?: boolean) => void;
+  onOpenConversation: (sessionKey: string) => void;
+}) {
+  const sessions = useAuditSessions(token);
+  const auditGraph = useAuditGraph(token, selection.traceId, selection.runId);
+  const [focusMode, setFocusMode] = useState<TraceFocusMode>(null);
+  const [timelineOpen, setTimelineOpen] = useState(false);
+  const [payloadId, setPayloadId] = useState<string | null>(null);
+  const [payload, setPayload] = useState<AuditPayloadResponse | null>(null);
+  const [payloadLoading, setPayloadLoading] = useState(false);
+  const [payloadError, setPayloadError] = useState<string | null>(null);
+  const [selectedTrace, setSelectedTrace] = useState<AuditTraceListItem | null>(null);
+  const wideInspector = useMediaQuery("(min-width: 1440px)", false);
+  const selected = selectedTrace?.trace_id === selection.traceId ? selectedTrace : null;
+  const selectedNode = auditGraph.graph?.nodes.find((node) => node.id === selection.nodeId) ?? null;
+  const timeline = useAuditTimeline(
+    token,
+    selection.traceId,
+    timelineOpen || Boolean(selectedNode),
+  );
+  const unavailableCode = sessions.error?.code;
+
+  useEffect(() => {
+    if (!selection.nodeId || !auditGraph.graph || selectedNode) return;
+    onSelectionChange({ ...selection, nodeId: null, eventId: null }, true);
+  }, [auditGraph.graph, onSelectionChange, selectedNode, selection]);
+
+  useEffect(() => {
+    const closeInspector = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      if (payloadId) {
+        setPayloadId(null);
+        return;
+      }
+      if (!selection.nodeId) return;
+      onSelectionChange({ ...selection, nodeId: null, eventId: null });
+    };
+    window.addEventListener("keydown", closeInspector);
+    return () => window.removeEventListener("keydown", closeInspector);
+  }, [onSelectionChange, payloadId, selection]);
+
+  const loadPayload = async (nextPayloadId: string) => {
+    setPayloadId(nextPayloadId);
+    setPayload(null);
+    setPayloadError(null);
+    setPayloadLoading(true);
+    try {
+      setPayload(await fetchAuditPayload(token, nextPayloadId));
+    } catch (reason) {
+      setPayloadError(reason instanceof AuditApiError ? reason.message : String(reason));
+    } finally {
+      setPayloadLoading(false);
+    }
+  };
+
+  const selectTrace = (trace: AuditTraceListItem) => {
+    setSelectedTrace(trace);
+    onSelectionChange({ ...EMPTY_TRACE_SELECTION, traceId: trace.trace_id });
+  };
+
+  return (
+    <div className="flex h-full min-h-0 flex-col bg-background text-foreground" data-testid="trace-workbench">
+      <header className="flex h-[52px] shrink-0 items-center justify-between gap-3 border-b border-border/60 px-3 sm:px-4">
+        <div className="flex min-w-0 items-center gap-2">
+          {selection.traceId ? (
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon"
+              className="h-8 w-8 md:hidden"
+              aria-label="返回运行轨迹列表"
+              title="返回运行轨迹列表"
+              onClick={() => onSelectionChange(EMPTY_TRACE_SELECTION)}
+            >
+              <ArrowLeft className="h-4 w-4" />
+            </Button>
+          ) : null}
+          <Workflow className="h-4 w-4 shrink-0 text-orange-500" />
+          <div className="min-w-0">
+            <h1 className="truncate text-sm font-semibold">运行轨迹</h1>
+            {selected || auditGraph.graph ? <p className="truncate text-[11px] text-muted-foreground">{selected?.title ?? auditGraph.graph?.trace.title}</p> : null}
+          </div>
+        </div>
+        <div className="flex items-center gap-1">
+          {(selected?.session_key ?? auditGraph.graph?.trace.session_key)?.startsWith("websocket:") ? (
+            <Button
+              type="button"
+              variant="ghost"
+              size="sm"
+              className="h-8 gap-1.5 px-2 text-xs"
+              onClick={() => onOpenConversation((selected?.session_key ?? auditGraph.graph?.trace.session_key)!)}
+            >
+              <ExternalLink className="h-3.5 w-3.5" />
+              <span className="hidden sm:inline">打开会话</span>
+            </Button>
+          ) : null}
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon"
+            className="h-8 w-8"
+            aria-label="刷新运行轨迹"
+            title="刷新运行轨迹"
+            onClick={() => { sessions.refresh(); auditGraph.refresh(); }}
+          >
+            <RefreshCw className="h-3.5 w-3.5" />
+          </Button>
+        </div>
+      </header>
+
+      {sessions.error && !sessions.items.length ? (
+        <div className="flex min-h-0 flex-1 items-center justify-center px-6">
+          <div className="max-w-sm text-center">
+            <Workflow className="mx-auto h-7 w-7 text-muted-foreground" />
+            <h2 className="mt-3 text-sm font-semibold">
+              {unavailableCode === "audit_off"
+                ? "审计记录已关闭"
+                : unavailableCode === "audit_index_disabled"
+                  ? "审计索引已关闭"
+                  : unavailableCode === "audit_index_building"
+                    ? "正在构建审计索引"
+                    : "运行轨迹暂不可用"}
+            </h2>
+            <p className="mt-1 text-xs text-muted-foreground">{sessions.error.message}</p>
+            {sessions.error.retryable ? (
+              <Button variant="outline" size="sm" className="mt-4 h-8 text-xs" onClick={sessions.refresh}>
+                重试
+              </Button>
+            ) : null}
+          </div>
+        </div>
+      ) : (
+        <div className={cn(
+          "grid min-h-0 flex-1 md:grid-cols-[280px_minmax(0,1fr)]",
+          selectedNode && wideInspector && "2xl:grid-cols-[280px_minmax(0,1fr)_380px]",
+        )}>
+          <div className={cn("min-h-0", selection.traceId && "hidden md:block")}>
+            <SessionTraceList
+              token={token}
+              sessions={sessions.items}
+              index={sessions.index}
+              query={sessions.query}
+              selectedTraceId={selection.traceId}
+              selectedSessionKey={selected?.session_key ?? auditGraph.graph?.trace.session_key ?? null}
+              loading={sessions.loading}
+              loadingMore={sessions.loadingMore}
+              hasMore={Boolean(sessions.nextCursor)}
+              onQueryChange={sessions.setQuery}
+              onSelectTrace={selectTrace}
+              onLoadMore={sessions.loadMore}
+            />
+          </div>
+          <section className={cn("relative flex min-h-0 flex-col overflow-hidden", !selection.traceId && "hidden md:flex")} aria-label="运行轨迹图">
+            {selection.traceId ? (
+              <>
+                <div className="flex h-9 shrink-0 items-center gap-1 border-b border-border/55 px-2 text-[11px] text-muted-foreground">
+                  <button type="button" className="rounded px-1.5 py-1 hover:bg-muted hover:text-foreground" onClick={() => onSelectionChange({ ...selection, runId: null, nodeId: null, eventId: null })}>
+                    Trace
+                  </button>
+                  {selection.runId ? <><span>/</span><span className="truncate font-mono">{selection.runId}</span></> : null}
+                  {auditGraph.updating ? <LoaderCircle className="ml-auto h-3.5 w-3.5 animate-spin motion-reduce:animate-none" /> : null}
+                </div>
+                <div className="min-h-0 flex-1">
+                  {auditGraph.loading && !auditGraph.graph ? (
+                    <div className="flex h-full items-center justify-center gap-2 text-xs text-muted-foreground">
+                      <LoaderCircle className="h-4 w-4 animate-spin motion-reduce:animate-none" />正在构建轨迹图
+                    </div>
+                  ) : auditGraph.error ? (
+                    <div className="flex h-full flex-col items-center justify-center gap-3 px-6 text-center text-xs text-muted-foreground">
+                      <span>{auditGraph.error.message}</span>
+                      <Button variant="outline" size="sm" className="h-8" onClick={auditGraph.refresh}>重试</Button>
+                    </div>
+                  ) : auditGraph.graph ? (
+                    <TraceGraph
+                      graph={auditGraph.graph}
+                      selectedNodeId={selection.nodeId}
+                      focusMode={focusMode}
+                      onSelectNode={(nodeId) => onSelectionChange({ ...selection, nodeId, eventId: null })}
+                      onFocusMode={setFocusMode}
+                    />
+                  ) : null}
+                </div>
+                <TraceTimeline
+                  timeline={timeline}
+                  total={auditGraph.graph?.trace.event_count ?? timeline.total}
+                  open={timelineOpen}
+                  selectedEventId={selection.eventId}
+                  currentNodeIds={new Set(auditGraph.graph?.nodes.map((node) => node.id) ?? [])}
+                  onOpenChange={setTimelineOpen}
+                  onSelectEvent={(event, nodeId) => onSelectionChange({
+                    ...selection,
+                    eventId: event.event_id,
+                    nodeId: nodeId ?? selection.nodeId,
+                  })}
+                  onLoadPayload={(nextPayloadId) => void loadPayload(nextPayloadId)}
+                />
+              </>
+            ) : (
+              <div className="flex h-full items-center justify-center text-xs text-muted-foreground">
+                选择一条运行轨迹
+              </div>
+            )}
+          </section>
+          {selectedNode && wideInspector ? (
+            <TraceNodeInspector
+              node={selectedNode}
+              events={timeline.events}
+              onLocateEvent={(event) => {
+                setTimelineOpen(true);
+                onSelectionChange({ ...selection, eventId: event.event_id });
+              }}
+              focusMode={focusMode}
+              onFocusMode={setFocusMode}
+              onClose={() => onSelectionChange({ ...selection, nodeId: null, eventId: null })}
+            />
+          ) : null}
+        </div>
+      )}
+      {!wideInspector ? (
+        <Sheet
+          open={Boolean(selectedNode)}
+          onOpenChange={(open) => {
+            if (!open) onSelectionChange({ ...selection, nodeId: null, eventId: null });
+          }}
+        >
+          <SheetContent side="right" className="w-[min(100vw,400px)] p-0" aria-describedby={undefined}>
+            <SheetTitle className="sr-only">节点检查器</SheetTitle>
+            {selectedNode ? (
+              <TraceNodeInspector
+                node={selectedNode}
+                events={timeline.events}
+                onLocateEvent={(event) => {
+                  setTimelineOpen(true);
+                  onSelectionChange({ ...selection, eventId: event.event_id });
+                }}
+                focusMode={focusMode}
+                onFocusMode={setFocusMode}
+                onClose={() => onSelectionChange({ ...selection, nodeId: null, eventId: null })}
+              />
+            ) : null}
+          </SheetContent>
+        </Sheet>
+      ) : null}
+      <Sheet open={Boolean(payloadId)} onOpenChange={(open) => { if (!open) setPayloadId(null); }}>
+        <SheetContent side="right" className="w-[min(100vw,640px)] p-0" aria-describedby={undefined}>
+          <SheetTitle className="sr-only">Payload 查看器</SheetTitle>
+          <PayloadViewer
+            payload={payload}
+            loading={payloadLoading}
+            error={payloadError}
+            onClose={() => setPayloadId(null)}
+          />
+        </SheetContent>
+      </Sheet>
+    </div>
+  );
+}

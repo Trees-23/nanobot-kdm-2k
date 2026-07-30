@@ -100,3 +100,6 @@ temp/
 exp/
 .playwright-mcp/
 bridge/node_modules/
+
+# Local nanobot runtime data (config, secrets, memory, sessions, channel state)
+runtime/

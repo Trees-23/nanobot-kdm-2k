@@ -56,6 +56,7 @@
     },
     "apps": "应用",
     "automations": "自动任务",
+    "traces": "运行轨迹",
     "skills": {
       "title": "技能"
     }

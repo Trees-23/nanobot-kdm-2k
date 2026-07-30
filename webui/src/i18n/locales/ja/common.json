@@ -56,6 +56,7 @@
     },
     "apps": "アプリ",
     "automations": "自動タスク",
+    "traces": "実行トレース",
     "skills": {
       "title": "スキル"
     }

@@ -182,9 +182,9 @@ const INDEX_HTML = readFileSync(resolve(process.cwd(), "index.html"), "utf8");
 const PREBOOT_SCRIPT = INDEX_HTML.match(
   /<script>\s*(\(function \(\) \{\s*var localeKey = "nanobot\.locale";[\s\S]*?\}\)\(\);)\s*<\/script>/,
 )?.[1];
-const BOOT_COPY_MARKUP = '<span data-boot-copy>Loading nanobot…</span>';
+const BOOT_COPY_MARKUP = '<span data-boot-copy>正在加载 nanobot…</span>';
 
-function runPrebootLocale(storedLocale: string) {
+function runPrebootLocale(storedLocale: string | null) {
   if (!PREBOOT_SCRIPT) throw new Error("Could not find the preboot locale script in index.html");
 
   const documentElement = { lang: "" };
@@ -279,12 +279,17 @@ describe("webui i18n", () => {
     }
   });
 
-  it("defaults to English until the user chooses another language", () => {
+  it("defaults to Simplified Chinese until the user chooses another language", () => {
     localStorage.removeItem(LOCALE_STORAGE_KEY);
-    expect(resolveInitialLocale()).toBe("en");
-
-    localStorage.setItem(LOCALE_STORAGE_KEY, "zh-CN");
     expect(resolveInitialLocale()).toBe("zh-CN");
+    expect(runPrebootLocale(null)).toEqual({
+      lang: "zh-CN",
+      boot: resources["zh-CN"].common.app.loading.boot,
+      description: resources["zh-CN"].common.app.meta.description,
+    });
+
+    localStorage.setItem(LOCALE_STORAGE_KEY, "en");
+    expect(resolveInitialLocale()).toBe("en");
   });
 
   it("switches UI copy and document locale through the language switcher", async () => {

@@ -1707,10 +1707,9 @@ async def test_system_subagent_followup_uses_thread_session_and_slack_metadata(t
     assert outbound is not None
     assert outbound.channel == "slack"
     assert outbound.chat_id == "C123"
-    assert outbound.metadata == {
-        "slack": {"thread_ts": "1700.42"},
-        "origin_message_id": "msg-123",
-    }
+    assert outbound.metadata["slack"] == {"thread_ts": "1700.42"}
+    assert outbound.metadata["origin_message_id"] == "msg-123"
+    assert set(outbound.metadata["_audit_context"]) == {"trace_id", "turn_id", "run_id"}
     request = seen["request_context"]
     assert isinstance(request, RequestContext)
     assert request.channel == "slack"

@@ -10,6 +10,7 @@ from typing import Any
 from nanobot.agent.hook import AgentHook, SDKCaptureHook
 from nanobot.agent.hooks import create_file_edit_activity_hook
 from nanobot.agent.loop import AgentLoop
+from nanobot.audit.delivery import emit_returned_to_caller
 from nanobot.config.schema import Config
 from nanobot.providers.image_generation import image_gen_provider_configs
 from nanobot.sdk.clients import MemoryClient, RuntimeClient, SessionClient
@@ -169,13 +170,30 @@ class Nanobot:
         )
         if runtime is not None:
             kwargs["runtime"] = runtime
-        response = await self._loop.process_direct(
-            message,
-            **kwargs,
-            hooks=per_run_hooks,
-        )
+        try:
+            response = await self._loop.process_direct(
+                message,
+                **kwargs,
+                hooks=per_run_hooks,
+            )
+        except Exception as error:
+            await emit_returned_to_caller(
+                self._loop.audit_runtime.emitter,
+                None,
+                None,
+                status="error",
+                context_override=getattr(error, "_audit_context", None),
+            )
+            raise
 
-        return result_from_response(response, capture)
+        result = result_from_response(response, capture)
+        await emit_returned_to_caller(
+            self._loop.audit_runtime.emitter,
+            response,
+            result,
+            status="returned",
+        )
+        return result
 
     async def run_streamed(
         self,
@@ -240,6 +258,12 @@ class Nanobot:
                 )
                 await emitter.text_completed(resuming=False, force=False)
                 result = result_from_response(response, capture)
+                await emit_returned_to_caller(
+                    self._loop.audit_runtime.emitter,
+                    response,
+                    result,
+                    status="returned",
+                )
                 await emitter.emit(StreamEvent(
                     type=STREAM_EVENT_RUN_COMPLETED,
                     content=result.content,
@@ -249,6 +273,13 @@ class Nanobot:
                 ))
                 return result
             except Exception as exc:
+                await emit_returned_to_caller(
+                    self._loop.audit_runtime.emitter,
+                    None,
+                    None,
+                    status="error",
+                    context_override=getattr(exc, "_audit_context", None),
+                )
                 await emitter.emit(StreamEvent(
                     type=STREAM_EVENT_RUN_FAILED,
                     error=str(exc),
@@ -301,6 +332,7 @@ class Nanobot:
         await self._loop.close_mcp()
 
     async def __aenter__(self) -> Nanobot:
+        await self._loop.audit_runtime.ensure_started()
         return self
 
     async def __aexit__(self, *exc: object) -> None:

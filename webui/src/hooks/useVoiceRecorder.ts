@@ -192,7 +192,7 @@ export function useVoiceRecorder({
       chunksRef.current = [];
       streamRef.current = stream;
       mediaRecorderRef.current = recorder;
-      startedAtRef.current = Date.now();
+      startedAtRef.current = performance.now();
       levelObservedRef.current = false;
       peakLevelRef.current = 0;
       levelReliableRef.current = false;
@@ -204,7 +204,7 @@ export function useVoiceRecorder({
       };
       recorder.onstop = () => {
         const chunks = chunksRef.current.splice(0);
-        const durationMs = Math.max(0, Date.now() - startedAtRef.current);
+        const durationMs = Math.max(0, performance.now() - startedAtRef.current);
         const mimeType = recorder.mimeType || "audio/webm";
         const hasMeasuredSilence =
           levelReliableRef.current
@@ -331,7 +331,7 @@ export function useVoiceRecorder({
       return;
     }
     const updateElapsed = () => {
-      setElapsedMs(Math.max(0, Date.now() - startedAtRef.current));
+      setElapsedMs(Math.max(0, performance.now() - startedAtRef.current));
     };
     updateElapsed();
     const interval = window.setInterval(updateElapsed, 250);

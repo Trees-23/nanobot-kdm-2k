@@ -43,6 +43,13 @@ def get_logs_dir() -> Path:
     return get_runtime_subdir("logs")
 
 
+def get_audit_dir(configured: str | None = None) -> Path:
+    """Return the instance audit root outside the agent workspace."""
+    if configured:
+        return ensure_dir(Path(configured).expanduser())
+    return ensure_dir(get_runtime_subdir("audit") / "v1")
+
+
 def get_webui_dir() -> Path:
     """Return the directory for WebUI-only persisted display threads (JSON)."""
     return get_runtime_subdir("webui")

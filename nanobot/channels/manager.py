@@ -6,12 +6,15 @@ import asyncio
 import hashlib
 from collections.abc import Callable, Iterable
 from contextlib import suppress
+from dataclasses import replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from loguru import logger
 
-from nanobot.bus.events import OutboundMessage
+from nanobot.audit.delivery import DeliveryAuditRecorder
+from nanobot.audit.emitter import DisabledAuditEmitter
+from nanobot.bus.events import AUDIT_CONTEXT_META, OutboundMessage
 from nanobot.bus.outbound_events import (
     ProgressEvent,
     RetryWaitEvent,
@@ -97,6 +100,8 @@ class ChannelManager:
         webui_static_dist: bool = True,
         webui_runtime_surface: str = "browser",
         webui_runtime_capabilities: dict[str, Any] | None = None,
+        webui_active_audit_run_ids: Callable[[], set[str]] | None = None,
+        audit_emitter: Any | None = None,
     ):
         self.config = config
         self.bus = bus
@@ -109,6 +114,8 @@ class ChannelManager:
         self._webui_static_dist = webui_static_dist
         self._webui_runtime_surface = webui_runtime_surface
         self._webui_runtime_capabilities = dict(webui_runtime_capabilities or {})
+        self._webui_active_audit_run_ids = webui_active_audit_run_ids
+        self._audit_emitter = audit_emitter or DisabledAuditEmitter()
         self.channels: dict[str, BaseChannel] = {}
         self._channel_owners: dict[str, str] = {}
         self._channel_runtime_specs: dict[str, tuple[str, str]] = {}
@@ -153,6 +160,7 @@ class ChannelManager:
         kwargs: dict[str, Any] = {}
         if cls.name == "websocket":
             from nanobot.channels.websocket.runtime import WebSocketConfig
+            from nanobot.config.paths import get_audit_dir
             from nanobot.webui.gateway_services import build_gateway_services
 
             parsed = WebSocketConfig.model_validate(section)
@@ -175,6 +183,9 @@ class ChannelManager:
                 local_trigger_pending_ids=self._webui_local_trigger_pending_ids,
                 channel_feature_action=self.apply_channel_feature_action,
                 channel_runtime_status=self.get_status,
+                audit_config=self.config.audit,
+                audit_root=get_audit_dir(self.config.audit.path),
+                active_audit_run_ids=self._webui_active_audit_run_ids,
                 logger=logger,
             )
             kwargs["gateway"] = gateway
@@ -722,10 +733,20 @@ class ChannelManager:
                     ):
                         if self._should_suppress_outbound(msg):
                             logger.info("Suppressing duplicate outbound message to {}:{}", msg.channel, msg.chat_id)
+                            await DeliveryAuditRecorder(
+                                self._audit_emitter, msg
+                            ).finished(
+                                0,
+                                "suppressed",
+                                suppression_reason="duplicate_outbound",
+                            )
                             continue
                     await self._send_with_retry(channel, msg)
                 else:
                     logger.warning("Unknown channel: {}", msg.channel)
+                    await DeliveryAuditRecorder(
+                        self._audit_emitter, msg
+                    ).finished(0, "failed")
 
             except asyncio.TimeoutError:
                 continue
@@ -877,13 +898,34 @@ class ChannelManager:
         """
         max_attempts = max(self.config.channels.send_max_retries, 1)
         attempt = 0
+        audit = DeliveryAuditRecorder(
+            getattr(self, "_audit_emitter", DisabledAuditEmitter()), msg
+        )
+        if isinstance(outbound_event_from_message(msg), StreamedResponseEvent):
+            await audit.finished(
+                0,
+                "suppressed",
+                suppression_reason="webui_stream_already_delivered",
+            )
+            return
+        adapter_msg = replace(
+            msg,
+            metadata={
+                key: value
+                for key, value in (msg.metadata or {}).items()
+                if key != AUDIT_CONTEXT_META
+            },
+        )
 
         while True:
             attempt += 1
+            await audit.attempted(attempt)
             try:
-                await self._send_once(channel, msg)
+                await self._send_once(channel, adapter_msg)
+                await audit.finished(attempt, "accepted_by_adapter")
                 return  # Send succeeded
             except asyncio.CancelledError:
+                await audit.finished(attempt, "cancelled")
                 raise  # Propagate cancellation for graceful shutdown
             except Exception as e:
                 loop = asyncio.get_running_loop()
@@ -897,6 +939,7 @@ class ChannelManager:
                         "Failed to send to {} after {} attempts",
                         msg.channel, attempt,
                     )
+                    await audit.finished(attempt, "failed")
                     return
                 delay = _SEND_RETRY_DELAYS[min(attempt - 1, len(_SEND_RETRY_DELAYS) - 1)]
                 if deadline is not None:
@@ -908,9 +951,11 @@ class ChannelManager:
                     "Send to {} failed (attempt {}): {}, retrying in {}s",
                     msg.channel, attempt_label, type(e).__name__, delay,
                 )
+                await audit.retry(attempt, delay)
                 try:
                     await asyncio.sleep(delay)
                 except asyncio.CancelledError:
+                    await audit.finished(attempt, "cancelled")
                     raise  # Propagate cancellation during sleep
 
     def get_channel(self, name: str) -> BaseChannel | None:

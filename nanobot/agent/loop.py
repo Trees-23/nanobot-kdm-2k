@@ -34,7 +34,16 @@ from nanobot.agent.tools.message import MessageTool
 from nanobot.agent.tools.registry import ToolRegistry
 from nanobot.agent.tools.self import MyTool
 from nanobot.agent.turn_hooks import AgentTurnHookSpec, build_agent_turn_hook
-from nanobot.bus.events import InboundMessage, OutboundMessage
+from nanobot.audit.boundaries import TurnAuditRecorder
+from nanobot.audit.context import (
+    AuditRunContext,
+    AuditTurnContext,
+    TraceTurnInput,
+    set_run_cause,
+)
+from nanobot.audit.ids import new_audit_id
+from nanobot.audit.runtime import AuditRuntime
+from nanobot.bus.events import AUDIT_CONTEXT_META, InboundMessage, OutboundMessage
 from nanobot.bus.outbound_events import (
     RetryWaitEvent,
     StreamDeltaEvent,
@@ -51,6 +60,7 @@ from nanobot.bus.runtime_events import (
 )
 from nanobot.command import CommandContext, CommandRouter, register_builtin_commands
 from nanobot.config.schema import AgentDefaults, ModelPresetConfig
+from nanobot.cron.session_turns import is_cron_turn
 from nanobot.providers.base import LLMProvider
 from nanobot.providers.factory import ProviderSnapshot
 from nanobot.runtime_context import (
@@ -80,6 +90,7 @@ from nanobot.session.manager import (
     SessionManager,
     replay_max_messages_for_context,
 )
+from nanobot.triggers.local_session_turns import local_trigger
 from nanobot.triggers.local_turns import LocalTriggerTurnCoordinator
 from nanobot.utils.cancellation import task_is_cancelling
 from nanobot.utils.document import extract_documents, reference_non_image_attachments
@@ -144,6 +155,9 @@ class TurnContext:
     route: TurnRoute
     original_user_text: str | None = None
     session: Session | None = None
+    audit_turn: AuditTurnContext | None = None
+    audit_run: AuditRunContext | None = None
+    audit: TurnAuditRecorder | None = None
 
     history: list[dict[str, Any]] = field(default_factory=list)
     initial_messages: list[dict[str, Any]] = field(default_factory=list)
@@ -302,9 +316,11 @@ class AgentLoop:
         runtime_model_publisher: Callable[[str, str | None], None] | None = None,
         restart_mode: str = "auto",
         local_trigger_store: Any | None = None,
+        audit_runtime: AuditRuntime | None = None,
     ):
-        from nanobot.config.schema import ToolsConfig
+        from nanobot.config.schema import ToolsConfig, _resolve_tool_config_refs
 
+        _resolve_tool_config_refs()
         _tc = tools_config or ToolsConfig()
         defaults = AgentDefaults()
         self.bus = bus
@@ -357,6 +373,7 @@ class AgentLoop:
             self._image_generation_provider_configs["openrouter"] = image_generation_provider_config
         self.cron_service = cron_service
         self.local_trigger_store = local_trigger_store
+        self.audit_runtime = audit_runtime or AuditRuntime.disabled()
         self.restrict_to_workspace = restrict_to_workspace
         self.workspace_scopes = WorkspaceScopeResolver(
             default_workspace=workspace,
@@ -369,13 +386,16 @@ class AgentLoop:
 
         self.context = ContextBuilder(workspace, timezone=timezone, disabled_skills=disabled_skills)
         self.sessions = session_manager or SessionManager(workspace)
+        from nanobot.session.goal_orchestration import GoalOrchestrationStore
+
+        self.goal_orchestration = GoalOrchestrationStore(self.sessions)
         self.sessions.set_file_cap_archiver(self.context.memory.raw_archive)
         self.tools = ToolRegistry()
         # One file-read/write tracker per logical session. The tool registry is
         # shared by this loop, so tools resolve the active state via contextvars.
         self._file_state_store = FileStateStore()
         self._exec_session_manager = ExecSessionManager()
-        self.runner = AgentRunner()
+        self.runner = AgentRunner(audit_emitter=self.audit_runtime.emitter)
         self.subagents = SubagentManager(
             workspace=workspace,
             bus=bus,
@@ -387,6 +407,8 @@ class AgentLoop:
             max_concurrent_subagents=max_concurrent_subagents,
             fail_on_tool_error=fail_on_tool_error,
             llm_wall_timeout_for_session=lambda sk: runner_wall_llm_timeout_s(self.sessions, sk),
+            audit_emitter=self.audit_runtime.emitter,
+            goal_orchestration=self.goal_orchestration,
         )
         self._unified_session = unified_session
         self._running = False
@@ -395,6 +417,7 @@ class AgentLoop:
         self._mcp_connecting = False
         self._runtime_context_providers: list[RuntimeContextProvider] = []
         self._active_tasks: dict[str, list[asyncio.Task]] = {}  # session_key -> tasks
+        self._active_audit_runs: dict[str, dict[str, AuditRunContext]] = {}
         self._background_tasks: list[asyncio.Task] = []
         self._session_locks: dict[str, asyncio.Lock] = {}
         # Per-session pending queues for mid-turn message injection.
@@ -471,6 +494,13 @@ class AgentLoop:
             config,
             provider_snapshot_loader,
         )
+        if "audit_runtime" not in extra:
+            from nanobot.config.paths import get_audit_dir
+
+            extra["audit_runtime"] = AuditRuntime.from_config(
+                config.audit,
+                root=get_audit_dir(config.audit.path),
+            )
         return cls(
             bus=bus,
             provider=provider,
@@ -567,6 +597,8 @@ class AgentLoop:
             timezone=self.context.timezone or "UTC",
             workspace_sandbox=self.workspace_scopes.sandbox_status,
             runtime_events=self.runtime_events,
+            audit_emitter=self.audit_runtime.emitter,
+            goal_orchestration=self.goal_orchestration,
         )
         loader = ToolLoader()
         registered = loader.load(ctx, self.tools)
@@ -599,7 +631,11 @@ class AgentLoop:
             return TurnRoute(
                 channel=msg.channel,
                 chat_id=msg.chat_id,
-                metadata=dict(msg.metadata or {}),
+                metadata={
+                    key: value
+                    for key, value in (msg.metadata or {}).items()
+                    if key not in {AUDIT_CONTEXT_META, "source_type"}
+                },
             )
 
         channel, chat_id = (
@@ -778,6 +814,30 @@ class AgentLoop:
         sub_cancelled = await self.subagents.cancel_by_session(key)
         return cancelled + sub_cancelled
 
+    async def _audit_request_cancellation(
+        self,
+        msg: InboundMessage,
+        key: str,
+    ) -> tuple[TurnAuditRecorder, AuditTurnContext]:
+        targets = list(self._active_audit_runs.get(key, {}).values())
+        turn = self.audit_runtime.context_resolver.resolve_turn(
+            TraceTurnInput(
+                session_key=key,
+                source_type="control",
+                actor_type="user",
+                stop_target_trace_ids=tuple(target.trace_id for target in targets),
+            )
+        )
+        recorder = TurnAuditRecorder(self.audit_runtime.emitter, turn)
+        await recorder.started(msg)
+        cause_event_id = await recorder.cancel_requested(
+            target_run_ids=[target.run_id for target in targets],
+            requested_by=msg.sender_id or "user",
+        )
+        for target in targets:
+            set_run_cause(target.run_id, cause_event_id)
+        return recorder, turn
+
     def _effective_session_key(self, msg: InboundMessage) -> str:
         """Return the session key used for task routing and mid-turn injections."""
         if self._unified_session and not msg.session_key_override:
@@ -821,6 +881,7 @@ class AgentLoop:
         turn_scopes: list[AbstractContextManager[Any]] | None = None,
         tools: ToolRegistry | None = None,
         request_context: RequestContext | None = None,
+        audit_context: AuditRunContext | None = None,
     ) -> tuple[str | None, list[str], list[dict], str, bool]:
         """Run the agent iteration loop.
 
@@ -836,7 +897,33 @@ class AgentLoop:
         async def _checkpoint(payload: dict[str, Any]) -> None:
             if session is None:
                 return
-            self._set_runtime_checkpoint(session, payload)
+            previous = session.metadata.get(self._RUNTIME_CHECKPOINT_KEY)
+            previous = previous if isinstance(previous, dict) else {}
+            checkpoint = {
+                **payload,
+                "_audit_checkpoint_id": previous.get("_audit_checkpoint_id")
+                or new_audit_id(),
+                "_audit_checkpoint_version": int(
+                    previous.get("_audit_checkpoint_version") or 0
+                )
+                + 1,
+                "_audit_trace_id": audit_context.trace_id if audit_context else None,
+                "_audit_turn_id": audit_context.turn_id if audit_context else None,
+                "_audit_run_id": audit_context.run_id if audit_context else None,
+            }
+            self._set_runtime_checkpoint(session, checkpoint)
+            if audit_context is not None:
+                turn = AuditTurnContext(
+                    trace_id=audit_context.trace_id,
+                    turn_id=audit_context.turn_id,
+                    session_key=session_key or str(session.key),
+                    source_type=audit_context.source_type,
+                    actor_type="system" if channel == "system" else "user",
+                    link_reason="created",
+                )
+                await TurnAuditRecorder(
+                    self.audit_runtime.emitter, turn
+                ).checkpoint_written(checkpoint, run=audit_context)
 
         async def _drain_pending(*, limit: int = _MAX_INJECTIONS_PER_TURN) -> list[dict[str, Any]]:
             """Drain follow-up messages from the pending queue.
@@ -873,11 +960,34 @@ class AgentLoop:
                 return row
 
             items: list[dict[str, Any]] = []
+
+            async def _append_injection(pending_msg: InboundMessage) -> None:
+                items.append(_to_user_message(pending_msg))
+                if audit_context is None:
+                    return
+                turn = AuditTurnContext(
+                    trace_id=audit_context.trace_id,
+                    turn_id=audit_context.turn_id,
+                    session_key=active_session_key or "unknown",
+                    source_type=audit_context.source_type,
+                    actor_type="system",
+                    link_reason="created",
+                )
+                await TurnAuditRecorder(
+                    self.audit_runtime.emitter, turn
+                ).input_injected(
+                    run=audit_context,
+                    injection_source=str(
+                        pending_msg.metadata.get("injected_event") or pending_msg.sender_id
+                    ),
+                )
+
             while len(items) < limit:
                 try:
-                    items.append(_to_user_message(pending_queue.get_nowait()))
+                    pending_msg = pending_queue.get_nowait()
                 except asyncio.QueueEmpty:
                     break
+                await _append_injection(pending_msg)
 
             # Block if nothing drained but sub-agents spawned in this dispatch
             # are still running.  Keeps the runner loop alive so subsequent
@@ -893,16 +1003,17 @@ class AgentLoop:
                         session.key,
                     )
                     return items
-                items.append(_to_user_message(msg))
+                await _append_injection(msg)
                 while len(items) < limit:
                     try:
-                        items.append(_to_user_message(pending_queue.get_nowait()))
+                        pending_msg = pending_queue.get_nowait()
                     except asyncio.QueueEmpty:
                         break
+                    await _append_injection(pending_msg)
 
             return items
 
-        active_session_key = session.key if session else session_key
+        active_session_key = session_key or (str(session.key) if session is not None else None)
         effective_scope = self.workspace_scopes.for_turn(
             channel=channel,
             message_metadata=metadata,
@@ -919,6 +1030,15 @@ class AgentLoop:
             metadata=dict(metadata or {}),
             workspace=effective_scope.project_path,
         )
+        if audit_context is not None:
+            request_ctx.metadata.setdefault(
+                AUDIT_CONTEXT_META,
+                {
+                    "trace_id": audit_context.trace_id,
+                    "turn_id": audit_context.turn_id,
+                    "run_id": audit_context.run_id,
+                },
+            )
         file_state_token = bind_file_states(self._file_state_store.for_session(active_session_key))
         request_token = bind_request_context(request_ctx)
         workspace_token = bind_workspace_scope(effective_scope)
@@ -968,7 +1088,7 @@ class AgentLoop:
                 error_message="Sorry, I encountered an error calling the AI model.",
                 concurrent_tools=True,
                 workspace=effective_scope.project_path,
-                session_key=session.key if session else None,
+                session_key=active_session_key,
                 context_block_limit=self.context_block_limit,
                 provider_retry_mode=self.provider_retry_mode,
                 progress_callback=on_progress,
@@ -986,6 +1106,7 @@ class AgentLoop:
                 ),
                 goal_active_predicate=lambda: sustained_goal_active(session.metadata) if session is not None else False,
                 goal_continue_message=_goal_continue,
+                audit_context=audit_context,
                 finalize_on_max_iterations=turn_continuation.should_finalize_on_max_iterations(
                     pending_queue_available=pending_queue is not None and session is not None,
                     session_metadata=session_metadata,
@@ -1017,6 +1138,7 @@ class AgentLoop:
 
     async def run(self) -> None:
         """Run the agent loop, dispatching messages as tasks to stay responsive to /stop."""
+        await self.audit_runtime.ensure_started()
         self._running = True
         try:
             await self._connect_mcp()
@@ -1282,11 +1404,14 @@ class AgentLoop:
             await asyncio.gather(*self._background_tasks, return_exceptions=True)
             self._background_tasks.clear()
         errors: list[BaseException] = []
-        cleanup_steps = (
+        cleanup_steps = [
             self.subagents.close,
             self._exec_session_manager.close_all,
             lambda: agent_context.close_mcp(self),
-        )
+        ]
+        audit_runtime = getattr(self, "audit_runtime", None)
+        if audit_runtime is not None:
+            cleanup_steps.append(audit_runtime.close)
         for cleanup in cleanup_steps:
             try:
                 await cleanup()
@@ -1336,13 +1461,66 @@ class AgentLoop:
         else:
             key = session_key or msg.session_key
         route = self._turn_route(msg, key)
+        session = self.sessions.get_or_create(key)
+        inherited = msg.metadata.get(AUDIT_CONTEXT_META)
+        inherited = inherited if isinstance(inherited, dict) else {}
+        checkpoint = session.metadata.get(self._RUNTIME_CHECKPOINT_KEY)
+        checkpoint = checkpoint if isinstance(checkpoint, dict) else {}
+        goal = session.metadata.get("goal_state")
+        goal = goal if isinstance(goal, dict) else {}
+        direct_source_type = getattr(msg, "_audit_source_type", None)
+        if direct_source_type or msg.metadata.get("source_type"):
+            source_type = str(direct_source_type or msg.metadata["source_type"])
+        elif is_cron_turn(msg.metadata):
+            source_type = "cron"
+        elif local_trigger(msg.metadata) is not None:
+            source_type = "local_trigger"
+        elif msg.sender_id == "subagent":
+            source_type = "continuation"
+        else:
+            source_type = "system" if kind is TurnKind.SYSTEM else "user"
+        audit_turn = self.audit_runtime.context_resolver.resolve_turn(
+            TraceTurnInput(
+                session_key=key,
+                source_type=source_type,
+                actor_type="user" if kind is TurnKind.USER else "system",
+                active_goal_trace_id=goal.get("_audit_trace_id"),
+                checkpoint_trace_id=checkpoint.get("_audit_trace_id"),
+                checkpoint_run_id=checkpoint.get("_audit_run_id"),
+                injected_trace_id=inherited.get("trace_id"),
+                injected_turn_id=inherited.get("turn_id"),
+                injected_run_id=inherited.get("run_id"),
+            )
+        )
+        if inherited.get("run_id") and msg.sender_id != "subagent":
+            audit_run = AuditRunContext(
+                trace_id=audit_turn.trace_id,
+                turn_id=audit_turn.turn_id,
+                run_id=new_audit_id(),
+                parent_run_id=inherited["run_id"],
+                source_type=source_type,
+            )
+        else:
+            audit_run = audit_turn.new_run(
+                source_type=source_type,
+                resumed_from_run_id=checkpoint.get("_audit_run_id"),
+                source_metadata=(
+                    {
+                        "continuation_of_run_id": inherited["run_id"],
+                        "injection_source": "subagent_result",
+                    }
+                    if msg.sender_id == "subagent" and inherited.get("run_id")
+                    else None
+                ),
+            )
+        audit = TurnAuditRecorder(self.audit_runtime.emitter, audit_turn)
         t0 = time.time()
         ctx = TurnContext(
             msg=msg,
-            session=None,
+            session=session,
             session_key=key,
             state=TurnState.RESTORE,
-            turn_id=f"{key}:{time.time_ns()}",
+            turn_id=audit_turn.turn_id,
             runtime=runtime,
             kind=kind,
             route=route,
@@ -1365,54 +1543,99 @@ class AgentLoop:
             hooks=list(hooks or []),
             hook_factories=list(hook_factories or []),
             tools=tools,
+            audit_turn=audit_turn,
+            audit_run=audit_run,
+            audit=audit,
         )
 
-        while ctx.state is not TurnState.DONE:
-            handler_name = f"_state_{ctx.state.name.lower()}"
-            handler = getattr(self, handler_name, None)
-            if handler is None:
-                raise RuntimeError(f"Missing state handler for {ctx.state}")
+        await audit.started(msg)
+        self._active_audit_runs.setdefault(key, {})[audit_run.run_id] = audit_run
 
-            t0 = time.perf_counter()
-            try:
-                event = await handler(ctx)
-            except Exception:
+        try:
+            while ctx.state is not TurnState.DONE:
+                handler_name = f"_state_{ctx.state.name.lower()}"
+                handler = getattr(self, handler_name, None)
+                if handler is None:
+                    raise RuntimeError(f"Missing state handler for {ctx.state}")
+
+                t0 = time.perf_counter()
+                try:
+                    event = await handler(ctx)
+                except Exception:
+                    duration = (time.perf_counter() - t0) * 1000
+                    ctx.trace.append(
+                        StateTraceEntry(
+                            state=ctx.state,
+                            started_at=t0,
+                            duration_ms=duration,
+                            event="",
+                            error="exception",
+                        )
+                    )
+                    raise
+
                 duration = (time.perf_counter() - t0) * 1000
                 ctx.trace.append(
                     StateTraceEntry(
                         state=ctx.state,
                         started_at=t0,
                         duration_ms=duration,
-                        event="",
-                        error="exception",
+                        event=event,
                     )
                 )
-                raise
-
-            duration = (time.perf_counter() - t0) * 1000
-            ctx.trace.append(
-                StateTraceEntry(
-                    state=ctx.state,
-                    started_at=t0,
-                    duration_ms=duration,
-                    event=event,
+                logger.debug(
+                    "[turn {}] State {} took {:.1f}ms -> event {}",
+                    ctx.turn_id,
+                    ctx.state.name,
+                    duration,
+                    event,
                 )
-            )
-            logger.debug(
-                "[turn {}] State {} took {:.1f}ms -> event {}",
-                ctx.turn_id,
-                ctx.state.name,
-                duration,
-                event,
-            )
 
-            next_state = self._TRANSITIONS.get((ctx.state, event))
-            if next_state is None:
-                raise RuntimeError(
-                    f"[turn {ctx.turn_id}] No transition from {ctx.state} "
-                    f"on event {event!r}"
-                )
-            ctx.state = next_state
+                next_state = self._TRANSITIONS.get((ctx.state, event))
+                if next_state is None:
+                    raise RuntimeError(
+                        f"[turn {ctx.turn_id}] No transition from {ctx.state} "
+                        f"on event {event!r}"
+                    )
+                ctx.state = next_state
+        except BaseException as error:
+            if not getattr(self.audit_runtime.emitter, "audit_disabled", False):
+                with suppress(Exception):
+                    setattr(
+                        error,
+                        AUDIT_CONTEXT_META,
+                        {
+                            "trace_id": audit_turn.trace_id,
+                            "turn_id": audit_turn.turn_id,
+                            "run_id": audit_run.run_id,
+                        },
+                    )
+            await audit.finished(status="failed")
+            self._active_audit_runs.get(key, {}).pop(audit_run.run_id, None)
+            raise
+
+        if ctx.outbound is not None:
+            if (
+                ctx.kind is TurnKind.SYSTEM
+                or not getattr(self.audit_runtime.emitter, "audit_disabled", False)
+            ):
+                ctx.outbound.metadata[AUDIT_CONTEXT_META] = {
+                    "trace_id": audit_turn.trace_id,
+                    "turn_id": audit_turn.turn_id,
+                    "run_id": audit_run.run_id,
+                }
+            await audit.response_prepared(
+                response_kind="command" if not ctx.stop_reason else "assistant"
+            )
+            status = (
+                "command_completed"
+                if any(item.event == "shortcut" for item in ctx.trace)
+                else "response_prepared"
+            )
+        else:
+            status = "suppressed"
+        await audit.finished(status=status)
+        self._active_audit_runs.get(key, {}).pop(audit_run.run_id, None)
 
         logger.debug(
             "[turn {}] Turn completed after {} states",
@@ -1420,6 +1643,14 @@ class AgentLoop:
             len(ctx.trace),
         )
         return ctx.outbound
+
+    def active_audit_run_ids(self) -> set[str]:
+        """Return a point-in-time runtime ownership snapshot for read-only consumers."""
+        return {
+            run_id
+            for runs_by_id in self._active_audit_runs.values()
+            for run_id in runs_by_id
+        }
 
     def _assemble_outbound(
         self,
@@ -1479,8 +1710,16 @@ class AgentLoop:
             await self._runtime_events().session_turn_started(msg, ctx.session_key)
             self.workspace_scopes.persist_message_scope(ctx.session, msg)
 
+        checkpoint = ctx.session.metadata.get(self._RUNTIME_CHECKPOINT_KEY)
+        checkpoint = dict(checkpoint) if isinstance(checkpoint, dict) else None
         if self._restore_runtime_checkpoint(ctx.session):
             self.sessions.save(ctx.session)
+            if (
+                checkpoint is not None
+                and ctx.audit is not None
+                and ctx.audit_run is not None
+            ):
+                await ctx.audit.checkpoint_restored(checkpoint, run=ctx.audit_run)
         if self._restore_pending_user_turn(ctx.session):
             self.sessions.save(ctx.session)
 
@@ -1622,6 +1861,7 @@ class AgentLoop:
             turn_scopes=ctx.turn_scopes,
             tools=ctx.tools,
             request_context=ctx.request_context,
+            audit_context=ctx.audit_run,
         )
         final_content, tools_used, all_msgs, stop_reason, had_injections = result
         ctx.final_content = final_content
@@ -1675,8 +1915,16 @@ class AgentLoop:
                 )
             )
         self._clear_pending_user_turn(ctx.session)
+        checkpoint = ctx.session.metadata.get(self._RUNTIME_CHECKPOINT_KEY)
+        checkpoint = dict(checkpoint) if isinstance(checkpoint, dict) else None
         self._clear_runtime_checkpoint(ctx.session)
         self.sessions.save(ctx.session)
+        if checkpoint is not None and ctx.audit is not None and ctx.audit_run is not None:
+            await ctx.audit.checkpoint_cleared(
+                checkpoint,
+                run=ctx.audit_run,
+                reason="turn_completed",
+            )
         return "ok"
 
     async def _state_respond(self, ctx: TurnContext) -> str:
@@ -1953,6 +2201,9 @@ class AgentLoop:
         """Process an external message directly and return the outbound payload."""
         if channel == "system":
             raise ValueError("channel 'system' is reserved for internal messages")
+        audit_runtime = getattr(self, "audit_runtime", None)
+        if audit_runtime is not None:
+            await audit_runtime.ensure_started()
         await self._connect_mcp()
         metadata: dict[str, Any] = {}
         if not persist_user_message:
@@ -1961,6 +2212,7 @@ class AgentLoop:
             channel=channel, sender_id=sender_id, chat_id=chat_id,
             content=content, media=media or [], metadata=metadata,
         )
+        msg._audit_source_type = "sdk"
         # Share the dispatch lock so direct calls serialize with bus turns.
         lock = self._session_locks.setdefault(session_key, asyncio.Lock())
         try:

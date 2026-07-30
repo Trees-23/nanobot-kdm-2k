@@ -56,6 +56,7 @@
     },
     "apps": "앱",
     "automations": "자동화",
+    "traces": "실행 추적",
     "skills": {
       "title": "스킬"
     }

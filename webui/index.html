@@ -1,12 +1,12 @@
 <!doctype html>
-<html lang="en">
+<html lang="zh-CN">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="color-scheme" content="light dark" />
     <meta
       name="description"
-      content="nanobot web UI — chat with your nanobot workspace."
+      content="nanobot Web UI —— 与你的 nanobot 工作区对话。"
       data-i18n-meta="description"
     />
     <meta name="theme-color" content="#fafaf9" media="(prefers-color-scheme: light)" />
@@ -97,7 +97,7 @@
       <div class="boot-splash">
         <div class="boot-splash-inner">
           <span class="boot-dot" aria-hidden="true"></span>
-          <span data-boot-copy>Loading nanobot…</span>
+          <span data-boot-copy>正在加载 nanobot…</span>
         </div>
       </div>
     </div>
@@ -148,9 +148,9 @@
         };
 
         function normalizeLocale(input) {
-          if (!input) return "en";
+          if (!input) return "zh-CN";
           var raw = String(input).trim();
-          if (!raw) return "en";
+          if (!raw) return "zh-CN";
           if (copy[raw]) return raw;
           var lower = raw.toLowerCase();
           if (lower === "zh" || lower.indexOf("zh-cn") === 0 || lower.indexOf("zh-sg") === 0) {
@@ -168,16 +168,12 @@
             return "pt-BR";
           }
           var base = lower.split("-")[0];
-          return copy[base] ? base : "en";
+          return copy[base] ? base : "zh-CN";
         }
 
         try {
           var stored = localStorage.getItem(localeKey);
-          var detected =
-            stored ||
-            (navigator.languages && navigator.languages[0]) ||
-            navigator.language ||
-            "en";
+          var detected = stored || "zh-CN";
           var locale = normalizeLocale(detected);
           var localized = copy[locale] || copy.en;
           document.documentElement.lang = locale;

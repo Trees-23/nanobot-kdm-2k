@@ -37,6 +37,24 @@ def _make_loop(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_direct_processing_starts_injected_audit_runtime(tmp_path):
+    runtime = MagicMock()
+    runtime.ensure_started = AsyncMock()
+    runtime.close = AsyncMock()
+    loop = _make_loop(tmp_path)
+    loop.audit_runtime = runtime
+    loop.subagents.close = AsyncMock()
+    loop._connect_mcp = AsyncMock()
+    loop._process_message = AsyncMock(return_value=None)
+
+    await loop.process_direct("hello")
+    await loop.close_mcp()
+
+    runtime.ensure_started.assert_awaited_once()
+    runtime.close.assert_awaited_once()
+
+
+@pytest.mark.asyncio
 async def test_ephemeral_runner_enters_and_restores_turn_scopes(tmp_path):
     loop = _make_loop(tmp_path)
 
@@ -550,7 +568,7 @@ async def test_next_turn_after_llm_error_keeps_turn_boundary(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_subagent_max_iterations_announces_existing_fallback(tmp_path, monkeypatch):
+async def test_subagent_max_iterations_announces_failure_not_completion(tmp_path, monkeypatch):
     from nanobot.agent.subagent import SubagentManager, SubagentStatus
     from nanobot.bus.queue import MessageBus
 
@@ -586,5 +604,5 @@ async def test_subagent_max_iterations_announces_existing_fallback(tmp_path, mon
 
     mgr._announce_result.assert_awaited_once()
     args = mgr._announce_result.await_args.args
-    assert args[3] == "Task completed but no final response was generated."
-    assert args[5] == "ok"
+    assert args[3] == "Iteration budget exhausted before task completion."
+    assert args[5] == "error"

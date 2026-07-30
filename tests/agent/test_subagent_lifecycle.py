@@ -14,7 +14,7 @@ from nanobot.agent.subagent import (
     SubagentStatus,
     _SubagentHook,
 )
-from nanobot.agent.tools.context import current_request_context
+from nanobot.agent.tools.context import RequestContext, current_request_context, request_context
 from nanobot.bus.queue import MessageBus
 from nanobot.providers.base import GenerationSettings, LLMProvider
 from nanobot.utils.llm_runtime import LLMRuntime
@@ -203,6 +203,31 @@ class TestSpawn:
         result = await sm.spawn("do something", runtime=_runtime())
         assert "started" in result
         assert "id:" in result
+
+    @pytest.mark.asyncio
+    async def test_inherits_trace_and_creates_child_run(self, tmp_path):
+        sm = _manager(tmp_path)
+        sm.runner.run = AsyncMock(return_value=AgentRunResult(
+            final_content="done", messages=[], stop_reason="completed",
+        ))
+        parent = {"trace_id": "trace", "turn_id": "turn", "run_id": "parent-run"}
+
+        with request_context(RequestContext(
+            channel="cli",
+            chat_id="direct",
+            session_key="cli:direct",
+            runtime=_runtime(),
+            metadata={"_audit_context": parent},
+        )):
+            await sm.spawn("task", runtime=_runtime(), session_key="cli:direct")
+        await _drain_subagent_tasks(sm)
+
+        child = sm.runner.run.await_args.args[0].audit_context
+        assert child.trace_id == "trace"
+        assert child.turn_id == "turn"
+        assert child.parent_run_id == "parent-run"
+        assert child.run_id != "parent-run"
+        assert child.source_type == "subagent"
 
     @pytest.mark.asyncio
     async def test_creates_task_in_running_tasks(self, tmp_path):

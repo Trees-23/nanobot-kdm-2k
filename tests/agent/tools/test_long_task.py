@@ -63,6 +63,16 @@ def _tools(
     return create, update, rc
 
 
+class _RecordingAuditEmitter:
+    def __init__(self) -> None:
+        self.events = []
+        self.payloads = []
+
+    async def emit(self, event, *, payload=None, critical=False):
+        self.events.append(event)
+        self.payloads.append(payload)
+
+
 async def _execute(tool, ctx: RequestContext, *, allowed: bool = True, **kwargs):
     with request_context(ctx), goal_mutation_permission(allowed):
         return await tool.execute(**kwargs)
@@ -96,6 +106,33 @@ async def test_create_goal_records_goal_metadata(tmp_path):
         pending_queue_available=True,
         session_metadata=sess.metadata,
     )
+
+
+@pytest.mark.asyncio
+async def test_goal_audit_versions_follow_successful_persistence(tmp_path):
+    sm = SessionManager(tmp_path)
+    emitter = _RecordingAuditEmitter()
+    create = CreateGoalTool(sm, audit_emitter=emitter)
+    update = UpdateGoalTool(sm, audit_emitter=emitter)
+    ctx = _request_context(
+        metadata={
+            **_goal_metadata(),
+            "_audit_context": {"trace_id": "trace", "turn_id": "turn", "run_id": "run"},
+        }
+    )
+
+    await _execute(create, ctx, objective="Do the thing")
+    await _execute(update, ctx, action="complete", recap="done")
+
+    assert [event.event_type for event in emitter.events] == [
+        "goal_created",
+        "goal_completed",
+    ]
+    assert [event.goal_version for event in emitter.events] == [1, 2]
+    assert emitter.events[0].goal_id == emitter.events[1].goal_id
+    persisted = SessionManager(tmp_path).get_or_create("websocket:c1").metadata[GOAL_STATE_KEY]
+    assert persisted["_audit_goal_version"] == 2
+    assert emitter.payloads[-1].content.goal_status == "completed"
 
 
 @pytest.mark.asyncio

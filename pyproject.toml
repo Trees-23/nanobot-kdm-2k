@@ -164,6 +164,10 @@ ignore = ["E501"]
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests", "nanobot/channels"]
+addopts = "-m 'not slow'"
+markers = [
+    "slow: large deterministic audit scale tests excluded from the default focused loop",
+]
 
 [tool.coverage.run]
 source = ["nanobot"]

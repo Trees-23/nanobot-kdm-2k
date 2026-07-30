@@ -8,6 +8,7 @@ import {
   Settings,
   SquarePen,
   Blocks,
+  Workflow,
 } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
@@ -38,8 +39,9 @@ interface SidebarProps {
   onOpenApps: () => void;
   onOpenSkills: () => void;
   onOpenAutomations: () => void;
+  onOpenTraces: () => void;
   onOpenSearch: () => void;
-  activeUtility?: "apps" | "skills" | "automations" | null;
+  activeUtility?: "apps" | "skills" | "automations" | "traces" | null;
   onToggleArchived: () => void;
   onCollapse: () => void;
   onExpand?: () => void;
@@ -174,6 +176,13 @@ export function Sidebar(props: SidebarProps) {
           onClick={props.onOpenAutomations}
           active={props.activeUtility === "automations"}
           icon={<CalendarClock className="h-4 w-4" />}
+        />
+        <SidebarActionButton
+          collapsed={collapsed}
+          label={t("sidebar.traces", { defaultValue: "运行轨迹" })}
+          onClick={props.onOpenTraces}
+          active={props.activeUtility === "traces"}
+          icon={<Workflow className="h-4 w-4" />}
         />
         {props.archivedCount ? (
           <SidebarActionButton

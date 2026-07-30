@@ -56,6 +56,7 @@
     },
     "apps": "Apps",
     "automations": "Automations",
+    "traces": "Run traces",
     "skills": {
       "title": "Skills"
     }
