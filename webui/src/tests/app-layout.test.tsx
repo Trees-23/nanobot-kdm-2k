@@ -336,6 +336,7 @@ describe("App layout", () => {
     const appsButton = within(sidebar).getByRole("button", { name: "Apps" });
     const skillsButton = within(sidebar).getByRole("button", { name: "Skills" });
     const automationsButton = within(sidebar).getByRole("button", { name: "Automations" });
+    const tracesButton = within(sidebar).getByRole("button", { name: "Run traces" });
 
     expect(appsButton.compareDocumentPosition(skillsButton) & Node.DOCUMENT_POSITION_FOLLOWING)
       .toBeTruthy();
@@ -343,6 +344,83 @@ describe("App layout", () => {
       skillsButton.compareDocumentPosition(automationsButton) &
         Node.DOCUMENT_POSITION_FOLLOWING,
     ).toBeTruthy();
+    expect(
+      automationsButton.compareDocumentPosition(tracesButton) &
+        Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+  });
+
+  it("opens the independent Run traces workbench and renders indexed rows", async () => {
+    mockFetchRoutes({
+      "/api/settings": baseSettingsPayload(),
+      "/api/audit/sessions?": {
+        items: [{
+          session_key: "websocket:chat-a",
+          title: "会话标题",
+          source_types: ["websocket"],
+          first_seen: "2026-07-28T10:29:00+00:00",
+          last_seen: "2026-07-28T10:30:00+00:00",
+          trace_count: 1,
+          active_trace_count: 0,
+          warning_count: 0,
+          error_count: 1,
+          integrity_status: "valid",
+          latest_trace_id: "trace-12345678",
+        }],
+        next_cursor: null,
+        index: {
+          state: "ready",
+          revision: 4,
+          coverage_complete: true,
+          updated_at: "2026-07-28T10:30:00+00:00",
+          lag_ms: 150,
+          last_error: null,
+        },
+      },
+      "/api/audit/traces?session_key=websocket%3Achat-a": {
+        items: [{
+          trace_id: "trace-12345678",
+          title: "websocket / 10:30 / trace-12",
+          source_types: ["websocket"],
+          primary_source_type: "websocket",
+          first_seen: "2026-07-28T10:29:00+00:00",
+          last_seen: "2026-07-28T10:30:00+00:00",
+          display_status: "failed",
+          turn_count: 1,
+          run_count: 2,
+          anomaly_count: 1,
+          integrity_status: "valid",
+          active: false,
+          session_key: "websocket:chat-a",
+          event_count: 12,
+        }],
+        next_cursor: null,
+        index: {
+          state: "ready",
+          revision: 4,
+          coverage_complete: true,
+          updated_at: "2026-07-28T10:30:00+00:00",
+          lag_ms: 150,
+          last_error: null,
+        },
+      },
+    });
+    render(<App />);
+
+    await waitFor(() => expect(connectSpy).toHaveBeenCalled());
+    const sidebar = screen.getByRole("navigation", { name: "Sidebar navigation" });
+    fireEvent.click(within(sidebar).getByRole("button", { name: "Run traces" }));
+
+    expect(await screen.findByTestId("trace-workbench")).toBeInTheDocument();
+    expect(await screen.findByText("会话标题")).toBeInTheDocument();
+    expect(await screen.findByText(/12 Event/)).toBeInTheDocument();
+    expect(screen.getByText("索引就绪")).toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "Settings" })).not.toBeInTheDocument();
+    expect(window.location.hash).toBe("#/traces");
+    expect(within(sidebar).getByRole("button", { name: "Run traces" })).toHaveAttribute(
+      "aria-current",
+      "page",
+    );
   });
 
   it("restores the Settings route after a restart fallback hash", async () => {

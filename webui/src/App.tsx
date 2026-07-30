@@ -15,6 +15,11 @@ import { Sidebar } from "@/components/Sidebar";
 import { SessionSearchDialog } from "@/components/SessionSearchDialog";
 import { SettingsView, type SettingsSectionKey } from "@/components/settings/SettingsView";
 import { ThreadShell } from "@/components/thread/ThreadShell";
+import {
+  EMPTY_TRACE_SELECTION,
+  TraceWorkbench,
+  type TraceSelection,
+} from "@/components/traces/TraceWorkbench";
 import { Sheet, SheetContent, SheetTitle } from "@/components/ui/sheet";
 
 import { useSessions } from "@/hooks/useSessions";
@@ -89,11 +94,12 @@ const TOKEN_REFRESH_MARGIN_MS = 30_000;
 const TOKEN_REFRESH_MIN_DELAY_MS = 5_000;
 const PAIRING_POLL_INTERVAL_MS = 5_000;
 const PAIRING_DISMISS_SNOOZE_MS = 30_000;
-type ShellView = "chat" | "settings" | "apps" | "automations" | "skills";
+type ShellView = "chat" | "settings" | "apps" | "automations" | "skills" | "traces";
 type ShellRoute = {
   view: ShellView;
   activeKey: string | null;
   settingsSection: SettingsSectionKey;
+  traceSelection?: TraceSelection;
 };
 
 const SETTINGS_SECTION_KEYS: SettingsSectionKey[] = [
@@ -191,6 +197,33 @@ function readShellRoute(): ShellRoute {
   if (path === "/skills") {
     return { view: "skills", activeKey, settingsSection: "skills" };
   }
+  if (path === "/traces" || path.startsWith("/traces/")) {
+    let traceId: string | null = null;
+    if (path.startsWith("/traces/")) {
+      try {
+        traceId = decodeURIComponent(path.slice("/traces/".length)).trim() || null;
+      } catch {
+        return {
+          view: "traces",
+          activeKey,
+          settingsSection: "overview",
+          traceSelection: EMPTY_TRACE_SELECTION,
+        };
+      }
+    }
+    return {
+      view: "traces",
+      activeKey,
+      settingsSection: "overview",
+      traceSelection: {
+        traceId,
+        turnId: params.get("turn")?.trim() || null,
+        runId: params.get("run")?.trim() || null,
+        nodeId: params.get("node")?.trim() || null,
+        eventId: params.get("event")?.trim() || null,
+      },
+    };
+  }
   if (path.startsWith("/chat/")) {
     const encoded = path.slice("/chat/".length);
     try {
@@ -210,6 +243,19 @@ function shellRouteHash(route: ShellRoute): string {
     return route.activeKey
       ? `#/chat/${encodeURIComponent(route.activeKey)}`
       : "#/new";
+  }
+  if (route.view === "traces") {
+    const selection = route.traceSelection ?? EMPTY_TRACE_SELECTION;
+    const path = selection.traceId
+      ? `#/traces/${encodeURIComponent(selection.traceId)}`
+      : "#/traces";
+    const params = new URLSearchParams();
+    if (selection.turnId) params.set("turn", selection.turnId);
+    if (selection.runId) params.set("run", selection.runId);
+    if (selection.nodeId) params.set("node", selection.nodeId);
+    if (selection.eventId) params.set("event", selection.eventId);
+    const query = params.toString();
+    return `${path}${query ? `?${query}` : ""}`;
   }
   const params = new URLSearchParams();
   if (route.activeKey) params.set("chat", route.activeKey);
@@ -919,6 +965,9 @@ function Shell({
     initialRouteRef.current.activeKey,
   );
   const [view, setView] = useState<ShellView>(initialRouteRef.current.view);
+  const [traceSelection, setTraceSelection] = useState<TraceSelection>(
+    initialRouteRef.current.traceSelection ?? EMPTY_TRACE_SELECTION,
+  );
   const [settingsInitialSection, setSettingsInitialSection] =
     useState<SettingsSectionKey>(initialRouteRef.current.settingsSection);
   const [hostSidebarOpen, setHostSidebarOpen] =
@@ -971,6 +1020,7 @@ function Shell({
       setActiveKey(route.activeKey);
       setView(route.view);
       setSettingsInitialSection(route.settingsSection);
+      setTraceSelection(route.traceSelection ?? EMPTY_TRACE_SELECTION);
       writeShellRoute(route, options?.replace);
     },
     [],
@@ -982,6 +1032,7 @@ function Shell({
       setActiveKey(route.activeKey);
       setView(route.view);
       setSettingsInitialSection(route.settingsSection);
+      setTraceSelection(route.traceSelection ?? EMPTY_TRACE_SELECTION);
       setWorkspaceError(null);
       if (route.view === "chat" && !route.activeKey) {
         setDraftWorkspaceScope(null);
@@ -1600,6 +1651,30 @@ function Shell({
     setMobileSidebarOpen(false);
   }, [activeKey, navigate]);
 
+  const onOpenTraces = useCallback(() => {
+    setSessionSearchOpen(false);
+    navigate({
+      view: "traces",
+      activeKey,
+      settingsSection: "overview",
+      traceSelection,
+    });
+    setMobileSidebarOpen(false);
+  }, [activeKey, navigate, traceSelection]);
+
+  const onTraceSelectionChange = useCallback((selection: TraceSelection, replace = false) => {
+    navigate({
+      view: "traces",
+      activeKey,
+      settingsSection: "overview",
+      traceSelection: selection,
+    }, { replace });
+  }, [activeKey, navigate]);
+
+  const onOpenTraceConversation = useCallback((sessionKey: string) => {
+    navigate({ view: "chat", activeKey: sessionKey, settingsSection: "overview" });
+  }, [navigate]);
+
   const onSettingsSectionChange = useCallback(
     (section: SettingsSectionKey) => {
       navigate({
@@ -1827,6 +1902,10 @@ function Shell({
       });
       return;
     }
+    if (view === "traces") {
+      document.title = t("app.documentTitle.chat", { title: "运行轨迹" });
+      return;
+    }
     document.title = activeSession
       ? t("app.documentTitle.chat", { title: headerTitle })
       : t("app.documentTitle.base");
@@ -1849,8 +1928,12 @@ function Shell({
     onOpenApps,
     onOpenAutomations,
     onOpenSkills,
+    onOpenTraces,
     onOpenSearch: onOpenSessionSearch,
-    activeUtility: view === "apps" || view === "automations" || view === "skills" ? view : null,
+    activeUtility:
+      view === "apps" || view === "automations" || view === "skills" || view === "traces"
+        ? view
+        : null,
     onToggleArchived,
     pinnedKeys: sidebarState.pinned_keys,
     archivedKeys: sidebarState.archived_keys,
@@ -2037,7 +2120,17 @@ function Shell({
                 skills={skills}
               />
             </div>
-            {view !== "chat" && (
+            {view === "traces" && (
+              <div className="absolute inset-0 flex flex-col">
+                <TraceWorkbench
+                  token={token}
+                  selection={traceSelection}
+                  onSelectionChange={onTraceSelectionChange}
+                  onOpenConversation={onOpenTraceConversation}
+                />
+              </div>
+            )}
+            {view !== "chat" && view !== "traces" && (
               <div className="absolute inset-0 flex flex-col">
                 <SettingsView
                   theme={theme}

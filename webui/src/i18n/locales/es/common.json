@@ -56,6 +56,7 @@
     },
     "apps": "Apps",
     "automations": "Automatizaciones",
+    "traces": "Trazas de ejecución",
     "skills": {
       "title": "Habilidades"
     }
