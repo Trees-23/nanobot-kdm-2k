@@ -32,6 +32,12 @@ class ToolAuditOutcome:
     status: str
     result: Any
     error_kind: str | None = None
+    error_type: str | None = None
+    error_code: str | None = None
+    effective_timeout_ms: int | None = None
+    provider: str | None = None
+    fatal: bool = False
+    failure_policy: str | None = None
 
 
 @dataclass(slots=True)

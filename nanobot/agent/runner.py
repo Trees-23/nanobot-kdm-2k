@@ -25,6 +25,7 @@ from nanobot.agent.hook import (
     RuntimeDecision,
     ToolAuditOutcome,
 )
+from nanobot.agent.tools.base import ToolResult
 from nanobot.agent.tools.registry import ToolRegistry, is_tool_error_result
 from nanobot.audit.context import AuditRunContext
 from nanobot.audit.hook import RunnerAuditHook
@@ -1284,6 +1285,12 @@ class AgentRunner:
                 status=status,
                 result=payload,
                 error_kind=type(fatal_error).__name__ if fatal_error else None,
+                error_type=getattr(payload, "error_type", None),
+                error_code=getattr(payload, "error_code", None),
+                effective_timeout_ms=getattr(payload, "effective_timeout_ms", None),
+                provider=getattr(payload, "provider", None),
+                fatal=fatal_error is not None,
+                failure_policy="fail_on_tool_error" if fatal_error is not None else None,
             )
             return result
         except asyncio.CancelledError:
@@ -1398,9 +1405,14 @@ class AgentRunner:
             if handled is not None:
                 return handled
             suffix = hint if getattr(result, "append_retry_hint", True) else ""
+            result_with_hint = (
+                result.with_content(str(result) + suffix)
+                if isinstance(result, ToolResult)
+                else result + suffix
+            )
             if spec.fail_on_tool_error:
-                return result + suffix, event, RuntimeError(result)
-            return result + suffix, event, None
+                return result_with_hint, event, RuntimeError(result)
+            return result_with_hint, event, None
 
         await hook.after_execute_tool(context, tool_call, tool, params, result)
 

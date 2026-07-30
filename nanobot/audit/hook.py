@@ -85,6 +85,8 @@ class RunnerAuditHook(AgentHook):
         self._tool_side_effects: dict[str, SideEffectSnapshot] = {}
         self._attempt_counts: dict[str, int] = {}
         self._tool_context_tokens: dict[str, Any] = {}
+        self._fatal_event_id: str | None = None
+        self._failure_policy: str | None = None
 
     def _common(
         self,
@@ -427,7 +429,10 @@ class RunnerAuditHook(AgentHook):
         self._tool_params.pop(tool_call.id, None)
         side_effect_snapshot = self._tool_side_effects.pop(tool_call.id, None)
         status = outcome.status
-        if status == "error" and outcome.error_kind in {"TimeoutError", "Timeout"}:
+        if status == "error" and (
+            outcome.error_type in {"TimeoutError", "Timeout"}
+            or outcome.error_kind in {"TimeoutError", "Timeout"}
+        ):
             status = "timeout"
         if status == "blocked":
             policy = PolicyBlockedDraft.model_validate(
@@ -448,6 +453,10 @@ class RunnerAuditHook(AgentHook):
                 "tool_name": tool_call.name,
                 "elapsed_ms": max(0, (time.monotonic_ns() - started) // 1_000_000),
                 "status": status,
+                "error_type": outcome.error_type,
+                "error_code": outcome.error_code,
+                "effective_timeout_ms": outcome.effective_timeout_ms,
+                "provider": outcome.provider,
             }
         )
         payload = ToolOutputPayloadDraft(
@@ -457,7 +466,14 @@ class RunnerAuditHook(AgentHook):
                 "tool_name": tool_call.name,
                 "result": self._json_safe(outcome.result),
                 "normalized_error": (
-                    {"kind": outcome.error_kind} if outcome.error_kind else None
+                    {
+                        "kind": outcome.error_type or outcome.error_kind,
+                        "code": outcome.error_code,
+                        "effective_timeout_ms": outcome.effective_timeout_ms,
+                        "provider": outcome.provider,
+                    }
+                    if outcome.error_type or outcome.error_kind or outcome.error_code
+                    else None
                 ),
                 "side_effects": (
                     capture_side_effect_after(side_effect_snapshot, outcome.result)
@@ -467,6 +483,9 @@ class RunnerAuditHook(AgentHook):
             },
         )
         await self._emitter.emit(event, payload=payload, critical=True)
+        if outcome.fatal and self._fatal_event_id is None:
+            self._fatal_event_id = event.event_id
+            self._failure_policy = outcome.failure_policy
 
     async def on_finally(self, context: AgentRunHookContext) -> None:
         if self._run_finished:
@@ -485,7 +504,9 @@ class RunnerAuditHook(AgentHook):
             status, stop_reason = "cancelled", "system_cancel"
         elif context.stop_reason == "max_iterations":
             status, stop_reason = "exhausted", "max_iterations"
-        elif context.error or context.stop_reason in {"error", "tool_error"}:
+        elif context.stop_reason == "tool_error":
+            status, stop_reason = "failed", "tool_error"
+        elif context.error or context.stop_reason == "error":
             status, stop_reason = "failed", "model_error"
         else:
             status, stop_reason = "succeeded", "completed"
@@ -494,6 +515,11 @@ class RunnerAuditHook(AgentHook):
                 **self._common("run_finished"),
                 "status": status,
                 "stop_reason": stop_reason,
+                "fatal_event_id": self._fatal_event_id,
+                "failure_policy": self._failure_policy,
+                "fail_on_tool_error": (
+                    True if self._failure_policy == "fail_on_tool_error" else None
+                ),
             }
         )
         await self._emitter.emit(event, critical=True)

@@ -876,9 +876,25 @@ class WebSearchTool(Tool):
                 for r in raw
             ]
             return _format_results(query, items, n)
+        except TimeoutError:
+            timeout_s = self.config.timeout
+            logger.warning("DuckDuckGo search timed out after {}s", timeout_s)
+            return ToolResult.error(
+                f"Error: DuckDuckGo search timed out after {timeout_s}s",
+                error_type="TimeoutError",
+                error_code="web_search_timeout",
+                effective_timeout_ms=timeout_s * 1000,
+                provider="duckduckgo",
+            )
         except Exception as e:
-            logger.warning("DuckDuckGo search failed: {}", e)
-            return ToolResult.error(f"Error: DuckDuckGo search failed ({e})")
+            error_type = type(e).__name__
+            logger.warning("DuckDuckGo search failed: {}", error_type)
+            return ToolResult.error(
+                f"Error: DuckDuckGo search failed: {error_type}",
+                error_type=error_type,
+                error_code="web_search_failed",
+                provider="duckduckgo",
+            )
 
     async def _search_bocha(self, query: str, n: int, freshness: str = "noLimit") -> str:
         api_key = self.config.api_key or os.environ.get("BOCHA_API_KEY", "")

@@ -151,6 +151,8 @@ _EVENT_SPECS: dict[EventType, tuple[str, dict[str, tuple[Any, Any]]]] = {
     EventType.RUN_FINISHED: ("TUR", {
         "status": _required(Literal["succeeded", "failed", "cancelled", "interrupted", "exhausted"]),
         "stop_reason": _required(str),
+        "fatal_event_id": _optional(str), "failure_policy": _optional(str),
+        "fail_on_tool_error": _optional(bool),
     }),
     EventType.ORPHAN_RUN_SUSPECTED: ("TUR", {
         "owner_process_instance_id": _required(str), "evidence_kind": _required(str),
@@ -206,6 +208,8 @@ _EVENT_SPECS: dict[EventType, tuple[str, dict[str, tuple[Any, Any]]]] = {
     EventType.TOOL_FINISHED: ("TURC", {
         "tool_name": _required(str), "elapsed_ms": _required(int),
         "status": _required(Literal["ok", "error", "cancelled", "timeout", "blocked"]),
+        "error_type": _optional(str), "error_code": _optional(str),
+        "effective_timeout_ms": _optional(int), "provider": _optional(str),
     }),
     EventType.POLICY_BLOCKED: ("TUR", {
         "policy_name": _required(str), "policy_version": _required(str),

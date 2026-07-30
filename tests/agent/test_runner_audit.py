@@ -170,6 +170,60 @@ async def test_runner_emits_error_terminal_for_returned_tool_error() -> None:
     assert emitter.events[-1].status == "succeeded"
 
 
+async def test_fatal_tool_error_keeps_tool_domain_and_precise_event_link() -> None:
+    provider = MagicMock(spec=LLMProvider)
+    provider.chat_with_retry = AsyncMock(
+        return_value=LLMResponse(
+            content="",
+            tool_calls=[
+                ToolCallRequest(id="provider-call", name="web_search", arguments={})
+            ],
+            finish_reason="tool_calls",
+        )
+    )
+    tools = MagicMock()
+    tools.get_definitions.return_value = []
+    tools.prepare_call.return_value = (None, {}, None)
+    tools.execute = AsyncMock(
+        return_value=ToolResult.error(
+            "Error: DuckDuckGo search timed out after 30s",
+            error_type="TimeoutError",
+            error_code="web_search_timeout",
+            effective_timeout_ms=30_000,
+            provider="duckduckgo",
+        )
+    )
+    emitter = RecordingEmitter()
+
+    result = await AgentRunner(audit_emitter=emitter).run(
+        make_run_spec(
+            provider,
+            initial_messages=[],
+            tools=tools,
+            model="test-model",
+            max_iterations=1,
+            max_tool_result_chars=10_000,
+            fail_on_tool_error=True,
+            audit_context=AuditRunContext("trace", "turn", "run"),
+        )
+    )
+
+    tool_finished = next(
+        event for event in emitter.events if event.event_type == "tool_finished"
+    )
+    run_finished = emitter.events[-1]
+    assert result.stop_reason == "tool_error"
+    assert tool_finished.status == "timeout"
+    assert tool_finished.error_type == "TimeoutError"
+    assert tool_finished.error_code == "web_search_timeout"
+    assert tool_finished.effective_timeout_ms == 30_000
+    assert tool_finished.provider == "duckduckgo"
+    assert run_finished.stop_reason == "tool_error"
+    assert run_finished.fatal_event_id == tool_finished.event_id
+    assert run_finished.failure_policy == "fail_on_tool_error"
+    assert run_finished.fail_on_tool_error is True
+
+
 async def test_spawn_concurrency_rejection_is_audited_error_without_child_run() -> None:
     class AtCapacityManager:
         max_concurrent_subagents = 1

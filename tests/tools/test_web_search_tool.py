@@ -3,6 +3,7 @@
 import httpx
 import pytest
 
+from nanobot.agent.tools.base import ToolResult
 from nanobot.agent.tools.registry import is_tool_error_result
 from nanobot.agent.tools.web import WebSearchTool
 from nanobot.config.schema import WebSearchConfig
@@ -741,7 +742,33 @@ async def test_duckduckgo_timeout_returns_error(monkeypatch):
     tool.config.timeout = 0.2
     result = await tool.execute(query="test")
     gate.set()
-    assert "Error" in result
+    assert isinstance(result, ToolResult)
+    assert str(result) == "Error: DuckDuckGo search timed out after 0.2s"
+    assert result.error_type == "TimeoutError"
+    assert result.error_code == "web_search_timeout"
+    assert result.effective_timeout_ms == 200
+    assert result.provider == "duckduckgo"
+    assert "()" not in result
+
+
+@pytest.mark.asyncio
+async def test_duckduckgo_empty_exception_has_stable_secret_free_fallback(monkeypatch):
+    class EmptyErrorDDGS:
+        def __init__(self, **kw):
+            pass
+
+        def text(self, query, max_results=5):
+            raise RuntimeError()
+
+    monkeypatch.setattr("ddgs.DDGS", EmptyErrorDDGS)
+    result = await _tool(provider="duckduckgo").execute(query="secret query")
+
+    assert isinstance(result, ToolResult)
+    assert str(result) == "Error: DuckDuckGo search failed: RuntimeError"
+    assert result.error_type == "RuntimeError"
+    assert result.error_code == "web_search_failed"
+    assert result.provider == "duckduckgo"
+    assert "secret query" not in result
 
 
 @pytest.mark.asyncio
