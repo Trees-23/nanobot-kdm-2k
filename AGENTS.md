@@ -9,8 +9,10 @@ This file provides guidance to AI coding agents working with this repository.
 - `upstream` 指向项目所关联的外部上游仓库。除非用户明确说要“拉取上游更新”或“同步上游”，
   不得对 `upstream` 执行 `fetch`、`pull`，也不得把 `upstream` 的提交 merge 或 rebase 到本项目。
 - 只有用户明确要求向上游贡献时，才以 `upstream/main` 为基线或向 `HKUDS/nanobot` 提交 PR。
-- 不得从脏的本地 `main` 或包含无关本地提交的分支开始任务；必要时从正确的远端目标创建独立
-  worktree。
+- 不得从脏的本地 `main` 或包含无关本地提交的分支开始任务。默认在当前仓库目录使用
+  `git switch` 创建或切换任务分支；除非用户明确要求，不得创建 worktree 或额外项目目录。
+- 如果受保护的本地修改阻止安全切换，先向用户报告，不得自动 stash、reset、clean、覆盖修改或
+  改用 worktree 绕过。
 - Codex 创建的提交说明、PR 文本和合并里程碑说明必须遵循全局指令并全部使用中文。
 - 每个经过验证的工作单元都要推送，并持续维护同一个 PR。未经用户明确确认，绝不合并到 `main`。
 - 同一任务的后续提交都推送到同一个功能分支并自动进入同一个 PR，不需要用户逐个确认提交；任务全部
