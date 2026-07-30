@@ -25,13 +25,6 @@ This file provides guidance to AI coding agents working with this repository.
 - 如果改动影响核心 Agent 流程、提示词行为、持久化、安全边界、配置兼容性或 WebUI 协议契约，
   必须在 PR 正文中明确说明。
 
-## 清单与日报格式
-
-- 用户要求提供 `list`、清单、日报内容或用于标记完成状态的条目时，默认使用
-  `[] a. 内容`、`[] b. 内容`、`[] c. 内容` 的格式，并按小写英文字母连续编号。
-- `[]` 默认保持为空，不替用户预先标记完成；用户可以后续在方括号中打叉。
-- 除非用户明确指定其他格式，不使用普通项目符号、Markdown `- [ ]` 或纯数字编号替代上述格式。
-
 ## Project Overview
 
 nanobot is a lightweight, open-source AI agent framework written in Python with a React/TypeScript WebUI. It centers around a small agent loop that receives messages from chat channels, invokes an LLM provider, executes tools, and manages session memory.
