@@ -6,18 +6,21 @@ from pathlib import Path
 
 import pytest
 
-VERSION_DIR = (
+VERSION_ROOT = (
     Path(__file__).resolve().parents[2]
     / "_other"
     / "评测"
     / "审计运行轨迹"
-    / "V3"
 )
 
 
-def load_prompt_send():
-    path = VERSION_DIR / "prompt_send.py"
-    spec = importlib.util.spec_from_file_location("audit_trace_prompt_send", path)
+def version_dir(version: str) -> Path:
+    return VERSION_ROOT / version
+
+
+def load_prompt_send(version: str = "V3"):
+    path = version_dir(version) / "prompt_send.py"
+    spec = importlib.util.spec_from_file_location(f"audit_trace_prompt_send_{version.lower()}", path)
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     sys.modules[spec.name] = module
@@ -116,8 +119,8 @@ class FakePage:
 
 def test_v3_prompt_matches_frozen_manifest() -> None:
     module = load_prompt_send()
-    prompt = module.extract_prompt(VERSION_DIR / "试卷.md")
-    expected = module.load_expected(VERSION_DIR / "prompt-manifest.json")
+    prompt = module.extract_prompt(version_dir("V3") / "试卷.md")
+    expected = module.load_expected(version_dir("V3") / "prompt-manifest.json")
 
     assert module.verify_prompt(prompt, expected) == expected
     assert expected.chars == 861
@@ -125,10 +128,21 @@ def test_v3_prompt_matches_frozen_manifest() -> None:
     assert expected.sha256 == "c138844c0c0a496df2b4979249ade65f20e1260f8d63e3588613c241b9a31647"
 
 
+def test_v4_prompt_matches_frozen_manifest() -> None:
+    module = load_prompt_send("V4")
+    prompt = module.extract_prompt(version_dir("V4") / "试卷.md")
+    expected = module.load_expected(version_dir("V4") / "prompt-manifest.json")
+
+    assert module.verify_prompt(prompt, expected) == expected
+    assert expected.chars == 861
+    assert expected.utf8_bytes == 1429
+    assert expected.sha256 == "96b1648f938d84fc0256303767d343633dfbc8025e91f04b9e071e3f10b27629"
+
+
 def test_send_exact_prompt_fills_once_and_clicks_once_without_keyboard_events() -> None:
     module = load_prompt_send()
-    prompt = module.extract_prompt(VERSION_DIR / "试卷.md")
-    expected = module.load_expected(VERSION_DIR / "prompt-manifest.json")
+    prompt = module.extract_prompt(version_dir("V3") / "试卷.md")
+    expected = module.load_expected(version_dir("V3") / "prompt-manifest.json")
     page = FakePage(module)
 
     result = module.send_exact_prompt(page, prompt, expected)
@@ -145,7 +159,7 @@ def test_send_exact_prompt_fills_once_and_clicks_once_without_keyboard_events() 
 
 def test_send_exact_prompt_stops_before_send_on_manifest_mismatch() -> None:
     module = load_prompt_send()
-    prompt = module.extract_prompt(VERSION_DIR / "试卷.md")
+    prompt = module.extract_prompt(version_dir("V3") / "试卷.md")
     expected = module.PromptFingerprint(chars=1, utf8_bytes=1, sha256="0" * 64)
     page = FakePage(module)
 
@@ -158,8 +172,8 @@ def test_send_exact_prompt_stops_before_send_on_manifest_mismatch() -> None:
 
 def test_send_exact_prompt_rejects_non_new_or_non_empty_thread() -> None:
     module = load_prompt_send()
-    prompt = module.extract_prompt(VERSION_DIR / "试卷.md")
-    expected = module.load_expected(VERSION_DIR / "prompt-manifest.json")
+    prompt = module.extract_prompt(version_dir("V3") / "试卷.md")
+    expected = module.load_expected(version_dir("V3") / "prompt-manifest.json")
     page = FakePage(module)
     page.url = "http://localhost/#/chat/existing"
 

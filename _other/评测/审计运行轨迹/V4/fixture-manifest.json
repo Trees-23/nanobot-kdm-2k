@@ -1,0 +1,18 @@
+{
+  "schema_version": 1,
+  "target_root": "evals/audit-trace-v4/fixtures",
+  "files": [
+    {
+      "path": "recovery-target/config.json",
+      "sha256": "5d8372a565814bfc3b600cb2b784ab5c3c292fd6064e3489a0e4ec8676e2607e"
+    },
+    {
+      "path": "unrelated/config.json",
+      "sha256": "a86c372f3599adce122dae17aa3763579ad12234962f04f22d8938e09fdc949a"
+    },
+    {
+      "path": "child/context.txt",
+      "sha256": "70914a28e7d4fa51d228e5ed547e9e194ac2c7d831e5b27deadda4f8f1bbb640"
+    }
+  ]
+}

@@ -94,3 +94,16 @@ def test_v3_uses_own_manifest_and_complete_lifecycle(tmp_path: Path) -> None:
 
     module.cleanup(target_root, targets, fixtures)
     assert not target_root.exists()
+
+
+def test_v4_uses_own_manifest_and_complete_lifecycle(tmp_path: Path) -> None:
+    module = load_fixture_stage("V4")
+    target_root, targets, fixtures = fixture_context(module, tmp_path)
+
+    assert target_root.relative_to(tmp_path).as_posix() == "evals/audit-trace-v4/fixtures"
+    module.stage(target_root, targets, fixtures)
+    module.verify_target(target_root, targets, fixtures)
+    assert len(list(target_root.rglob("*.*"))) == 3
+
+    module.cleanup(target_root, targets, fixtures)
+    assert not target_root.exists()

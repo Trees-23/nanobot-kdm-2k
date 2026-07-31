@@ -1,0 +1,4 @@
+{
+  "fixture": "same-basename-unrelated-resource",
+  "expected": "this file must not recover the target runtime path"
+}
