@@ -1,0 +1,5 @@
+{
+  "restart": {"performed": true, "utc": "2026-08-01T20:02:30Z", "command": "docker compose build --quiet nanobot-gateway && docker compose up -d --force-recreate nanobot-gateway", "old_container": "fc29abc7…", "new_container": "4a53e96f…", "old_image": "sha256:9cec7a5f…", "new_image": "sha256:67106e8c…", "health_after": "ok"},
+  "formal_suite": {"present": false, "status": "FAIL"},
+  "deadline_observation": {"first_event": "2026-08-01T19:47:46.074019Z", "hard_deadline": "2026-08-01T20:17:46Z", "last_event": "2026-08-01T19:50:32.254154Z", "late_events": 0, "deadline_string_changed": false}
+}

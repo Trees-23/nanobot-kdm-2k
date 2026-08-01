@@ -1,0 +1,14 @@
+{
+  "commit": "c1759dd2f0a77f676c16e75e2c978bda8bb23c13",
+  "old_container": "fc29abc74fbe2da5363e76590c9f00992440e8d13345603fc218f736fef92851",
+  "new_container": "4a53e96ff325204006613ae6537baf2f9b9855af11a09384b2e9ddc7e7fd1336",
+  "new_image": "sha256:67106e8c35dae6372e142a6a6ac6764ef2d1993e973b12fb7226fe119875433c",
+  "host_index_sha256": "4d59dcd366bb82e7334e2add8e7c0475d0fbf702e1f58bc9c17bc9b326483142",
+  "container_index_sha256": "1ccdeacc7f56af16aeebd0d7424e3cfa287312e972e3bf7bed69d825db1fc09a",
+  "http_index_sha256": "1ccdeacc7f56af16aeebd0d7424e3cfa287312e972e3bf7bed69d825db1fc09a",
+  "host_main_bundle": "index-E0Sw-d_i.js",
+  "host_main_bundle_sha256": "6bf9b17d508c47e8e5c265135091dbaf6e0654eccb4d1af503cc0aa8a89fa89c",
+  "http_main_bundle": "index-DSM8FYUb.js",
+  "hashes_equal": false,
+  "A20": "FAIL"
+}

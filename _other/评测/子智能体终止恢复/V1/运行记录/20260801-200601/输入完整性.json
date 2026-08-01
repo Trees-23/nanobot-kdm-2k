@@ -1,0 +1,15 @@
+{
+  "exam_sha256": "d88bd4bd07cb0f8ec77ac6c3ef5f5dee97828f5e36a287634fb503a6e4f3e901",
+  "proctor_sha256": "a5a7efed30eefcc6f56e45e5819ae01a4ceab0df67888510934c68ec707ce031",
+  "fixtures": {
+    "cooperative_child.py": "8c3edbf91561f5cf80d9136e76987696936e3377ed2aa3a2978eef36260249a2",
+    "stubborn_tree.py": "71ec222adf6c091b3706d6e3bbea4bed8fa93865ce9520f00bfbdb1cf4caa682",
+    "recovery-target/config.json": "a4334c2e2bfe1141d0aa31ec085a9398788347c6fef84e6cc0628e323a840446"
+  },
+  "section": "第三节唯一 text 代码块",
+  "text_block_count": 1,
+  "input_sha256": "8eb27b20acdf611c22ae884bf5a669ae5d4d8098750de7c1efecde3ea3cf8a65",
+  "utf8_bytes": 1636,
+  "before_after_equal": true,
+  "sent_once": true
+}
