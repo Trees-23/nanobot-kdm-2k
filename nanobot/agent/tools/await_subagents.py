@@ -58,9 +58,10 @@ class AwaitSubagentsTool(Tool):
     @property
     def description(self) -> str:
         return (
-            "Wait once for required subagents in the current Goal. Select exactly one of "
-            "task_ids or task_group. A timeout leaves the Goal active; failed tasks must be "
-            "explicitly replaced or the Goal blocked."
+            "Perform one bounded wait for required subagents owned by the current Goal. Select "
+            "exactly one complete task_ids set or task_group. waiting=true means the barrier is "
+            "still unresolved, not that a task reached a terminal state. A timeout leaves tasks "
+            "and the Goal active; failed tasks must be explicitly replaced or the Goal blocked."
         )
 
     @property

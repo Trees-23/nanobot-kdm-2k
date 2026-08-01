@@ -247,14 +247,16 @@ def _goal_continuation_prompt(metadata: Mapping[str, Any] | None) -> str:
             "its tool-call budget.\n\n"
             f"{goal}\n\n"
             "Continue from the saved context. Do not mention the continuation "
-            "boundary to the user. Use tools as needed, and call update_goal "
-            "with action='complete' when the objective is truly finished."
+            "boundary to the user. Resolve every required subagent barrier for this "
+            "Goal before a final answer. Use tools as needed, and call update_goal "
+            "with action='complete' only when the objective and required tasks are finished."
         )
     return (
         "Continue the active sustained goal after the previous turn reached "
         "its tool-call budget. Continue from the saved context. Do not mention "
-        "the continuation boundary to the user. Use tools as needed, and call "
-        "update_goal with action='complete' when the objective is truly finished."
+        "the continuation boundary to the user. Resolve every required subagent "
+        "barrier before a final answer. Use tools as needed, and call update_goal "
+        "with action='complete' only when the objective and required tasks are finished."
     )
 
 

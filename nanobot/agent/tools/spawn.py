@@ -34,7 +34,10 @@ if TYPE_CHECKING:
                 maximum=2.0,
             ),
             "required": BooleanSchema(
-                description="Whether this task must succeed before the current Goal can complete.",
+                description=(
+                    "Whether this task must succeed before its owner Run may publish a final "
+                    "answer and before the current Goal can complete."
+                ),
                 default=False,
             ),
             "task_group": StringSchema(
@@ -75,7 +78,11 @@ class SpawnTool(Tool):
             "Use this for complex or time-consuming tasks that can run independently. "
             "The subagent will complete the task and report back when done. "
             "For deliverables or existing projects, inspect the workspace first "
-            "and use a dedicated subdirectory when helpful."
+            "and use a dedicated subdirectory when helpful. When required=true, retain the "
+            "returned task_id and task_group, then call await_subagents for the complete group "
+            "before a final answer. A failed, cancelled, or timed-out required task must be "
+            "replaced explicitly or reported by blocking the Goal. required=false remains a "
+            "background task and does not delay the owner Run."
         )
 
     async def execute(
