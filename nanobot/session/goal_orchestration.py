@@ -261,3 +261,21 @@ class GoalOrchestrationStore:
             }
 
         return await self._mutate(session_key, select_records)
+
+    async def claim_result(self, session_key: str, task_id: str) -> bool | None:
+        """Atomically claim one child result; ``None`` means legacy/background task."""
+
+        def claim(_goal: dict[str, Any], orchestration: dict[str, Any]) -> bool | None:
+            record = orchestration["tasks"].get(task_id)
+            if not isinstance(record, dict):
+                return None
+            claims = orchestration.setdefault("result_claims", {})
+            if task_id in claims:
+                return False
+            claims[task_id] = {"claimed_at": _now()}
+            return True
+
+        try:
+            return await self._mutate(session_key, claim)
+        except ValueError:
+            return None

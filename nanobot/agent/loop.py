@@ -1838,9 +1838,17 @@ class AgentLoop:
                 replay_max_messages=replay_max_messages,
             )
         is_subagent = ctx.kind is TurnKind.SYSTEM and ctx.msg.sender_id == "subagent"
-        if is_subagent and self._persist_subagent_followup(ctx.session, ctx.msg):
-            logger.debug("Subagent result persisted for session {}", ctx.session_key)
-            self.sessions.save(ctx.session)
+        if is_subagent:
+            task_id = ctx.msg.metadata.get("subagent_task_id") if isinstance(ctx.msg.metadata, dict) else None
+            if isinstance(task_id, str) and task_id:
+                claim = await self.goal_orchestration.claim_result(ctx.session.key, task_id)
+                if claim is False:
+                    return "ok"
+                if claim is True:
+                    ctx.msg.metadata["_result_claimed"] = True
+            if self._persist_subagent_followup(ctx.session, ctx.msg):
+                logger.debug("Subagent result persisted for session {}", ctx.session_key)
+                self.sessions.save(ctx.session)
 
         if ctx.kind is TurnKind.USER and (message_tool := self.tools.get("message")):
             if isinstance(message_tool, MessageTool):
