@@ -386,7 +386,9 @@ class AgentLoop:
 
         self.context = ContextBuilder(workspace, timezone=timezone, disabled_skills=disabled_skills)
         self.sessions = session_manager or SessionManager(workspace)
-        from nanobot.session.goal_orchestration import GoalOrchestrationStore
+        from nanobot.session.goal_orchestration import (
+            GoalOrchestrationStore,
+        )
 
         self.goal_orchestration = GoalOrchestrationStore(self.sessions)
         self.sessions.set_file_cap_archiver(self.context.memory.raw_archive)
@@ -1059,6 +1061,11 @@ class AgentLoop:
 
         async def _completion_guard(candidate: str | None, reason: str) -> dict[str, Any]:
             """Join only required children owned by this concrete Run."""
+            from nanobot.session.goal_orchestration import (
+                deadline_remaining_seconds,
+                obligation_status,
+            )
+
             if session is None or audit_context is None:
                 return {"allow": True}
             try:
@@ -1073,7 +1080,13 @@ class AgentLoop:
                 if record.get("status") == "running"
             ]
             if running:
-                await self.subagents.wait_for(running, 300.0)
+                remaining = [
+                    value
+                    for task_id in running
+                    if (value := deadline_remaining_seconds(records[task_id].get("deadline_at")))
+                    is not None
+                ]
+                await self.subagents.wait_for(running, min(remaining, default=300.0))
                 records = await self.goal_orchestration.select_owner(
                     session.key, audit_context.run_id
                 )
@@ -1094,11 +1107,18 @@ class AgentLoop:
                     records = await self.goal_orchestration.select_owner(
                         session.key, audit_context.run_id
                     )
-            unresolved = [
-                {"task_id": task_id, "status": record.get("status")}
+            roots = [
+                task_id
                 for task_id, record in records.items()
-                if record.get("status") == "running"
+                if record.get("owner_run_id") == audit_context.run_id
             ]
+            unresolved = []
+            for task_id in roots:
+                satisfied, status, chain = obligation_status(records, task_id)
+                if not satisfied:
+                    unresolved.append(
+                        {"task_id": task_id, "status": status, "chain": chain}
+                    )
             return {"allow": not unresolved, "unresolved": unresolved}
 
         try:
@@ -1200,6 +1220,9 @@ class AgentLoop:
         await self.audit_runtime.ensure_started()
         self._running = True
         try:
+            await self.goal_orchestration.recover_runtime(
+                self.subagents.running_task_ids()
+            )
             await self._connect_mcp()
             logger.info("Agent loop started")
 

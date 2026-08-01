@@ -145,6 +145,7 @@ class AuditGraphEdge(BaseModel):
     target: str
     relation: AuditEdgeType | None = None
     anchor: AuditEdgeAnchor | None = None
+    evidence_count: int | None = None
 
 
 class AuditGraphRegion(BaseModel):

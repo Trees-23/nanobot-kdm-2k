@@ -61,6 +61,9 @@ class SubagentStatus:
     session_key: str | None = None
     required: bool = False
     owner_run_id: str | None = None
+    termination_state: str = "none"
+    cancel_requested_at: float | None = None
+    termination_evidence: dict[str, Any] | None = None
 
 
 class _SubagentHook(AgentHook):
@@ -165,6 +168,7 @@ class SubagentManager:
         self._session_tasks: dict[str, set[str]] = {}  # session_key -> {task_id, ...}
         self._terminal_statuses: OrderedDict[str, SubagentStatus] = OrderedDict()
         self._timeout_task_ids: set[str] = set()
+        self._termination_failed_ids: set[str] = set()
         self._spawn_lock = asyncio.Lock()
 
     def set_provider(self, provider: LLMProvider, model: str) -> None:
@@ -390,6 +394,26 @@ class SubagentManager:
 
         terminal_status = "failed"
         terminal_error: str | None = None
+        terminal_persisted = False
+
+        async def _persist_terminal() -> None:
+            nonlocal terminal_persisted
+            if terminal_persisted or not required or not status.session_key:
+                return
+            if self._goal_orchestration is None:
+                return
+            if status.termination_state != "none":
+                await self._goal_orchestration.mark_termination(
+                    status.session_key,
+                    task_id,
+                    status.termination_state,
+                    evidence=status.termination_evidence,
+                )
+            await self._goal_orchestration.finish(
+                status.session_key, task_id, terminal_status, terminal_error
+            )
+            terminal_persisted = True
+
         try:
             root = workspace_scope.project_path if workspace_scope is not None else self.workspace
             cfg = None
@@ -454,12 +478,14 @@ class SubagentManager:
                 terminal_status = "succeeded"
                 final_result = result.final_content or "Task completed successfully."
                 logger.info("Subagent [{}] completed successfully", task_id)
+                await _persist_terminal()
                 await self._announce_result(
                     task_id, label, task, final_result, origin, "ok", origin_message_id
                 )
             elif result.stop_reason == "tool_error":
                 terminal_error = self._format_partial_progress(result)
                 status.tool_events = list(result.tool_events)
+                await _persist_terminal()
                 await self._announce_result(
                     task_id, label, task,
                     self._format_partial_progress(result),
@@ -469,6 +495,12 @@ class SubagentManager:
                 terminal_error = result.error or "subagent execution failed"
                 if result.error_kind == "timeout":
                     terminal_status = "timed_out"
+                    status.termination_state = "cooperatively_exited"
+                    status.termination_evidence = {
+                        "backend": "asyncio",
+                        "exit_observed": True,
+                    }
+                await _persist_terminal()
                 await self._announce_result(
                     task_id, label, task,
                     result.error or "Error: subagent execution failed.",
@@ -476,11 +508,13 @@ class SubagentManager:
                 )
             elif result.stop_reason == "max_iterations":
                 terminal_error = "Iteration budget exhausted before task completion."
+                await _persist_terminal()
                 await self._announce_result(
                     task_id, label, task, terminal_error, origin, "error", origin_message_id
                 )
             elif result.stop_reason == "empty_final_response":
                 terminal_error = "Subagent returned no final response; task completion is unverified."
+                await _persist_terminal()
                 await self._announce_result(
                     task_id, label, task, terminal_error, origin, "error", origin_message_id
                 )
@@ -489,15 +523,25 @@ class SubagentManager:
                     f"Subagent stopped with non-success reason {result.stop_reason!r}; "
                     "task completion is unverified."
                 )
+                await _persist_terminal()
                 await self._announce_result(
                     task_id, label, task, terminal_error, origin, "error", origin_message_id
                 )
         except asyncio.CancelledError:
-            terminal_status = "timed_out" if task_id in self._timeout_task_ids else "cancelled"
+            if task_id in self._termination_failed_ids:
+                terminal_status = "lost"
+            else:
+                terminal_status = "timed_out" if task_id in self._timeout_task_ids else "cancelled"
+                status.termination_state = "cooperatively_exited"
+                status.termination_evidence = {"backend": "asyncio", "exit_observed": True}
             terminal_error = (
                 "subagent task exceeded the required-join deadline"
                 if terminal_status == "timed_out"
-                else "subagent task was cancelled"
+                else (
+                    "child termination could not be confirmed"
+                    if terminal_status == "lost"
+                    else "subagent task was cancelled"
+                )
             )
             raise
         except Exception as e:
@@ -505,6 +549,7 @@ class SubagentManager:
             status.error = str(e)
             terminal_error = str(e)
             logger.exception("Subagent [{}] failed", task_id)
+            await _persist_terminal()
             await self._announce_result(task_id, label, task, f"Error: {e}", origin, "error", origin_message_id)
         finally:
             status.terminal_status = terminal_status
@@ -512,12 +557,11 @@ class SubagentManager:
                 status.error = terminal_error
             if required and status.session_key and self._goal_orchestration is not None:
                 try:
-                    await self._goal_orchestration.finish(
-                        status.session_key, task_id, terminal_status, terminal_error
-                    )
+                    await _persist_terminal()
                 except Exception:
                     logger.exception("Failed to persist terminal state for subagent [{}]", task_id)
             self._timeout_task_ids.discard(task_id)
+            self._termination_failed_ids.discard(task_id)
 
     async def _announce_result(
         self,
@@ -602,28 +646,43 @@ class SubagentManager:
             skills_summary=skills_summary or "",
         )
 
-    async def cancel_by_session(self, session_key: str) -> int:
+    async def cancel_by_session(self, session_key: str, grace_seconds: float = 2.0) -> int:
         """Cancel all subagents for the given session. Returns count cancelled."""
         task_ids = [
             tid
             for tid in self._session_tasks.get(session_key, [])
             if tid in self._running_tasks and not self._running_tasks[tid].done()
         ]
+        for task_id in task_ids:
+            await self._request_cancellation(task_id, grace_seconds=grace_seconds)
         tasks = [self._running_tasks[tid] for tid in task_ids]
-        for t in tasks:
-            t.cancel()
+        for task in tasks:
+            task.cancel()
+        pending: set[asyncio.Task[None]] = set()
         if tasks:
-            await asyncio.gather(*tasks, return_exceptions=True)
+            _done, pending = await asyncio.wait(tasks, timeout=max(0.0, grace_seconds))
         for task_id in task_ids:
             status = self.get_status(task_id)
             if status is None:
                 continue
-            status.terminal_status = "cancelled"
-            status.error = status.error or "subagent task was cancelled"
-            if status.required and self._goal_orchestration is not None:
-                await self._goal_orchestration.finish(
-                    session_key, task_id, "cancelled", status.error
-                )
+            task = self._running_tasks.get(task_id)
+            if task is not None and task in pending:
+                await self._mark_termination_failed(task_id)
+            else:
+                status.termination_state = "cooperatively_exited"
+                status.termination_evidence = {"backend": "asyncio", "exit_observed": True}
+                status.terminal_status = "cancelled"
+                status.error = status.error or "subagent task was cancelled"
+                if status.required and self._goal_orchestration is not None:
+                    await self._goal_orchestration.mark_termination(
+                        session_key,
+                        task_id,
+                        "cooperatively_exited",
+                        evidence=status.termination_evidence,
+                    )
+                    await self._goal_orchestration.finish(
+                        session_key, task_id, "cancelled", status.error
+                    )
         self.clear_terminal_statuses_by_session(session_key)
         return len(tasks)
 
@@ -635,15 +694,83 @@ class SubagentManager:
             if task_id in self._running_tasks and not self._running_tasks[task_id].done()
         ]
         self._timeout_task_ids.update(task_ids)
+        for task_id in task_ids:
+            await self._request_cancellation(task_id, grace_seconds=grace_seconds)
         for task in active:
             task.cancel()
         if not active:
             return True
-        try:
-            await asyncio.wait_for(asyncio.gather(*active, return_exceptions=True), grace_seconds)
-        except asyncio.TimeoutError:
+        _done, pending = await asyncio.wait(active, timeout=max(0.0, grace_seconds))
+        if pending:
+            pending_ids = [
+                task_id for task_id in task_ids
+                if self._running_tasks.get(task_id) in pending
+            ]
+            for task_id in pending_ids:
+                await self._mark_termination_failed(task_id)
             return False
+        for task_id in task_ids:
+            status = self._task_statuses.get(task_id)
+            if status is not None:
+                status.termination_state = "cooperatively_exited"
+                status.termination_evidence = {"backend": "asyncio", "exit_observed": True}
+                if status.required and status.session_key and self._goal_orchestration is not None:
+                    await self._goal_orchestration.mark_termination(
+                        status.session_key,
+                        task_id,
+                        "cooperatively_exited",
+                        evidence=status.termination_evidence,
+                    )
+                    await self._goal_orchestration.finish(
+                        status.session_key,
+                        task_id,
+                        "timed_out",
+                        "subagent task exceeded the required-join deadline",
+                    )
         return all(task.done() for task in active)
+
+    async def _request_cancellation(self, task_id: str, *, grace_seconds: float) -> None:
+        status = self._task_statuses.get(task_id)
+        if status is None or status.termination_state != "none":
+            return
+        status.termination_state = "cancel_requested"
+        status.cancel_requested_at = time.monotonic()
+        status.termination_evidence = {"backend": "asyncio", "request_sent": True}
+        if status.required and status.session_key and self._goal_orchestration is not None:
+            await self._goal_orchestration.mark_termination(
+                status.session_key,
+                task_id,
+                "cancel_requested",
+                evidence=status.termination_evidence,
+                grace_seconds=grace_seconds,
+            )
+            await self._goal_orchestration.mark_termination(
+                status.session_key,
+                task_id,
+                "grace_waiting",
+                evidence=status.termination_evidence,
+            )
+
+    async def _mark_termination_failed(self, task_id: str) -> None:
+        self._termination_failed_ids.add(task_id)
+        status = self._task_statuses.get(task_id)
+        if status is None:
+            return
+        status.termination_state = "termination_failed"
+        status.termination_evidence = {
+            "backend": "asyncio",
+            "exit_observed": False,
+            "force_kill_available": False,
+        }
+        status.terminal_status = "lost"
+        status.error = "child termination could not be confirmed"
+        if status.required and status.session_key and self._goal_orchestration is not None:
+            await self._goal_orchestration.mark_termination(
+                status.session_key,
+                task_id,
+                "termination_failed",
+                evidence=status.termination_evidence,
+            )
 
     async def close(self) -> None:
         """Cancel running subagents and close their shared exec sessions."""
@@ -698,6 +825,9 @@ class SubagentManager:
             child_run_id=status.child_run_id,
             session_key=status.session_key,
             required=status.required,
+            owner_run_id=status.owner_run_id,
+            termination_state=status.termination_state,
+            termination_evidence=status.termination_evidence,
         )
         self._terminal_statuses[status.task_id] = minimal
         self._terminal_statuses.move_to_end(status.task_id)

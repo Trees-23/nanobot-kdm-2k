@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
@@ -18,7 +19,11 @@ from nanobot.agent.tools.spawn import SpawnTool
 from nanobot.bus.queue import MessageBus
 from nanobot.config.schema import AgentDefaults
 from nanobot.providers.base import GenerationSettings
-from nanobot.session.goal_orchestration import GoalOrchestrationStore, required_gate
+from nanobot.session.goal_orchestration import (
+    GoalOrchestrationStore,
+    deadline_remaining_seconds,
+    required_gate,
+)
 from nanobot.session.goal_state import GOAL_STATE_KEY
 from nanobot.session.manager import SessionManager
 from nanobot.utils.llm_runtime import LLMRuntime
@@ -169,6 +174,51 @@ async def test_runtime_recovery_marks_missing_running_task_lost(tmp_path):
     assert records["a"]["status"] == "lost"
     persisted = SessionManager(tmp_path).get_or_create("test:c1")
     assert persisted.metadata[GOAL_STATE_KEY]["orchestration"]["tasks"]["a"]["status"] == "lost"
+
+
+@pytest.mark.asyncio
+async def test_startup_recovery_is_idempotent_and_preserves_original_deadline(tmp_path):
+    sm = SessionManager(tmp_path)
+    _active(sm)
+    store = GoalOrchestrationStore(sm)
+    await _register(store, "a", owner_run_id="owner-a")
+    before = sm.get_or_create("test:c1").metadata[GOAL_STATE_KEY]["orchestration"]["tasks"]["a"]
+    deadline = before["deadline_at"]
+
+    assert await store.recover_runtime(set()) == 1
+    assert await store.recover_runtime(set()) == 0
+    after = sm.get_or_create("test:c1").metadata[GOAL_STATE_KEY]["orchestration"]["tasks"]["a"]
+    assert after["deadline_at"] == deadline
+    assert after["status"] == "lost"
+    assert after["termination_state"] == "termination_failed"
+
+
+def test_durable_deadline_uses_original_absolute_utc_budget():
+    now = datetime(2026, 8, 2, 12, 0, tzinfo=timezone.utc)
+    deadline = (now + timedelta(seconds=17)).isoformat().replace("+00:00", "Z")
+
+    assert deadline_remaining_seconds(deadline, now=now + timedelta(seconds=5)) == 12
+    assert deadline_remaining_seconds(deadline, now=now + timedelta(seconds=18)) == 0
+
+
+@pytest.mark.asyncio
+async def test_duplicate_result_claim_preserves_pending_delivery_phase(tmp_path):
+    sm = SessionManager(tmp_path)
+    _active(sm)
+    store = GoalOrchestrationStore(sm)
+    await _register(store, "a", owner_run_id="owner-a")
+    await store.finish("test:c1", "a", "succeeded")
+
+    assert await store.claim_result("test:c1", "a") is True
+    assert await store.claim_result("test:c1", "a") is False
+    record = sm.get_or_create("test:c1").metadata[GOAL_STATE_KEY]["orchestration"]["tasks"]["a"]
+    assert record["result"]["claim_owner_run_id"] == "owner-a"
+    assert record["result"]["delivery_phase"] == "claimed_pending_delivery"
+
+    await store.mark_delivery("test:c1", "a", "delivered")
+    assert record["result"]["delivery_phase"] == "claimed_pending_delivery"
+    persisted = sm.get_or_create("test:c1").metadata[GOAL_STATE_KEY]["orchestration"]["tasks"]["a"]
+    assert persisted["result"]["delivery_phase"] == "delivered"
 
 
 @pytest.mark.asyncio

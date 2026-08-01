@@ -244,6 +244,29 @@ describe("audit trace UX", () => {
     expect(result.current.events).toHaveLength(6);
   });
 
+  it("rejects Event pagination when the index revision changes", async () => {
+    vi.spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        items: [auditEvent("event-1", 1)],
+        next_cursor: "cursor-1",
+        total: 2,
+        index: { revision: 7 },
+      }), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        items: [auditEvent("event-2", 2)],
+        next_cursor: null,
+        total: 2,
+        index: { revision: 8 },
+      }), { status: 200 }));
+    const { result } = renderHook(() => useAuditTimeline("token", "trace-1", true));
+    await waitFor(() => expect(result.current.revision).toBe(7));
+
+    await act(async () => {
+      expect(await result.current.ensureEvent("event-2")).toBe("revision_mismatch");
+    });
+    expect(result.current.events.map((event) => event.event_id)).toEqual(["event-1"]);
+  });
+
   it("expands a one-Trace Session and loads its Trace from the backend", async () => {
     const session: AuditSessionListItem = {
       session_key: "websocket:chat-1",

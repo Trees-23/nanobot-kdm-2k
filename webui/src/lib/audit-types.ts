@@ -263,6 +263,7 @@ export interface AuditGraphEdge {
   source: string;
   target: string;
   anchor?: { source_event_id?: string | null; target_event_id?: string | null } | null;
+  evidence_count?: number | null;
 }
 
 export interface AuditEventItem {

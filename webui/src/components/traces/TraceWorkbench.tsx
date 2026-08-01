@@ -128,6 +128,11 @@ export function TraceWorkbench({
   const locateEvent = async (eventId: string) => {
     setTimelineOpen(true);
     setTimelineNotice(null);
+    const graphRevision = auditGraph.graph?.index.revision;
+    if (graphRevision != null && timeline.revision != null && graphRevision !== timeline.revision) {
+      setTimelineNotice("Graph 与 Events revision 不一致，请刷新轨迹后重试。");
+      return;
+    }
     const result = await timeline.ensureEvent(eventId);
     if (result === "found") {
       onSelectionChange({ ...selection, eventId });
@@ -135,6 +140,7 @@ export function TraceWorkbench({
     }
     const messages = {
       cursor_stale: "Event 索引已变化，请刷新轨迹后重试。",
+      revision_mismatch: "Events 分页 revision 不一致，请刷新轨迹后重试。",
       limit: "已达到定位上限（5 页、1000 Event 或 10 秒），请缩小范围后重试。",
       not_found: "该 Event 未找到，可能已清理或不在当前索引中。",
       error: "定位 Event 时读取失败，请重试。",
@@ -278,7 +284,7 @@ export function TraceWorkbench({
                       <dl className="mt-2 divide-y divide-border/45">
                         <div className="grid grid-cols-[72px_minmax(0,1fr)] gap-2 py-1.5"><dt className="text-muted-foreground">失败端</dt><dd className="min-w-0 truncate">{edgeSource?.label ?? "节点未找到"} · {edgeSource?.status ?? "unknown"}</dd></div>
                         <div className="grid grid-cols-[72px_minmax(0,1fr)] gap-2 py-1.5"><dt className="text-muted-foreground">恢复端</dt><dd className="min-w-0 truncate">{edgeTarget?.label ?? "节点未找到"} · {edgeTarget?.status ?? "unknown"}</dd></div>
-                        <div className="grid grid-cols-[72px_minmax(0,1fr)] gap-2 py-1.5"><dt className="text-muted-foreground">证据计数</dt><dd>显式 recovery ID：{selectedEdge.type === "tool_recovery" ? 1 : 0}</dd></div>
+                        <div className="grid grid-cols-[72px_minmax(0,1fr)] gap-2 py-1.5"><dt className="text-muted-foreground">证据计数</dt><dd>{selectedEdge.evidence_count ?? 0}</dd></div>
                       </dl>
                       <div className="mt-2 grid gap-1.5">
                         {selectedEdge.anchor?.source_event_id ? <Button type="button" variant="outline" size="sm" className="h-7 justify-start text-[11px]" onClick={() => void locateEvent(selectedEdge.anchor!.source_event_id!)}>定位失败端 Event {selectedEdge.anchor.source_event_id.slice(0, 12)}</Button> : <p className="text-[10.5px] text-muted-foreground">失败端 Event 不可定位</p>}

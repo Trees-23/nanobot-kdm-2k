@@ -26,7 +26,7 @@ from nanobot.audit.graph_types import (
 from nanobot.audit.read_service import DisplayStatus, expected_delivery_suppression
 from nanobot.audit.schema import AuditEventBase
 
-GRAPH_BUILDER_VERSION = 4
+GRAPH_BUILDER_VERSION = 5
 _ABNORMAL = {"error", "failed", "timeout", "blocked", "cancelled", "interrupted", "exhausted"}
 _DECISIONS = {
     "provider_route_decision",
@@ -1244,6 +1244,7 @@ class AuditGraphBuilder:
                         source_event_id=source_event.event_id,
                         target_event_id=target_event.event_id,
                     ),
+                    evidence_count=1,
                 )
 
     def _trace_full_edges(
