@@ -1152,6 +1152,11 @@ class AgentLoop:
                 goal_active_predicate=lambda: sustained_goal_active(session.metadata) if session is not None else False,
                 goal_continue_message=_goal_continue,
                 completion_guard=_completion_guard,
+                completion_guard_active_predicate=(
+                    (lambda: self.subagents.has_running_required(audit_context.run_id))
+                    if audit_context is not None
+                    else None
+                ),
                 audit_context=audit_context,
                 finalize_on_max_iterations=turn_continuation.should_finalize_on_max_iterations(
                     pending_queue_available=pending_queue is not None and session is not None,
@@ -1175,7 +1180,15 @@ class AgentLoop:
             )
             # Push final content through stream so streaming channels (e.g. Feishu)
             # update the card instead of leaving it empty.
-            if on_stream and on_stream_end and should_stream:
+            if (
+                on_stream
+                and on_stream_end
+                and should_stream
+                and not (
+                    audit_context is not None
+                    and self.subagents.has_running_required(audit_context.run_id)
+                )
+            ):
                 await on_stream(result.final_content or "")
                 await on_stream_end(resuming=False)
         elif result.stop_reason == "error":

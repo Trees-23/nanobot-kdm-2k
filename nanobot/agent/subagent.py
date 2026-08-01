@@ -667,6 +667,15 @@ class SubagentManager:
             if tid in self._running_tasks and not self._running_tasks[tid].done()
         )
 
+    def has_running_required(self, owner_run_id: str) -> bool:
+        return any(
+            status.required
+            and status.owner_run_id == owner_run_id
+            and task_id in self._running_tasks
+            and not self._running_tasks[task_id].done()
+            for task_id, status in self._task_statuses.items()
+        )
+
     def get_status(self, task_id: str) -> SubagentStatus | None:
         status = self._task_statuses.get(task_id)
         if status is not None:

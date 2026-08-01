@@ -94,6 +94,7 @@ class AgentRunSpec:
     goal_active_predicate: Callable[[], bool] | None = None
     goal_continue_message: GoalContinueMessage | None = None
     completion_guard: Callable[[str | None, str], Any] | None = None
+    completion_guard_active_predicate: Callable[[], bool] | None = None
     finalize_on_max_iterations: bool = True
     audit_context: AuditRunContext | None = None
 
@@ -859,7 +860,13 @@ class AgentRunner:
         )
         if context.provider_attempt_observer is not None:
             kwargs["attempt_observer"] = context.provider_attempt_observer
-        wants_streaming = hook.wants_streaming()
+        # A guarded Run cannot expose irreversible final tokens before the
+        # completion decision; the Loop may still emit a post-guard final.
+        guard_active = (
+            spec.completion_guard_active_predicate is not None
+            and spec.completion_guard_active_predicate()
+        )
+        wants_streaming = hook.wants_streaming() and not guard_active
         wants_progress_streaming = (
             not wants_streaming
             and spec.stream_progress_deltas
