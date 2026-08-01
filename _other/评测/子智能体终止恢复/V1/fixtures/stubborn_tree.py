@@ -11,4 +11,3 @@ child = subprocess.Popen(
 print(child.pid, flush=True)
 while True:
     time.sleep(1)
-

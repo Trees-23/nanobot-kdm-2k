@@ -16,4 +16,3 @@ deadline = time.monotonic() + 120
 while time.monotonic() < deadline and not cancelled:
     time.sleep(0.05)
 sys.exit(0 if cancelled else 2)
-
