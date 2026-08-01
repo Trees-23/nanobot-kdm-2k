@@ -26,7 +26,7 @@ from nanobot.audit.graph_types import (
 from nanobot.audit.read_service import DisplayStatus, expected_delivery_suppression
 from nanobot.audit.schema import AuditEventBase
 
-GRAPH_BUILDER_VERSION = 3
+GRAPH_BUILDER_VERSION = 4
 _ABNORMAL = {"error", "failed", "timeout", "blocked", "cancelled", "interrupted", "exhausted"}
 _DECISIONS = {
     "provider_route_decision",
@@ -1181,7 +1181,70 @@ class AuditGraphBuilder:
                     source=prior.id,
                     target=target.id,
                 )
+        self._add_tool_recovery_edges(trace_id, events, state, edges)
         return list(edges.values())
+
+    @staticmethod
+    def _add_tool_recovery_edges(
+        trace_id: str,
+        events: Sequence[AuditEventBase],
+        state: _BuildState,
+        edges: dict[tuple[str, str, str], AuditGraphEdge],
+    ) -> None:
+        """Project only explicit recovery IDs into safe semantic edges.
+
+        Recovery is evidence, not causal inference: both terminal events must
+        belong to the same trace and run, and the referenced call must have an
+        abnormal terminal status while the declaring event succeeded.
+        """
+        node_by_id = {node.id: node for node in state.nodes}
+        finished_by_call: dict[str, list[AuditEventBase]] = defaultdict(list)
+        for event in events:
+            if event.event_type == "tool_finished" and event.tool_call_id:
+                finished_by_call[event.tool_call_id].append(event)
+        for target_event in events:
+            if target_event.event_type != "tool_finished":
+                continue
+            if getattr(target_event, "status", None) != "ok":
+                continue
+            target_call_id = target_event.tool_call_id
+            if not target_call_id:
+                continue
+            target_node_id = state.owners.get(target_event.event_id)
+            if target_node_id not in node_by_id:
+                continue
+            for source_call_id in getattr(target_event, "recovery_of_tool_call_ids", None) or []:
+                if not isinstance(source_call_id, str) or not source_call_id:
+                    continue
+                source_events = [
+                    event
+                    for event in finished_by_call.get(source_call_id, [])
+                    if getattr(event, "status", None) in _ABNORMAL
+                ]
+                if not source_events:
+                    continue
+                source_event = max(source_events, key=_order)
+                if source_event.trace_id != trace_id or target_event.trace_id != trace_id:
+                    continue
+                if source_event.run_id != target_event.run_id:
+                    continue
+                source_node_id = state.owners.get(source_event.event_id)
+                if source_node_id is None or source_node_id == target_node_id:
+                    continue
+                if source_node_id not in node_by_id:
+                    continue
+                key = ("tool_recovery", source_node_id, target_node_id)
+                edges[key] = AuditGraphEdge(
+                    id=f"tool_recovery:{source_node_id}:{target_node_id}",
+                    type="tool_recovery",
+                    relation="tool_recovery",
+                    source=source_node_id,
+                    target=target_node_id,
+                    anchor=AuditEdgeAnchor(
+                        source_event_id=source_event.event_id,
+                        target_event_id=target_event.event_id,
+                    ),
+                )
 
     def _trace_full_edges(
         self,
@@ -1351,6 +1414,7 @@ class AuditGraphBuilder:
                     target_event_id=target_event if target_event in event_by_id else None,
                 ),
             )
+        self._add_tool_recovery_edges(trace_id, events, state, edges)
         return list(edges.values())
 
     @staticmethod

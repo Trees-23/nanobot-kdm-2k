@@ -454,6 +454,13 @@ def test_explicit_recovery_distinguishes_three_config_paths() -> None:
     assert unresolved.recovery_status == "continued"
     assert unresolved.recovered_by_event_id is None
     assert unresolved.impact == "run_continued"
+    recovery_edges = [edge for edge in graph.edges if edge.type == "tool_recovery"]
+    assert len(recovery_edges) == 1
+    assert recovery_edges[0].anchor is not None
+    assert recovery_edges[0].anchor.source_event_id == "e3"
+    assert recovery_edges[0].anchor.target_event_id == "e7"
+    assert recovery_edges[0].source == tools["absolute-runtime"].id
+    assert recovery_edges[0].target == tools["absolute-config"].id
 
 
 def test_fatal_tool_timeout_drives_run_diagnostics_without_payload_content() -> None:

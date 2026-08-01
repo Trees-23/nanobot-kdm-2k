@@ -31,6 +31,7 @@ AuditEdgeType = Literal[
     "parent_run",
     "resumed_from",
     "retry_of",
+    "tool_recovery",
 ]
 AuditRunKind = Literal["main", "child_agent", "continuation", "unknown"]
 AuditLaneSide = Literal["left", "center", "right"]
