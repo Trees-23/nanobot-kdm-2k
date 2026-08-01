@@ -218,6 +218,24 @@ describe("audit trace UX", () => {
     expect(result.current.events.map((event) => event.event_id)).toEqual(["event-1", "event-2"]);
   });
 
+  it("loads the first page when locating before the timeline has opened", async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(JSON.stringify({
+      items: [auditEvent("event-target", 1)],
+      next_cursor: null,
+      total: 1,
+      index: { revision: 3 },
+    }), { status: 200 }));
+    const { result } = renderHook(() => useAuditTimeline("token", "trace-1", false));
+
+    await act(async () => {
+      expect(await result.current.ensureEvent("event-target")).toBe("found");
+    });
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(result.current.events.map((event) => event.event_id)).toEqual(["event-target"]);
+    expect(result.current.revision).toBe(3);
+  });
+
   it("stops missing Event lookup after five additional pages", async () => {
     const fetchMock = vi.spyOn(globalThis, "fetch");
     fetchMock.mockResolvedValueOnce(new Response(JSON.stringify({

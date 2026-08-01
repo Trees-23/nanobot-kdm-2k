@@ -126,6 +126,12 @@ for (const viewport of [{ width: 1440, height: 900 }, { width: 390, height: 844 
     await expect(page.getByTestId("trace-graph")).toBeVisible();
     const recoveryEdge = page.locator(`.react-flow__edge[data-id="${recovery!.id}"]`);
     await expect(recoveryEdge.locator("path").first()).toHaveAttribute("d", /.+/);
+    const sequenceEdge = page.locator(`.react-flow__edge[data-id^="sequence:"]`).first();
+    await expect(sequenceEdge.locator("path").first()).toHaveAttribute("d", /.+/);
+    await expect(recoveryEdge.locator("path").first()).not.toHaveAttribute(
+      "d",
+      await sequenceEdge.locator("path").first().getAttribute("d") ?? "",
+    );
     await recoveryEdge.click({ force: true });
 
     const inspector = page.getByRole("complementary", { name: "恢复关系检查器" });
@@ -141,7 +147,12 @@ for (const viewport of [{ width: 1440, height: 900 }, { width: 390, height: 844 
       await page.getByRole("button", { name: /Event 时间线/ }).first().click();
       await expect(inspector).toBeVisible();
     }
+    const failedRow = page.locator(`[data-event-id="${recovery!.anchor!.source_event_id}"]`);
+    await expect(failedRow).toHaveClass(/bg-sidebar-accent/);
     await inspector.getByRole("button", { name: "定位恢复端 Event" }).click();
+    const recoveredRow = page.locator(`[data-event-id="${recovery!.anchor!.target_event_id}"]`);
+    await expect(recoveredRow).toHaveClass(/bg-sidebar-accent/);
+    await expect(failedRow).not.toHaveClass(/bg-sidebar-accent/);
     expect(requests.filter((path) => path.startsWith("/api/audit/payloads/"))).toHaveLength(0);
     expect(browserErrors).toEqual([]);
 

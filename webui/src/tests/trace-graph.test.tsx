@@ -1,7 +1,7 @@
 import { fireEvent, render, screen } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-import { TraceGraph } from "@/components/traces/TraceGraph";
+import { edgeHandles, TraceGraph } from "@/components/traces/TraceGraph";
 import type { AuditGraphResponse } from "@/lib/audit-types";
 
 function graphFixture(): AuditGraphResponse {
@@ -207,6 +207,12 @@ describe("TraceGraph", () => {
       target: "tool:recovered",
       anchor: { source_event_id: "failed-event", target_event_id: "recovered-event" },
     });
+    graph.edges.push({
+      id: "sequence:failed:recovered",
+      type: "sequence",
+      source: "run:1",
+      target: "tool:recovered",
+    });
     const { rerender } = render(
       <div style={{ width: 900, height: 700 }}>
         <TraceGraph graph={graph} selectedNodeId="run:1" focusMode="resume" onSelectNode={vi.fn()} onFocusMode={vi.fn()} />
@@ -214,6 +220,10 @@ describe("TraceGraph", () => {
     );
 
     expect(await screen.findByText("恢复链路：2 个节点 / 1 条边")).toBeInTheDocument();
+    const recovery = graph.edges.find((edge) => edge.id === "tool_recovery:failed:recovered")!;
+    const sequence = graph.edges.find((edge) => edge.id === "sequence:failed:recovered")!;
+    expect(edgeHandles(recovery, graph)).toEqual({ sourceHandle: "right-source", targetHandle: "left-target" });
+    expect(edgeHandles(sequence, graph)).toEqual({ sourceHandle: "bottom-source", targetHandle: "top-target" });
     rerender(
       <div style={{ width: 900, height: 700 }}>
         <TraceGraph graph={graph} selectedNodeId="run:1" focusMode="causal" onSelectNode={vi.fn()} onFocusMode={vi.fn()} />

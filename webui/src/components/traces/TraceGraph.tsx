@@ -86,6 +86,20 @@ function AuditEdge(props: EdgeProps) {
 
 const edgeTypes = { audit: AuditEdge };
 
+export function edgeHandles(edge: AuditGraphEdge, graph: AuditGraphResponse) {
+  const sourceSide = graph.nodes.find((node) => node.id === edge.source)?.lane_side;
+  const sideSource = sourceSide === "left" ? "left-source" : "right-source";
+  const oppositeTarget = sourceSide === "left" ? "right-target" : "left-target";
+  return {
+    sourceHandle: edge.type === "spawn_branch"
+      ? (graph.nodes.find((node) => node.id === edge.target)?.lane_side === "left" ? "left-source" : "right-source")
+      : edge.type === "tool_recovery" ? sideSource : "bottom-source",
+    targetHandle: edge.type === "result_return"
+      ? oppositeTarget
+      : edge.type === "tool_recovery" ? oppositeTarget : "top-target",
+  };
+}
+
 interface FocusResult {
   nodeIds: Set<string>;
   edgeIds: Set<string>;
@@ -355,14 +369,9 @@ export function TraceGraph({
     .filter((edge) => !hiddenAttemptIds.has(edge.source) && !hiddenAttemptIds.has(edge.target) && !hiddenCollapsedIds.has(edge.source) && !hiddenCollapsedIds.has(edge.target))
     .map((edge) => ({
       ...edge,
+      ...edgeHandles(edge, graph),
       type: "audit",
       data: { auditType: edge.relation ?? edge.type },
-      sourceHandle: edge.type === "spawn_branch"
-        ? (graph.nodes.find((node) => node.id === edge.target)?.lane_side === "left" ? "left-source" : "right-source")
-        : "bottom-source",
-      targetHandle: edge.type === "result_return"
-        ? (graph.nodes.find((node) => node.id === edge.source)?.lane_side === "left" ? "left-target" : "right-target")
-        : "top-target",
       markerEnd: { type: MarkerType.ArrowClosed, width: 12, height: 12 },
       zIndex: ["caused_by", "spawn_branch", "result_return", "tool_recovery"].includes(edge.type) ? 3 : 1,
       style: highlighted.size > 0 && !focusResult.edgeIds.has(edge.id)
