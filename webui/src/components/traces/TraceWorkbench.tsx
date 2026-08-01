@@ -272,7 +272,12 @@ export function TraceWorkbench({
                       focusMode={focusMode}
                       onSelectNode={(nodeId) => onSelectionChange({ ...selection, nodeId, eventId: null })}
                       onFocusMode={setFocusMode}
-                      onSelectEdge={setSelectedEdge}
+                      onSelectEdge={(edge) => {
+                        setSelectedEdge(edge);
+                        if (selection.nodeId) {
+                          onSelectionChange({ ...selection, nodeId: null, eventId: null });
+                        }
+                      }}
                     />
                   ) : null}
                   {selectedEdge ? (
@@ -284,6 +289,8 @@ export function TraceWorkbench({
                       <dl className="mt-2 divide-y divide-border/45">
                         <div className="grid grid-cols-[72px_minmax(0,1fr)] gap-2 py-1.5"><dt className="text-muted-foreground">失败端</dt><dd className="min-w-0 truncate">{edgeSource?.label ?? "节点未找到"} · {edgeSource?.status ?? "unknown"}</dd></div>
                         <div className="grid grid-cols-[72px_minmax(0,1fr)] gap-2 py-1.5"><dt className="text-muted-foreground">恢复端</dt><dd className="min-w-0 truncate">{edgeTarget?.label ?? "节点未找到"} · {edgeTarget?.status ?? "unknown"}</dd></div>
+                        <div className="grid grid-cols-[72px_minmax(0,1fr)] gap-2 py-1.5"><dt className="text-muted-foreground">失败 Event</dt><dd className="min-w-0 break-all font-mono text-[10px]">{selectedEdge.anchor?.source_event_id ?? "不可用"}</dd></div>
+                        <div className="grid grid-cols-[72px_minmax(0,1fr)] gap-2 py-1.5"><dt className="text-muted-foreground">恢复 Event</dt><dd className="min-w-0 break-all font-mono text-[10px]">{selectedEdge.anchor?.target_event_id ?? "不可用"}</dd></div>
                         <div className="grid grid-cols-[72px_minmax(0,1fr)] gap-2 py-1.5"><dt className="text-muted-foreground">证据计数</dt><dd>{selectedEdge.evidence_count ?? 0}</dd></div>
                       </dl>
                       <div className="mt-2 grid gap-1.5">
