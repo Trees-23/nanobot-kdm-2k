@@ -636,6 +636,41 @@ async def test_injection_cycles_capped_at_max():
 
 
 @pytest.mark.asyncio
+async def test_completion_guard_rejects_candidate_without_persisting_it():
+    from nanobot.agent.runner import AgentRunner
+
+    provider = MagicMock()
+    provider.chat_with_retry = AsyncMock(side_effect=[
+        LLMResponse(content="premature answer", tool_calls=[], usage={}),
+        LLMResponse(content="answer after children", tool_calls=[], usage={}),
+    ])
+    tools = MagicMock()
+    tools.get_definitions.return_value = []
+    decisions = iter([False, True])
+
+    async def guard(_candidate, _reason):
+        allow = next(decisions)
+        return {
+            "allow": allow,
+            "unresolved": [] if allow else [{"task_id": "required-1", "status": "running"}],
+        }
+
+    result = await AgentRunner().run(make_run_spec(
+        provider,
+        initial_messages=[{"role": "user", "content": "finish the work"}],
+        tools=tools,
+        model="test-model",
+        max_iterations=3,
+        max_tool_result_chars=_MAX_TOOL_RESULT_CHARS,
+        completion_guard=guard,
+    ))
+
+    assert result.final_content == "answer after children"
+    assert not any(message.get("content") == "premature answer" for message in result.messages)
+    assert result.messages[-1]["content"] == "answer after children"
+
+
+@pytest.mark.asyncio
 async def test_no_injections_flag_is_false_by_default():
     """had_injections should be False when no injection callback or no messages."""
     from nanobot.agent.runner import AgentRunner

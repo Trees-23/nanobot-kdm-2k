@@ -42,6 +42,7 @@ async def _register(
     *,
     key: str = "test:c1",
     replaces: str | None = None,
+    owner_run_id: str | None = None,
 ) -> None:
     await store.register(
         key,
@@ -50,8 +51,23 @@ async def _register(
         group="research",
         child_run_id=f"run-{task_id}",
         spawn_tool_call_id=f"spawn-{task_id}",
+        owner_run_id=owner_run_id,
         replaces_task_id=replaces,
     )
+
+
+@pytest.mark.asyncio
+async def test_required_tasks_are_selected_only_for_their_owner_run(tmp_path):
+    sm = SessionManager(tmp_path)
+    _active(sm)
+    store = GoalOrchestrationStore(sm)
+    await _register(store, "owned-a", owner_run_id="run-a")
+    await _register(store, "owned-b", owner_run_id="run-b")
+
+    selected = await store.select_owner("test:c1", "run-a")
+
+    assert set(selected) == {"owned-a"}
+    assert selected["owned-a"]["deadline_at"]
 
 
 @pytest.mark.asyncio

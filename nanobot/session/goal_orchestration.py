@@ -4,12 +4,13 @@ from __future__ import annotations
 
 import asyncio
 from copy import deepcopy
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any, Callable
 
 from nanobot.session.goal_state import GOAL_STATE_KEY, goal_state_raw, parse_goal_state
 
-ORCHESTRATION_SCHEMA_VERSION = 1
+ORCHESTRATION_SCHEMA_VERSION = 2
+DEFAULT_JOIN_DEADLINE_SECONDS = 300
 TERMINAL_TASK_STATUSES = frozenset(
     {"succeeded", "failed", "cancelled", "timed_out", "lost"}
 )
@@ -115,6 +116,7 @@ class GoalOrchestrationStore:
         group: str,
         child_run_id: str | None,
         spawn_tool_call_id: str | None,
+        owner_run_id: str | None = None,
         replaces_task_id: str | None = None,
     ) -> dict[str, Any]:
         def add(_goal: dict[str, Any], orchestration: dict[str, Any]) -> dict[str, Any]:
@@ -139,9 +141,14 @@ class GoalOrchestrationStore:
                 "group": group,
                 "child_run_id": child_run_id,
                 "spawn_tool_call_id": spawn_tool_call_id,
+                "owner_run_id": owner_run_id,
                 "attempt": attempt,
                 "resolved_by_task_id": None,
                 "started_at": _now(),
+                "deadline_at": (
+                    datetime.now().astimezone()
+                    + timedelta(seconds=DEFAULT_JOIN_DEADLINE_SECONDS)
+                ).isoformat(),
                 "ended_at": None,
                 "error": None,
             }
@@ -232,5 +239,25 @@ class GoalOrchestrationStore:
                     selected.append(replacement)
                 index += 1
             return {tid: deepcopy(tasks[tid]) for tid in selected}
+
+        return await self._mutate(session_key, select_records)
+
+    async def select_owner(
+        self,
+        session_key: str,
+        owner_run_id: str,
+    ) -> dict[str, dict[str, Any]]:
+        """Return required obligations created by one Run under the session lock."""
+
+        def select_records(
+            _goal: dict[str, Any], orchestration: dict[str, Any]
+        ) -> dict[str, dict[str, Any]]:
+            return {
+                task_id: deepcopy(record)
+                for task_id, record in orchestration["tasks"].items()
+                if isinstance(record, dict)
+                and record.get("required") is True
+                and record.get("owner_run_id") == owner_run_id
+            }
 
         return await self._mutate(session_key, select_records)

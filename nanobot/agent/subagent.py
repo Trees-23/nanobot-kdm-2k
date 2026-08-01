@@ -60,6 +60,7 @@ class SubagentStatus:
     child_run_id: str | None = None
     session_key: str | None = None
     required: bool = False
+    owner_run_id: str | None = None
 
 
 class _SubagentHook(AgentHook):
@@ -163,6 +164,7 @@ class SubagentManager:
         self._task_statuses: dict[str, SubagentStatus] = {}
         self._session_tasks: dict[str, set[str]] = {}  # session_key -> {task_id, ...}
         self._terminal_statuses: OrderedDict[str, SubagentStatus] = OrderedDict()
+        self._timeout_task_ids: set[str] = set()
         self._spawn_lock = asyncio.Lock()
 
     def set_provider(self, provider: LLMProvider, model: str) -> None:
@@ -265,6 +267,7 @@ class SubagentManager:
         request = current_request_context()
         raw_audit = request.metadata.get(AUDIT_CONTEXT_META) if request is not None else None
         audit_context: AuditRunContext | None = None
+        owner_run_id: str | None = None
         if isinstance(raw_audit, dict) and all(
             isinstance(raw_audit.get(name), str) and raw_audit[name]
             for name in ("trace_id", "turn_id", "run_id")
@@ -274,6 +277,7 @@ class SubagentManager:
                 turn_id=raw_audit["turn_id"],
                 run_id=raw_audit["run_id"],
             )
+            owner_run_id = parent.run_id
             audit_context = parent.child_run(
                 source_type="subagent",
                 source_metadata={
@@ -297,6 +301,7 @@ class SubagentManager:
             child_run_id=audit_context.run_id if audit_context is not None else None,
             session_key=session_key,
             required=required,
+            owner_run_id=owner_run_id,
         )
         async with self._spawn_lock:
             if enforce_limit and self.get_running_count() >= self.max_concurrent_subagents:
@@ -311,6 +316,7 @@ class SubagentManager:
                     group=task_group,
                     child_run_id=status.child_run_id,
                     spawn_tool_call_id=spawn_tool_call_id,
+                    owner_run_id=owner_run_id,
                     replaces_task_id=replaces_task_id,
                 )
             self._task_statuses[task_id] = status
@@ -487,8 +493,12 @@ class SubagentManager:
                     task_id, label, task, terminal_error, origin, "error", origin_message_id
                 )
         except asyncio.CancelledError:
-            terminal_status = "cancelled"
-            terminal_error = "subagent task was cancelled"
+            terminal_status = "timed_out" if task_id in self._timeout_task_ids else "cancelled"
+            terminal_error = (
+                "subagent task exceeded the required-join deadline"
+                if terminal_status == "timed_out"
+                else "subagent task was cancelled"
+            )
             raise
         except Exception as e:
             status.phase = "error"
@@ -507,6 +517,7 @@ class SubagentManager:
                     )
                 except Exception:
                     logger.exception("Failed to persist terminal state for subagent [{}]", task_id)
+            self._timeout_task_ids.discard(task_id)
 
     async def _announce_result(
         self,
@@ -615,6 +626,24 @@ class SubagentManager:
                 )
         self.clear_terminal_statuses_by_session(session_key)
         return len(tasks)
+
+    async def timeout_tasks(self, task_ids: list[str], grace_seconds: float = 2.0) -> bool:
+        """Cancel selected children and report whether every task actually exited."""
+        active = [
+            self._running_tasks[task_id]
+            for task_id in task_ids
+            if task_id in self._running_tasks and not self._running_tasks[task_id].done()
+        ]
+        self._timeout_task_ids.update(task_ids)
+        for task in active:
+            task.cancel()
+        if not active:
+            return True
+        try:
+            await asyncio.wait_for(asyncio.gather(*active, return_exceptions=True), grace_seconds)
+        except asyncio.TimeoutError:
+            return False
+        return all(task.done() for task in active)
 
     async def close(self) -> None:
         """Cancel running subagents and close their shared exec sessions."""

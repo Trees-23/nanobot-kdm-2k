@@ -1056,6 +1056,51 @@ class AgentLoop:
             )
 
         session_metadata = session.metadata if session is not None else None
+
+        async def _completion_guard(candidate: str | None, reason: str) -> dict[str, Any]:
+            """Join only required children owned by this concrete Run."""
+            if session is None or audit_context is None:
+                return {"allow": True}
+            try:
+                records = await self.goal_orchestration.select_owner(
+                    session.key, audit_context.run_id
+                )
+            except ValueError:
+                # Ordinary turns and legacy sessions have no active Goal.
+                return {"allow": True}
+            running = [
+                task_id for task_id, record in records.items()
+                if record.get("status") == "running"
+            ]
+            if running:
+                await self.subagents.wait_for(running, 300.0)
+                records = await self.goal_orchestration.select_owner(
+                    session.key, audit_context.run_id
+                )
+                running = [
+                    task_id for task_id, record in records.items()
+                    if record.get("status") == "running"
+                ]
+                if running:
+                    exited = await self.subagents.timeout_tasks(running)
+                    if not exited:
+                        return {
+                            "allow": False,
+                            "unresolved": [
+                                {"task_id": task_id, "status": "runtime_blocked"}
+                                for task_id in running
+                            ],
+                        }
+                    records = await self.goal_orchestration.select_owner(
+                        session.key, audit_context.run_id
+                    )
+            unresolved = [
+                {"task_id": task_id, "status": record.get("status")}
+                for task_id, record in records.items()
+                if record.get("status") == "running"
+            ]
+            return {"allow": not unresolved, "unresolved": unresolved}
+
         try:
             for scope in turn_scopes or ():
                 turn_scope_stack.enter_context(scope)
@@ -1106,6 +1151,7 @@ class AgentLoop:
                 ),
                 goal_active_predicate=lambda: sustained_goal_active(session.metadata) if session is not None else False,
                 goal_continue_message=_goal_continue,
+                completion_guard=_completion_guard,
                 audit_context=audit_context,
                 finalize_on_max_iterations=turn_continuation.should_finalize_on_max_iterations(
                     pending_queue_available=pending_queue is not None and session is not None,
