@@ -36,6 +36,27 @@ function TimelineHarness() {
   );
 }
 
+function SelectedTimelineHarness() {
+  const events = Array.from({ length: 24 }, (_, index) => auditEvent(`event-${index}`, index));
+  const selectedTimeline = {
+    ...timeline,
+    events,
+    total: events.length,
+  } as unknown as ReturnType<typeof useAuditTimeline>;
+  return (
+    <TraceTimeline
+      timeline={selectedTimeline}
+      total={events.length}
+      open
+      selectedEventId="event-20"
+      currentNodeIds={new Set()}
+      onOpenChange={vi.fn()}
+      onSelectEvent={vi.fn()}
+      onLoadPayload={vi.fn()}
+    />
+  );
+}
+
 function auditEvent(eventId: string, sequence: number) {
   return {
     event_id: eventId,
@@ -78,6 +99,13 @@ describe("audit trace UX", () => {
     expect(screen.getByRole("button", { name: "拖拽调整时间线高度" })).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "最大化时间线" }));
     expect(screen.getByRole("button", { name: "还原时间线高度" })).toBeInTheDocument();
+  });
+
+  it("renders a programmatically selected Event outside the initial virtual range", async () => {
+    render(<SelectedTimelineHarness />);
+    await waitFor(() => {
+      expect(document.querySelector('[data-event-id="event-20"]')).toHaveClass(/bg-sidebar-accent/);
+    });
   });
 
   it("requests the unified full Trace graph by default", async () => {
@@ -218,6 +246,24 @@ describe("audit trace UX", () => {
     expect(result.current.events.map((event) => event.event_id)).toEqual(["event-1", "event-2"]);
   });
 
+  it("loads the first page when locating before the timeline has opened", async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(JSON.stringify({
+      items: [auditEvent("event-target", 1)],
+      next_cursor: null,
+      total: 1,
+      index: { revision: 3 },
+    }), { status: 200 }));
+    const { result } = renderHook(() => useAuditTimeline("token", "trace-1", false));
+
+    await act(async () => {
+      expect(await result.current.ensureEvent("event-target")).toBe("found");
+    });
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(result.current.events.map((event) => event.event_id)).toEqual(["event-target"]);
+    expect(result.current.revision).toBe(3);
+  });
+
   it("stops missing Event lookup after five additional pages", async () => {
     const fetchMock = vi.spyOn(globalThis, "fetch");
     fetchMock.mockResolvedValueOnce(new Response(JSON.stringify({
@@ -242,6 +288,29 @@ describe("audit trace UX", () => {
     });
     expect(fetchMock).toHaveBeenCalledTimes(6);
     expect(result.current.events).toHaveLength(6);
+  });
+
+  it("rejects Event pagination when the index revision changes", async () => {
+    vi.spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        items: [auditEvent("event-1", 1)],
+        next_cursor: "cursor-1",
+        total: 2,
+        index: { revision: 7 },
+      }), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        items: [auditEvent("event-2", 2)],
+        next_cursor: null,
+        total: 2,
+        index: { revision: 8 },
+      }), { status: 200 }));
+    const { result } = renderHook(() => useAuditTimeline("token", "trace-1", true));
+    await waitFor(() => expect(result.current.revision).toBe(7));
+
+    await act(async () => {
+      expect(await result.current.ensureEvent("event-2")).toBe("revision_mismatch");
+    });
+    expect(result.current.events.map((event) => event.event_id)).toEqual(["event-1"]);
   });
 
   it("expands a one-Trace Session and loads its Trace from the backend", async () => {

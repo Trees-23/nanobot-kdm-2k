@@ -33,7 +33,9 @@ function brand(
   logoOverrides: string[] = [],
 ): ProviderBrand {
   const logoUrls = [...logoOverrides];
-  faviconUrls(domain).forEach((url) => addUniqueLogoUrl(logoUrls, url));
+  const [official, ...crossOriginSafe] = faviconUrls(domain);
+  crossOriginSafe.forEach((url) => addUniqueLogoUrl(logoUrls, url));
+  addUniqueLogoUrl(logoUrls, official);
   return {
     logoUrl: logoUrls[0],
     logoUrls,

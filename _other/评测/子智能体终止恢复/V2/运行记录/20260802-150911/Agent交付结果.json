@@ -1,0 +1,19 @@
+{
+  "protocol": "subagent-termination-recovery-v2",
+  "task_ids": {
+    "cooperative-child": "9eded2bb",
+    "force-kill-tree": "65bf5def",
+    "deadline-restart": "f729b5ed",
+    "tool-recovery": "82315864"
+  },
+  "child_run_ids": {
+    "cooperative-child": "019fc14f-4939-7c71-aa15-097f0aa4573b",
+    "force-kill-tree": "019fc14f-494f-72dd-975d-0c6f5f45667e",
+    "deadline-restart": "019fc14f-496c-7d11-bb91-41e0400a391a",
+    "tool-recovery": "019fc14f-a632-73d7-8232-611d56271897"
+  },
+  "deadline_at": null,
+  "barrier_satisfied": true,
+  "delivery_count": 4,
+  "notes": "四项 required 任务均已真实终态 succeeded；完整 task_group barrier 已满足。force-kill-tree 的 fixture 以退出码 1 结束；cooperative-child 启动后曾在 30 秒内持续运行，最终任务终态为 succeeded；deadline-restart 返回 DEADLINE_RESTART_DONE；tool-recovery 完成缺失文件后的目标文件读取。deadline_at 未由工具返回，故保持 null。"
+}

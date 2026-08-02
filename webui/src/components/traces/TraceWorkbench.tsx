@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { ArrowLeft, ExternalLink, LoaderCircle, RefreshCw, Workflow } from "lucide-react";
+import { ArrowLeft, ExternalLink, LoaderCircle, RefreshCw, Workflow, X } from "lucide-react";
 
 import { TraceGraph } from "@/components/traces/TraceGraph";
 import { SessionTraceList } from "@/components/traces/SessionTraceList";
@@ -16,7 +16,7 @@ import { useAuditSessions } from "@/hooks/useAuditSessions";
 import { useAuditTimeline } from "@/hooks/useAuditTimeline";
 import { useMediaQuery } from "@/hooks/useMediaQuery";
 import { AuditApiError, fetchAuditPayload } from "@/lib/audit-api";
-import type { AuditPayloadResponse, AuditTraceListItem } from "@/lib/audit-types";
+import type { AuditGraphEdge, AuditPayloadResponse, AuditTraceListItem } from "@/lib/audit-types";
 import { cn } from "@/lib/utils";
 
 export interface TraceSelection {
@@ -58,9 +58,12 @@ export function TraceWorkbench({
   const [payloadError, setPayloadError] = useState<AuditApiError | null>(null);
   const [timelineNotice, setTimelineNotice] = useState<string | null>(null);
   const [selectedTrace, setSelectedTrace] = useState<AuditTraceListItem | null>(null);
+  const [selectedEdge, setSelectedEdge] = useState<AuditGraphEdge | null>(null);
   const wideInspector = useMediaQuery("(min-width: 1440px)", false);
   const selected = selectedTrace?.trace_id === selection.traceId ? selectedTrace : null;
   const selectedNode = auditGraph.graph?.nodes.find((node) => node.id === selection.nodeId) ?? null;
+  const edgeSource = selectedEdge ? auditGraph.graph?.nodes.find((node) => node.id === selectedEdge.source) : null;
+  const edgeTarget = selectedEdge ? auditGraph.graph?.nodes.find((node) => node.id === selectedEdge.target) : null;
   const timeline = useAuditTimeline(
     token,
     selection.traceId,
@@ -72,6 +75,10 @@ export function TraceWorkbench({
     if (!selection.nodeId || !auditGraph.graph || selectedNode) return;
     onSelectionChange({ ...selection, nodeId: null, eventId: null }, true);
   }, [auditGraph.graph, onSelectionChange, selectedNode, selection]);
+
+  useEffect(() => {
+    setSelectedEdge(null);
+  }, [selection.traceId]);
 
   useEffect(() => {
     const closeInspector = (event: KeyboardEvent) => {
@@ -121,6 +128,11 @@ export function TraceWorkbench({
   const locateEvent = async (eventId: string) => {
     setTimelineOpen(true);
     setTimelineNotice(null);
+    const graphRevision = auditGraph.graph?.index.revision;
+    if (graphRevision != null && timeline.revision != null && graphRevision !== timeline.revision) {
+      setTimelineNotice("Graph 与 Events revision 不一致，请刷新轨迹后重试。");
+      return;
+    }
     const result = await timeline.ensureEvent(eventId);
     if (result === "found") {
       onSelectionChange({ ...selection, eventId });
@@ -128,6 +140,7 @@ export function TraceWorkbench({
     }
     const messages = {
       cursor_stale: "Event 索引已变化，请刷新轨迹后重试。",
+      revision_mismatch: "Events 分页 revision 不一致，请刷新轨迹后重试。",
       limit: "已达到定位上限（5 页、1000 Event 或 10 秒），请缩小范围后重试。",
       not_found: "该 Event 未找到，可能已清理或不在当前索引中。",
       error: "定位 Event 时读取失败，请重试。",
@@ -259,7 +272,32 @@ export function TraceWorkbench({
                       focusMode={focusMode}
                       onSelectNode={(nodeId) => onSelectionChange({ ...selection, nodeId, eventId: null })}
                       onFocusMode={setFocusMode}
+                      onSelectEdge={(edge) => {
+                        setSelectedEdge(edge);
+                        if (selection.nodeId) {
+                          onSelectionChange({ ...selection, nodeId: null, eventId: null });
+                        }
+                      }}
                     />
+                  ) : null}
+                  {selectedEdge ? (
+                    <aside className="absolute right-3 top-12 z-10 w-[min(360px,calc(100%-24px))] rounded-md border border-border/70 bg-background/95 p-3 text-xs shadow-lg" aria-label="恢复关系检查器">
+                      <div className="flex items-center justify-between gap-2">
+                        <h2 className="font-semibold">{selectedEdge.type === "tool_recovery" ? "Tool 恢复关系" : "关系检查器"}</h2>
+                        <Button type="button" variant="ghost" size="icon" className="h-7 w-7" aria-label="关闭关系检查器" title="关闭关系检查器" onClick={() => setSelectedEdge(null)}><X className="h-3.5 w-3.5" /></Button>
+                      </div>
+                      <dl className="mt-2 divide-y divide-border/45">
+                        <div className="grid grid-cols-[72px_minmax(0,1fr)] gap-2 py-1.5"><dt className="text-muted-foreground">失败端</dt><dd className="min-w-0 truncate">{edgeSource?.label ?? "节点未找到"} · {edgeSource?.status ?? "unknown"}</dd></div>
+                        <div className="grid grid-cols-[72px_minmax(0,1fr)] gap-2 py-1.5"><dt className="text-muted-foreground">恢复端</dt><dd className="min-w-0 truncate">{edgeTarget?.label ?? "节点未找到"} · {edgeTarget?.status ?? "unknown"}</dd></div>
+                        <div className="grid grid-cols-[72px_minmax(0,1fr)] gap-2 py-1.5"><dt className="text-muted-foreground">失败 Event</dt><dd className="min-w-0 break-all font-mono text-[10px]">{selectedEdge.anchor?.source_event_id ?? "不可用"}</dd></div>
+                        <div className="grid grid-cols-[72px_minmax(0,1fr)] gap-2 py-1.5"><dt className="text-muted-foreground">恢复 Event</dt><dd className="min-w-0 break-all font-mono text-[10px]">{selectedEdge.anchor?.target_event_id ?? "不可用"}</dd></div>
+                        <div className="grid grid-cols-[72px_minmax(0,1fr)] gap-2 py-1.5"><dt className="text-muted-foreground">证据计数</dt><dd>{selectedEdge.evidence_count ?? 0}</dd></div>
+                      </dl>
+                      <div className="mt-2 grid gap-1.5">
+                        {selectedEdge.anchor?.source_event_id ? <Button type="button" variant="outline" size="sm" className="h-7 justify-start text-[11px]" onClick={() => void locateEvent(selectedEdge.anchor!.source_event_id!)}>定位失败端 Event {selectedEdge.anchor.source_event_id.slice(0, 12)}</Button> : <p className="text-[10.5px] text-muted-foreground">失败端 Event 不可定位</p>}
+                        {selectedEdge.anchor?.target_event_id ? <Button type="button" variant="outline" size="sm" className="h-7 justify-start text-[11px]" onClick={() => void locateEvent(selectedEdge.anchor!.target_event_id!)}>定位恢复端 Event {selectedEdge.anchor.target_event_id.slice(0, 12)}</Button> : <p className="text-[10.5px] text-muted-foreground">恢复端 Event 不可定位</p>}
+                      </div>
+                    </aside>
                   ) : null}
                 </div>
                 <TraceTimeline

@@ -1,0 +1,16 @@
+{
+  "trace_id": "019fc14e-2517-79f9-be18-566cac4a41c4",
+  "stable_viewports": ["1440x900", "390x844"],
+  "stable_console_errors": 0,
+  "stable_page_errors": 0,
+  "stable_request_failures": 0,
+  "payload_requests": 0,
+  "recovery_edge_count": 1,
+  "sequence_and_recovery_paths_differ": true,
+  "inspector_evidence_count": true,
+  "failed_event_selected_before_recovery": true,
+  "recovered_event_only_selected_after": true,
+  "graph_revision": 43,
+  "events_revision": 43,
+  "cross_restart_diagnostics": "7 条短期 WebSocket/HTTP 断线事件，仅发生在容器停机窗口；未计入稳定窗口 A19"
+}

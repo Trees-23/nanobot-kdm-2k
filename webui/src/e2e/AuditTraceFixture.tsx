@@ -60,6 +60,7 @@ function Fixture() {
   const timeline = {
     events,
     total: TOTAL,
+    revision: 1,
     nextCursor: events.length < TOTAL ? `cursor-${events.length}` : null,
     loading,
     error: null,

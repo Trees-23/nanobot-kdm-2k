@@ -286,6 +286,9 @@ class AgentLoop:
         model: str | None = None,
         max_iterations: int | None = None,
         max_concurrent_subagents: int | None = None,
+        child_executor_backend: str = "asyncio",
+        child_runtime_config: dict[str, Any] | None = None,
+        child_audit_root: str | None = None,
         context_window_tokens: int | None = None,
         context_block_limit: int | None = None,
         max_tool_result_chars: int | None = None,
@@ -386,7 +389,9 @@ class AgentLoop:
 
         self.context = ContextBuilder(workspace, timezone=timezone, disabled_skills=disabled_skills)
         self.sessions = session_manager or SessionManager(workspace)
-        from nanobot.session.goal_orchestration import GoalOrchestrationStore
+        from nanobot.session.goal_orchestration import (
+            GoalOrchestrationStore,
+        )
 
         self.goal_orchestration = GoalOrchestrationStore(self.sessions)
         self.sessions.set_file_cap_archiver(self.context.memory.raw_archive)
@@ -396,6 +401,13 @@ class AgentLoop:
         self._file_state_store = FileStateStore()
         self._exec_session_manager = ExecSessionManager()
         self.runner = AgentRunner(audit_emitter=self.audit_runtime.emitter)
+        child_executor = None
+        if child_runtime_config is not None and child_executor_backend != "asyncio":
+            from nanobot.agent.child_executor import ProcessChildExecutor
+
+            candidate = ProcessChildExecutor()
+            if candidate.force_kill_available:
+                child_executor = candidate
         self.subagents = SubagentManager(
             workspace=workspace,
             bus=bus,
@@ -409,6 +421,9 @@ class AgentLoop:
             llm_wall_timeout_for_session=lambda sk: runner_wall_llm_timeout_s(self.sessions, sk),
             audit_emitter=self.audit_runtime.emitter,
             goal_orchestration=self.goal_orchestration,
+            child_executor=child_executor,
+            child_runtime_config=child_runtime_config,
+            child_audit_root=child_audit_root,
         )
         self._unified_session = unified_session
         self._running = False
@@ -501,6 +516,17 @@ class AgentLoop:
                 config.audit,
                 root=get_audit_dir(config.audit.path),
             )
+        from nanobot.agent.child_worker import build_child_config_snapshot
+        from nanobot.config.paths import get_audit_dir
+
+        child_runtime_config = extra.pop(
+            "child_runtime_config",
+            build_child_config_snapshot(config),
+        )
+        child_audit_root = extra.pop(
+            "child_audit_root",
+            str(get_audit_dir(config.audit.path)),
+        )
         return cls(
             bus=bus,
             provider=provider,
@@ -508,6 +534,9 @@ class AgentLoop:
             model=model,
             max_iterations=defaults.max_tool_iterations,
             max_concurrent_subagents=defaults.max_concurrent_subagents,
+            child_executor_backend=defaults.subagent_executor_backend,
+            child_runtime_config=child_runtime_config,
+            child_audit_root=child_audit_root,
             context_window_tokens=context_window_tokens,
             context_block_limit=defaults.context_block_limit,
             max_tool_result_chars=defaults.max_tool_result_chars,
@@ -1056,6 +1085,69 @@ class AgentLoop:
             )
 
         session_metadata = session.metadata if session is not None else None
+
+        async def _completion_guard(candidate: str | None, reason: str) -> dict[str, Any]:
+            """Join only required children owned by this concrete Run."""
+            from nanobot.session.goal_orchestration import (
+                deadline_remaining_seconds,
+                obligation_status,
+            )
+
+            if session is None or audit_context is None:
+                return {"allow": True}
+            try:
+                records = await self.goal_orchestration.select_owner(
+                    session.key, audit_context.run_id
+                )
+            except ValueError:
+                # Ordinary turns and legacy sessions have no active Goal.
+                return {"allow": True}
+            running = [
+                task_id for task_id, record in records.items()
+                if record.get("status") == "running"
+            ]
+            if running:
+                remaining = [
+                    value
+                    for task_id in running
+                    if (value := deadline_remaining_seconds(records[task_id].get("deadline_at")))
+                    is not None
+                ]
+                await self.subagents.wait_for(running, min(remaining, default=300.0))
+                records = await self.goal_orchestration.select_owner(
+                    session.key, audit_context.run_id
+                )
+                running = [
+                    task_id for task_id, record in records.items()
+                    if record.get("status") == "running"
+                ]
+                if running:
+                    exited = await self.subagents.timeout_tasks(running)
+                    if not exited:
+                        return {
+                            "allow": False,
+                            "unresolved": [
+                                {"task_id": task_id, "status": "runtime_blocked"}
+                                for task_id in running
+                            ],
+                        }
+                    records = await self.goal_orchestration.select_owner(
+                        session.key, audit_context.run_id
+                    )
+            roots = [
+                task_id
+                for task_id, record in records.items()
+                if record.get("owner_run_id") == audit_context.run_id
+            ]
+            unresolved = []
+            for task_id in roots:
+                satisfied, status, chain = obligation_status(records, task_id)
+                if not satisfied:
+                    unresolved.append(
+                        {"task_id": task_id, "status": status, "chain": chain}
+                    )
+            return {"allow": not unresolved, "unresolved": unresolved}
+
         try:
             for scope in turn_scopes or ():
                 turn_scope_stack.enter_context(scope)
@@ -1106,6 +1198,12 @@ class AgentLoop:
                 ),
                 goal_active_predicate=lambda: sustained_goal_active(session.metadata) if session is not None else False,
                 goal_continue_message=_goal_continue,
+                completion_guard=_completion_guard,
+                completion_guard_active_predicate=(
+                    (lambda: self.subagents.has_running_required(audit_context.run_id))
+                    if audit_context is not None
+                    else None
+                ),
                 audit_context=audit_context,
                 finalize_on_max_iterations=turn_continuation.should_finalize_on_max_iterations(
                     pending_queue_available=pending_queue is not None and session is not None,
@@ -1129,7 +1227,15 @@ class AgentLoop:
             )
             # Push final content through stream so streaming channels (e.g. Feishu)
             # update the card instead of leaving it empty.
-            if on_stream and on_stream_end and should_stream:
+            if (
+                on_stream
+                and on_stream_end
+                and should_stream
+                and not (
+                    audit_context is not None
+                    and self.subagents.has_running_required(audit_context.run_id)
+                )
+            ):
                 await on_stream(result.final_content or "")
                 await on_stream_end(resuming=False)
         elif result.stop_reason == "error":
@@ -1141,6 +1247,9 @@ class AgentLoop:
         await self.audit_runtime.ensure_started()
         self._running = True
         try:
+            await self.goal_orchestration.recover_runtime(
+                self.subagents.running_task_ids()
+            )
             await self._connect_mcp()
             logger.info("Agent loop started")
 
@@ -1792,9 +1901,17 @@ class AgentLoop:
                 replay_max_messages=replay_max_messages,
             )
         is_subagent = ctx.kind is TurnKind.SYSTEM and ctx.msg.sender_id == "subagent"
-        if is_subagent and self._persist_subagent_followup(ctx.session, ctx.msg):
-            logger.debug("Subagent result persisted for session {}", ctx.session_key)
-            self.sessions.save(ctx.session)
+        if is_subagent:
+            task_id = ctx.msg.metadata.get("subagent_task_id") if isinstance(ctx.msg.metadata, dict) else None
+            if isinstance(task_id, str) and task_id:
+                claim = await self.goal_orchestration.claim_result(ctx.session.key, task_id)
+                if claim is False:
+                    return "ok"
+                if claim is True:
+                    ctx.msg.metadata["_result_claimed"] = True
+            if self._persist_subagent_followup(ctx.session, ctx.msg):
+                logger.debug("Subagent result persisted for session {}", ctx.session_key)
+                self.sessions.save(ctx.session)
 
         if ctx.kind is TurnKind.USER and (message_tool := self.tools.get("message")):
             if isinstance(message_tool, MessageTool):

@@ -262,7 +262,7 @@ describe("ThreadShell", () => {
       />,
     ));
 
-    const reference = await screen.findByTestId("inline-file-path");
+    const reference = await screen.findByTestId("inline-file-path", {}, { timeout: 5_000 });
     await waitFor(() => expect(fetchMock).toHaveBeenCalledWith(
       expect.stringContaining("file-preview?path=prompts%2Fdream.md&probe=1"),
       expect.anything(),

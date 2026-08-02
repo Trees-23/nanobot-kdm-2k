@@ -35,7 +35,7 @@ import {
   TooltipProvider,
   TooltipTrigger,
 } from "@/components/ui/tooltip";
-import type { AuditGraphNode, AuditGraphResponse, TraceEdgeType } from "@/lib/audit-types";
+import type { AuditGraphEdge, AuditGraphNode, AuditGraphResponse, TraceEdgeType } from "@/lib/audit-types";
 import { auditNodeTypeLabel, auditStatusLabel } from "@/lib/audit-display";
 import { cn } from "@/lib/utils";
 import type { TraceFocusMode } from "@/components/traces/TraceNodeInspector";
@@ -65,6 +65,7 @@ function AuditEdge(props: EdgeProps) {
     parent_run: { stroke: "hsl(var(--foreground) / .55)", width: 1.4 },
     resumed_from: { stroke: "#3b82f6", dash: "6 4", width: 1.5 },
     retry_of: { stroke: "#d97706", dash: "3 3", width: 1.5 },
+    tool_recovery: { stroke: "#0891b2", dash: "2 5", width: 2 },
   };
   const style = styles[type ?? "sequence"];
   return (
@@ -85,6 +86,20 @@ function AuditEdge(props: EdgeProps) {
 
 const edgeTypes = { audit: AuditEdge };
 
+export function edgeHandles(edge: AuditGraphEdge, graph: AuditGraphResponse) {
+  const sourceSide = graph.nodes.find((node) => node.id === edge.source)?.lane_side;
+  const sideSource = sourceSide === "left" ? "left-source" : "right-source";
+  const oppositeTarget = sourceSide === "left" ? "right-target" : "left-target";
+  return {
+    sourceHandle: edge.type === "spawn_branch"
+      ? (graph.nodes.find((node) => node.id === edge.target)?.lane_side === "left" ? "left-source" : "right-source")
+      : edge.type === "tool_recovery" ? sideSource : "bottom-source",
+    targetHandle: edge.type === "result_return"
+      ? oppositeTarget
+      : edge.type === "tool_recovery" ? oppositeTarget : "top-target",
+  };
+}
+
 interface FocusResult {
   nodeIds: Set<string>;
   edgeIds: Set<string>;
@@ -100,7 +115,7 @@ function relatedIds(
     causal: ["caused_by", "retry", "retry_of"],
     context: ["sequence"],
     branch: ["spawn_branch", "parent_run"],
-    resume: ["result_return", "resumed_from"],
+    resume: ["result_return", "resumed_from", "tool_recovery"],
   };
   const result = new Set([selectedId]);
   const edgeIds = new Set<string>();
@@ -143,12 +158,14 @@ export function TraceGraph({
   focusMode,
   onSelectNode,
   onFocusMode,
+  onSelectEdge,
 }: {
   graph: AuditGraphResponse;
   selectedNodeId: string | null;
   focusMode: TraceFocusMode;
   onSelectNode: (nodeId: string | null) => void;
   onFocusMode: (mode: TraceFocusMode) => void;
+  onSelectEdge?: (edge: AuditGraphEdge) => void;
 }) {
   const [positions, setPositions] = useState<Array<{ id: string; x: number; y: number }>>([]);
   const [expandedGroups, setExpandedGroups] = useState<Set<string>>(
@@ -352,16 +369,11 @@ export function TraceGraph({
     .filter((edge) => !hiddenAttemptIds.has(edge.source) && !hiddenAttemptIds.has(edge.target) && !hiddenCollapsedIds.has(edge.source) && !hiddenCollapsedIds.has(edge.target))
     .map((edge) => ({
       ...edge,
+      ...edgeHandles(edge, graph),
       type: "audit",
       data: { auditType: edge.relation ?? edge.type },
-      sourceHandle: edge.type === "spawn_branch"
-        ? (graph.nodes.find((node) => node.id === edge.target)?.lane_side === "left" ? "left-source" : "right-source")
-        : "bottom-source",
-      targetHandle: edge.type === "result_return"
-        ? (graph.nodes.find((node) => node.id === edge.source)?.lane_side === "left" ? "left-target" : "right-target")
-        : "top-target",
       markerEnd: { type: MarkerType.ArrowClosed, width: 12, height: 12 },
-      zIndex: ["caused_by", "spawn_branch", "result_return"].includes(edge.type) ? 3 : 1,
+      zIndex: ["caused_by", "spawn_branch", "result_return", "tool_recovery"].includes(edge.type) ? 3 : 1,
       style: highlighted.size > 0 && !focusResult.edgeIds.has(edge.id)
         ? { opacity: 0.16 }
         : undefined,
@@ -427,6 +439,10 @@ export function TraceGraph({
           const semantic = graph.nodes.find((candidate) => candidate.id === node.id);
           if (semantic?.expandable) toggleExpand(semantic);
         }}
+        onEdgeClick={(_, edge) => {
+          const selected = graph.edges.find((candidate) => candidate.id === edge.id);
+          if (selected) onSelectEdge?.(selected);
+        }}
         onPaneClick={() => onSelectNode(null)}
         proOptions={{ hideAttribution: true }}
       >
@@ -475,7 +491,7 @@ export function TraceGraph({
           <span>
             {focusLabels[focusMode]}：{focusResult.edgeIds.size
               ? `${focusResult.nodeIds.size} 个节点 / ${focusResult.edgeIds.size} 条边`
-              : "零命中"}
+              : focusMode === "resume" ? "0 个节点 / 0 条边" : "零命中"}
           </span>
           <Button type="button" variant="ghost" size="sm" className="h-6 px-1.5 text-[10px]" onClick={() => onFocusMode(null)}>清除</Button>
         </div>
@@ -495,7 +511,8 @@ export function TraceGraph({
           <div className="mt-2 grid gap-1.5">
             <p><span className="mr-2 inline-block w-8 border-t border-muted-foreground" />顺序/父子：实线</p>
             <p><span className="mr-2 inline-block w-8 border-t-2 border-teal-700" />结构分支：绿色实线</p>
-            <p><span className="mr-2 inline-block w-8 border-t-2 border-dashed border-blue-600" />结果回流/恢复：蓝色虚线</p>
+            <p><span className="mr-2 inline-block w-8 border-t-2 border-dashed border-blue-600" />结果回流：蓝色虚线</p>
+            <p><span className="mr-2 inline-block w-8 border-t-2 border-dashed border-cyan-600" />Tool 恢复：青色点划线</p>
             <p><span className="mr-2 inline-block w-8 border-t-2 border-dashed border-amber-600" />重试：琥珀色虚线</p>
           </div>
           <p className="mt-2 text-muted-foreground">箭头从原因、父级或先前尝试指向结果、子级或后续尝试。</p>

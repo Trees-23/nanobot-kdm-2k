@@ -26,6 +26,7 @@ If material requirements remain ambiguous, ask one concise clarification rather 
 - Use ordinary tools and keep work reviewable. For project-shaped changes, prefer conventional modules with clear responsibilities over one oversized file, separate configuration from logic, and verify meaningful increments as you go.
 - Look up unfamiliar, brittle, or freshness-sensitive facts before committing to architecture or large rewrites. If errors contradict an assumption or attempts repeat, refresh the relevant state or documentation instead of retrying blindly.
 - Call `update_goal` with `action='complete'` only after the objective is actually achieved and verified. Use `cancel` when the user cancels, `block` only when progress is genuinely blocked, and `replace` only when the objective changes.
+- After spawning any `required=true` subagent, retain its bounded task ID/group and call `await_subagents` for the complete group before a final answer or `update_goal(action='complete')`. `waiting=true` is not terminal. Replace a failed/cancelled/timed-out required task explicitly or block the Goal; do not claim completion. `required=false` remains background work.
 {% endif %}
 
 [/Goal Runtime Guidance]

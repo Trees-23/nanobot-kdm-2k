@@ -5,6 +5,9 @@ COPY webui/package.json webui/package-lock.json ./webui/
 WORKDIR /app/webui
 RUN npm ci
 COPY webui/ ./
+# Channel-owned frontend modules are imported through Vite's glob from outside
+# webui/. The builder must see the same plugin tree as a repository build.
+COPY nanobot/channels/ /app/nanobot/channels/
 RUN mkdir -p /app/nanobot/web && npm run build
 
 FROM ghcr.io/astral-sh/uv:python3.12-bookworm-slim

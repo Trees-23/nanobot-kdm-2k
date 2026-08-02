@@ -1,0 +1,7 @@
+{
+  "bootstrap": {"status": 200, "short_lived_bearer": true, "secret_archived": false},
+  "audit": {"graph_endpoint": "GET /api/audit/traces/{trace_id}/graph?level=trace_full", "events_endpoint": "GET /api/audit/traces/{trace_id}/events", "payload_requests_before_explicit_click": 0, "pages": 1, "event_count": 156, "revision": 613, "integrity": "valid"},
+  "recovery_edges": 0,
+  "negative_degradation_cases": {"not_found": "not_executed", "cursor_stale": "not_executed", "limit": "not_executed"},
+  "raw_payload_archived": false
+}

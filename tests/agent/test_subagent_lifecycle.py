@@ -83,6 +83,84 @@ async def test_close_cancels_tasks_before_closing_exec_sessions(tmp_path):
     sm._exec_session_manager.close_all.assert_awaited_once()
 
 
+@pytest.mark.asyncio
+async def test_timeout_records_cooperative_exit(tmp_path):
+    sm = _manager(tmp_path)
+    status = SubagentStatus(
+        task_id="cooperative",
+        label="cooperative",
+        task_description="",
+        started_at=time.monotonic(),
+    )
+
+    async def cooperative() -> None:
+        await asyncio.Event().wait()
+
+    task = asyncio.create_task(cooperative())
+    sm._running_tasks[status.task_id] = task
+    sm._task_statuses[status.task_id] = status
+    await asyncio.sleep(0)
+
+    assert await sm.timeout_tasks([status.task_id], grace_seconds=0.1) is True
+    assert task.cancelled()
+
+
+@pytest.mark.asyncio
+async def test_timeout_that_cannot_confirm_exit_is_fail_closed(tmp_path):
+    from nanobot.session.goal_orchestration import GoalOrchestrationStore
+    from nanobot.session.goal_state import GOAL_STATE_KEY
+    from nanobot.session.manager import SessionManager
+
+    sessions = SessionManager(tmp_path)
+    session = sessions.get_or_create("test:c1")
+    session.metadata[GOAL_STATE_KEY] = {"status": "active", "objective": "deliver"}
+    sessions.save(session)
+    store = GoalOrchestrationStore(sessions)
+    await store.register(
+        "test:c1",
+        task_id="stubborn",
+        label="stubborn",
+        group="default",
+        child_run_id="child",
+        spawn_tool_call_id="spawn",
+        owner_run_id="owner",
+    )
+    sm = _manager(tmp_path, goal_orchestration=store)
+    release = asyncio.Event()
+    cancel_seen = asyncio.Event()
+    status = SubagentStatus(
+        task_id="stubborn",
+        label="stubborn",
+        task_description="",
+        started_at=time.monotonic(),
+        session_key="test:c1",
+        required=True,
+        owner_run_id="owner",
+    )
+
+    async def stubborn() -> None:
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            cancel_seen.set()
+            await release.wait()
+
+    task = asyncio.create_task(stubborn())
+    sm._running_tasks[status.task_id] = task
+    sm._task_statuses[status.task_id] = status
+    await asyncio.sleep(0)
+
+    assert await sm.timeout_tasks([status.task_id], grace_seconds=0.01) is False
+    assert cancel_seen.is_set()
+    record = sessions.get_or_create("test:c1").metadata[GOAL_STATE_KEY]["orchestration"]["tasks"]["stubborn"]
+    assert record["status"] == "lost"
+    assert record["termination_state"] == "termination_failed"
+    assert record["termination_evidence"]["exit_observed"] is False
+
+    release.set()
+    await task
+
+
 # ---------------------------------------------------------------------------
 # SubagentStatus defaults
 # ---------------------------------------------------------------------------

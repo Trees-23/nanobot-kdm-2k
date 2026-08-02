@@ -1,7 +1,7 @@
 import { fireEvent, render, screen } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-import { TraceGraph } from "@/components/traces/TraceGraph";
+import { edgeHandles, TraceGraph } from "@/components/traces/TraceGraph";
 import type { AuditGraphResponse } from "@/lib/audit-types";
 
 function graphFixture(): AuditGraphResponse {
@@ -187,5 +187,58 @@ describe("TraceGraph", () => {
     );
 
     expect(await screen.findByText("因果链：2 个节点 / 1 条边")).toBeInTheDocument();
+  });
+
+  it("focuses explicit tool recovery without adding it to causal focus", async () => {
+    const graph = graphFixture();
+    graph.nodes.push({
+      ...graph.nodes[0],
+      id: "tool:recovered",
+      type: "tool_call",
+      label: "Read corrected config",
+      parent_node_id: "run:1",
+      summary: { kind: "tool_call", tool_name: "read_file" },
+      order: 1,
+    });
+    graph.edges.push({
+      id: "tool_recovery:failed:recovered",
+      type: "tool_recovery",
+      source: "run:1",
+      target: "tool:recovered",
+      anchor: { source_event_id: "failed-event", target_event_id: "recovered-event" },
+    });
+    graph.edges.push({
+      id: "sequence:failed:recovered",
+      type: "sequence",
+      source: "run:1",
+      target: "tool:recovered",
+    });
+    const { rerender } = render(
+      <div style={{ width: 900, height: 700 }}>
+        <TraceGraph graph={graph} selectedNodeId="run:1" focusMode="resume" onSelectNode={vi.fn()} onFocusMode={vi.fn()} />
+      </div>,
+    );
+
+    expect(await screen.findByText("恢复链路：2 个节点 / 1 条边")).toBeInTheDocument();
+    const recovery = graph.edges.find((edge) => edge.id === "tool_recovery:failed:recovered")!;
+    const sequence = graph.edges.find((edge) => edge.id === "sequence:failed:recovered")!;
+    expect(edgeHandles(recovery, graph)).toEqual({ sourceHandle: "right-source", targetHandle: "left-target" });
+    expect(edgeHandles(sequence, graph)).toEqual({ sourceHandle: "bottom-source", targetHandle: "top-target" });
+    rerender(
+      <div style={{ width: 900, height: 700 }}>
+        <TraceGraph graph={graph} selectedNodeId="run:1" focusMode="causal" onSelectNode={vi.fn()} onFocusMode={vi.fn()} />
+      </div>,
+    );
+    expect(await screen.findByText("因果链：零命中")).toBeInTheDocument();
+  });
+
+  it("shows an explicit empty state for recovery focus", async () => {
+    render(
+      <div style={{ width: 900, height: 700 }}>
+        <TraceGraph graph={graphFixture()} selectedNodeId="run:1" focusMode="resume" onSelectNode={vi.fn()} onFocusMode={vi.fn()} />
+      </div>,
+    );
+
+    expect(await screen.findByText("恢复链路：0 个节点 / 0 条边")).toBeInTheDocument();
   });
 });

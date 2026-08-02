@@ -13,7 +13,7 @@ from nanobot.agent.tools.schema import (
     StringSchema,
     tool_parameters_schema,
 )
-from nanobot.session.goal_orchestration import obligation_status
+from nanobot.session.goal_orchestration import deadline_remaining_seconds, obligation_status
 
 
 @tool_parameters(
@@ -58,9 +58,10 @@ class AwaitSubagentsTool(Tool):
     @property
     def description(self) -> str:
         return (
-            "Wait once for required subagents in the current Goal. Select exactly one of "
-            "task_ids or task_group. A timeout leaves the Goal active; failed tasks must be "
-            "explicitly replaced or the Goal blocked."
+            "Perform one bounded wait for required subagents owned by the current Goal. Select "
+            "exactly one complete task_ids set or task_group. waiting=true means the barrier is "
+            "still unresolved, not that a task reached a terminal state. A timeout leaves tasks "
+            "and the Goal active; failed tasks must be explicitly replaced or the Goal blocked."
         )
 
     @property
@@ -87,7 +88,19 @@ class AwaitSubagentsTool(Tool):
                 task_group=(task_group or "").strip() or None,
             )
             await self._orchestration.set_phase(request.session_key, "waiting_for_children")
-            await self._manager.wait_for(list(initial), float(timeout_seconds))
+            durable_remaining = [
+                remaining
+                for record in initial.values()
+                if (remaining := deadline_remaining_seconds(record.get("deadline_at"))) is not None
+            ]
+            wait_budget = max(0.0, float(timeout_seconds))
+            if durable_remaining:
+                wait_budget = min(wait_budget, min(durable_remaining))
+            await self._manager.wait_for(list(initial), wait_budget)
+            if durable_remaining and min(durable_remaining) <= 0:
+                timeout_tasks = getattr(self._manager, "timeout_tasks", None)
+                if timeout_tasks is not None:
+                    await timeout_tasks(list(initial))
             records = await self._orchestration.select(
                 request.session_key,
                 task_ids=list(initial),

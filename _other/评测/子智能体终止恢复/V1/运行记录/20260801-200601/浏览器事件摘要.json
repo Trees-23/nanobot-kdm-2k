@@ -1,0 +1,9 @@
+{
+  "viewports": [
+    {"width": 1440, "height": 900, "graph_visible": true, "sequence_edges": 58, "recovery_edges": 0, "initial_selected_nodes": 0, "console_errors": 1, "page_errors": 0, "request_failed": 0},
+    {"width": 390, "height": 844, "graph_visible": true, "sequence_edges": 58, "recovery_edges": 0, "initial_selected_nodes": 0, "console_errors": 1, "page_errors": 0, "request_failed": 0}
+  ],
+  "console_error_summary": "ERR_BLOCKED_BY_RESPONSE.NotSameOrigin",
+  "payload_requests": 0,
+  "screenshots_are_actual_trace_without_recovery_edge": true
+}

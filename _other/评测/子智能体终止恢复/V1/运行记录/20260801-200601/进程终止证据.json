@@ -1,0 +1,14 @@
+{
+  "session_key": "websocket:603d6fa5-3ac7-4f0f-8aa4-2aad9908f802",
+  "trace_id": "019fbede-4719-7c3a-8d44-08acaa200b1f",
+  "executor_backend": "asyncio",
+  "force_kill_available": false,
+  "task_records": [
+    {"task_id": "45b19742", "child_run_id": "019fbede-e98b-71de-8372-d2c0fba07bd5", "label": "cooperative-child", "status": "succeeded", "termination_state": "none"},
+    {"task_id": "094adfca", "child_run_id": "019fbede-ea34-74b2-b436-b59366fdba03", "label": "force-kill-tree", "status": "succeeded", "termination_state": "none"},
+    {"task_id": "0d877b7a", "child_run_id": "019fbede-eaca-79e7-81ec-eee4e706557f", "label": "deadline-restart", "status": "succeeded", "termination_state": "none"},
+    {"task_id": "525d0f88", "child_run_id": "019fbedf-7b6c-7522-bd9e-dacca03445ef", "label": "tool-recovery", "status": "failed", "termination_state": "none"}
+  ],
+  "identity_verified_kill": false,
+  "pid_or_command_line_archived": false
+}

@@ -1,0 +1,17 @@
+{
+  "S01": {"status": "FAIL", "reason": "无可身份校验的 killable executor；仅有 asyncio backend"},
+  "S02": {"status": "FAIL", "reason": "无 TERM/KILL 进程组、root wait/reap 控制入口"},
+  "S03": {"status": "FAIL", "reason": "无正式 kill/reap failure 注入 suite"},
+  "S04": {"status": "FAIL", "reason": "无 optional 强杀失败正式 suite"},
+  "S05": {"status": "FAIL", "reason": "正式真实 restart suite 缺失"},
+  "S06": {"status": "FAIL", "reason": "正式真实 restart/claim suite 缺失"},
+  "S07": {"status": "FAIL", "reason": "正式真实 restart/lost suite 缺失"},
+  "S08": {"status": "FAIL", "reason": "正式 deadline restart suite 缺失"},
+  "S09": {"status": "FAIL", "reason": "正式 durable corruption suite 缺失"},
+  "S10": {"status": "FAIL", "reason": "正式 duplicate result suite 缺失"},
+  "S11": {"status": "FAIL", "reason": "正式 startup recovery idempotency suite 缺失"},
+  "S12": {"status": "FAIL", "reason": "正式 claimed delivery crash suite 缺失"},
+  "S13": {"status": "FAIL", "reason": "正式 PID identity mismatch suite 缺失"},
+  "S14": {"status": "FAIL", "reason": "本场 graph 无 tool_recovery edge；recovery API 未形成真实证据"},
+  "S15": {"status": "FAIL", "reason": "本场无恢复边，无法执行双端点击和 Event 定位"}
+}

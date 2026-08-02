@@ -93,6 +93,8 @@ class AgentRunSpec:
     llm_timeout_s: float | None = None
     goal_active_predicate: Callable[[], bool] | None = None
     goal_continue_message: GoalContinueMessage | None = None
+    completion_guard: Callable[[str | None, str], Any] | None = None
+    completion_guard_active_predicate: Callable[[], bool] | None = None
     finalize_on_max_iterations: bool = True
     audit_context: AuditRunContext | None = None
 
@@ -383,6 +385,37 @@ class AgentRunner:
             inflight_start_index=len(spec.initial_messages),
         )
 
+        async def guard_final(candidate: str | None, reason: str) -> bool:
+            if spec.completion_guard is None:
+                return True
+            try:
+                decision = await spec.completion_guard(candidate, reason)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception(
+                    "Completion guard failed closed for {}", spec.session_key or "default"
+                )
+                return False
+            if not isinstance(decision, dict) or decision.get("allow") is True:
+                return True
+            for message in decision.get("injected_messages") or []:
+                if isinstance(message, dict) and message.get("role") and message.get("content"):
+                    messages.append(
+                        {"role": message["role"], "content": str(message["content"])[:2000]}
+                    )
+            messages.append(
+                {
+                    "role": "user",
+                    "content": (
+                        "Runtime completion barrier is unresolved. Continue the current Run; "
+                        "do not claim completion. Outstanding required task statuses: "
+                        f"{str(decision.get('unresolved') or [])[:1200]}"
+                    ),
+                }
+            )
+            return False
+
         for iteration in range(spec.max_iterations):
             # Keep the persisted conversation untouched. Context governance
             # may repair or compact historical messages for the model, but
@@ -479,6 +512,9 @@ class AgentRunner:
                     error = f"Error: {type(fatal_error).__name__}: {fatal_error}"
                     final_content = error
                     stop_reason = "tool_error"
+                    if not await guard_final(final_content, stop_reason):
+                        await hook.after_iteration(context)
+                        continue
                     self._append_final_message(messages, final_content)
                     context.final_content = final_content
                     context.error = error
@@ -647,6 +683,9 @@ class AgentRunner:
                 stop_reason = "error"
                 error = final_content
                 error_kind = response.error_kind
+                if not await guard_final(final_content, stop_reason):
+                    await hook.after_iteration(context)
+                    continue
                 self._append_model_error_placeholder(messages)
                 context.final_content = final_content
                 context.error = error
@@ -664,6 +703,9 @@ class AgentRunner:
                 final_content = EMPTY_FINAL_RESPONSE_MESSAGE
                 stop_reason = "empty_final_response"
                 error = final_content
+                if not await guard_final(final_content, stop_reason):
+                    await hook.after_iteration(context)
+                    continue
                 self._append_final_message(messages, final_content)
                 context.final_content = final_content
                 context.error = error
@@ -677,6 +719,10 @@ class AgentRunner:
                     had_injections = True
                     continue
                 break
+
+            if not await guard_final(clean, stop_reason):
+                await hook.after_iteration(context)
+                continue
 
             messages.append(assistant_message or build_assistant_message(
                 clean,
@@ -736,7 +782,11 @@ class AgentRunner:
                 )
             if final_content is None:
                 final_content = self._max_iterations_fallback(spec)
-            self._append_final_message(messages, final_content)
+            if await guard_final(final_content, stop_reason):
+                self._append_final_message(messages, final_content)
+            else:
+                final_content = None
+                stop_reason = "completion_blocked"
 
         return AgentRunResult(
             final_content=final_content,
@@ -810,7 +860,13 @@ class AgentRunner:
         )
         if context.provider_attempt_observer is not None:
             kwargs["attempt_observer"] = context.provider_attempt_observer
-        wants_streaming = hook.wants_streaming()
+        # A guarded Run cannot expose irreversible final tokens before the
+        # completion decision; the Loop may still emit a post-guard final.
+        guard_active = (
+            spec.completion_guard_active_predicate is not None
+            and spec.completion_guard_active_predicate()
+        )
+        wants_streaming = hook.wants_streaming() and not guard_active
         wants_progress_streaming = (
             not wants_streaming
             and spec.stream_progress_deltas

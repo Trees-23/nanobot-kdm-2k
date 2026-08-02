@@ -11,6 +11,15 @@ describe("provider brand logos", () => {
     ]);
   });
 
+  it("uses a cross-origin favicon proxy before official provider favicons", () => {
+    expect(providerBrand("openai")?.logoUrls[0]).toBe(
+      "https://icons.duckduckgo.com/ip3/openai.com.ico",
+    );
+    expect(providerBrand("openai")?.logoUrls.at(-1)).toBe(
+      "https://openai.com/favicon.ico",
+    );
+  });
+
   it("keeps explicit Google favicon URLs first before trying fallbacks", () => {
     expect(logoFallbackUrls("https://www.google.com/s2/favicons?domain=browserbase.com&sz=64")).toEqual([
       "https://www.google.com/s2/favicons?domain=browserbase.com&sz=64",

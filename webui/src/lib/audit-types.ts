@@ -29,7 +29,8 @@ export type TraceEdgeType =
   | "retry"
   | "parent_run"
   | "resumed_from"
-  | "retry_of";
+  | "retry_of"
+  | "tool_recovery";
 
 export type AuditRunKind = "main" | "child_agent" | "continuation" | "unknown";
 export type AuditLaneSide = "left" | "center" | "right";
@@ -253,6 +254,16 @@ export interface AuditGraphResponse {
   ignored_event_ids: string[];
   integrity: { status: string; error_codes: string[]; warning_codes: string[] };
   index: { revision: number; coverage_complete: boolean; lag_ms: number | null };
+}
+
+export interface AuditGraphEdge {
+  id: string;
+  type: TraceEdgeType;
+  relation?: TraceEdgeType | null;
+  source: string;
+  target: string;
+  anchor?: { source_event_id?: string | null; target_event_id?: string | null } | null;
+  evidence_count?: number | null;
 }
 
 export interface AuditEventItem {

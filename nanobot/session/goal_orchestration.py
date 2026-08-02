@@ -4,20 +4,44 @@ from __future__ import annotations
 
 import asyncio
 from copy import deepcopy
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from typing import Any, Callable
 
 from nanobot.session.goal_state import GOAL_STATE_KEY, goal_state_raw, parse_goal_state
 
-ORCHESTRATION_SCHEMA_VERSION = 1
+ORCHESTRATION_SCHEMA_VERSION = 2
+DEFAULT_JOIN_DEADLINE_SECONDS = 300
 TERMINAL_TASK_STATUSES = frozenset(
     {"succeeded", "failed", "cancelled", "timed_out", "lost"}
 )
 MAX_TASK_ERROR_CHARS = 500
+TERMINATION_STATES = frozenset({
+    "none",
+    "cancel_requested",
+    "grace_waiting",
+    "cooperatively_exited",
+    "force_kill_requested",
+    "force_killed",
+    "termination_failed",
+})
 
 
 def _now() -> str:
-    return datetime.now().astimezone().isoformat()
+    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def deadline_remaining_seconds(deadline_at: str | None, *, now: datetime | None = None) -> float | None:
+    """Return durable UTC deadline remaining time without granting a new budget."""
+    if not deadline_at:
+        return None
+    try:
+        value = datetime.fromisoformat(deadline_at.replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return 0.0
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    current = now or datetime.now(timezone.utc)
+    return max(0.0, (value - current).total_seconds())
 
 
 def orchestration_snapshot(goal: dict[str, Any]) -> dict[str, Any]:
@@ -115,6 +139,7 @@ class GoalOrchestrationStore:
         group: str,
         child_run_id: str | None,
         spawn_tool_call_id: str | None,
+        owner_run_id: str | None = None,
         replaces_task_id: str | None = None,
     ) -> dict[str, Any]:
         def add(_goal: dict[str, Any], orchestration: dict[str, Any]) -> dict[str, Any]:
@@ -139,11 +164,32 @@ class GoalOrchestrationStore:
                 "group": group,
                 "child_run_id": child_run_id,
                 "spawn_tool_call_id": spawn_tool_call_id,
+                "owner_run_id": owner_run_id,
                 "attempt": attempt,
                 "resolved_by_task_id": None,
                 "started_at": _now(),
+                "deadline_at": (
+                    datetime.now(timezone.utc)
+                    + timedelta(seconds=DEFAULT_JOIN_DEADLINE_SECONDS)
+                ).isoformat().replace("+00:00", "Z"),
+                "cancel_requested_at": None,
+                "grace_deadline_at": None,
+                "deadline_expired": False,
+                "termination_state": "none",
+                "termination_evidence": None,
+                "executor": {
+                    "backend": "asyncio",
+                    "executor_id": None,
+                    "process_instance_id": None,
+                },
                 "ended_at": None,
                 "error": None,
+                "result": {
+                    "available": False,
+                    "claimed_at": None,
+                    "claim_owner_run_id": None,
+                    "delivery_phase": "unclaimed",
+                },
             }
             tasks[task_id] = record
             group_record = orchestration["groups"].setdefault(group, {"required_task_ids": []})
@@ -152,6 +198,31 @@ class GoalOrchestrationStore:
             return deepcopy(record)
 
         return await self._mutate(session_key, add)
+
+    async def mark_executor(
+        self,
+        session_key: str,
+        task_id: str,
+        executor: dict[str, Any],
+    ) -> None:
+        """Persist the bounded executor identity used for restart-safe diagnosis."""
+        allowed = {
+            "backend",
+            "executor_id",
+            "process_instance_id",
+            "supervisor_instance_id",
+            "pid",
+            "pgid",
+        }
+        bounded = {key: executor[key] for key in allowed if key in executor}
+
+        def update(_goal: dict[str, Any], orchestration: dict[str, Any]) -> None:
+            record = orchestration["tasks"].get(task_id)
+            if not isinstance(record, dict) or record.get("status") != "running":
+                return
+            record["executor"] = deepcopy(bounded)
+
+        await self._mutate(session_key, update)
 
     async def remove_registration(self, session_key: str, task_id: str) -> None:
         def remove(_goal: dict[str, Any], orchestration: dict[str, Any]) -> None:
@@ -182,9 +253,21 @@ class GoalOrchestrationStore:
             record = orchestration["tasks"].get(task_id)
             if not isinstance(record, dict) or record.get("status") != "running":
                 return
-            record["status"] = status
+            termination_state = str(record.get("termination_state") or "none")
+            if status in {"cancelled", "timed_out"} and termination_state not in {
+                "none", "cooperatively_exited", "force_killed"
+            }:
+                status_to_store = "lost"
+                record["termination_state"] = "termination_failed"
+            else:
+                status_to_store = status
+            record["status"] = status_to_store
             record["ended_at"] = _now()
             record["error"] = (error or "").strip()[:MAX_TASK_ERROR_CHARS] or None
+            if status_to_store in TERMINAL_TASK_STATUSES:
+                result = record.setdefault("result", {})
+                result["available"] = True
+                result.setdefault("delivery_phase", "unclaimed")
 
         await self._mutate(session_key, finish_one)
 
@@ -211,6 +294,8 @@ class GoalOrchestrationStore:
                 for tid, record in tasks.items():
                     if isinstance(record, dict) and record.get("status") == "running" and tid not in running_task_ids:
                         record["status"] = "lost"
+                        record["termination_state"] = "termination_failed"
+                        record["deadline_expired"] = deadline_remaining_seconds(record.get("deadline_at")) == 0
                         record["ended_at"] = _now()
                         record["error"] = "subagent process is absent after runtime recovery"
             if task_group is not None:
@@ -234,3 +319,154 @@ class GoalOrchestrationStore:
             return {tid: deepcopy(tasks[tid]) for tid in selected}
 
         return await self._mutate(session_key, select_records)
+
+    async def select_owner(
+        self,
+        session_key: str,
+        owner_run_id: str,
+    ) -> dict[str, dict[str, Any]]:
+        """Return required obligations created by one Run under the session lock."""
+
+        def select_records(
+            _goal: dict[str, Any], orchestration: dict[str, Any]
+        ) -> dict[str, dict[str, Any]]:
+            selected = {
+                task_id: deepcopy(record)
+                for task_id, record in orchestration["tasks"].items()
+                if isinstance(record, dict)
+                and record.get("required") is True
+                and record.get("owner_run_id") == owner_run_id
+            }
+            pending = list(selected)
+            while pending:
+                replacement = orchestration["tasks"].get(pending.pop())
+                replacement_id = (
+                    replacement.get("resolved_by_task_id")
+                    if isinstance(replacement, dict)
+                    else None
+                )
+                if not isinstance(replacement_id, str) or replacement_id in selected:
+                    continue
+                replacement_record = orchestration["tasks"].get(replacement_id)
+                if isinstance(replacement_record, dict):
+                    selected[replacement_id] = deepcopy(replacement_record)
+                    pending.append(replacement_id)
+            return selected
+
+        return await self._mutate(session_key, select_records)
+
+    async def claim_result(self, session_key: str, task_id: str) -> bool | None:
+        """Atomically claim one child result; ``None`` means legacy/background task."""
+
+        def claim(_goal: dict[str, Any], orchestration: dict[str, Any]) -> bool | None:
+            record = orchestration["tasks"].get(task_id)
+            if not isinstance(record, dict):
+                return None
+            claims = orchestration.setdefault("result_claims", {})
+            existing = claims.get(task_id)
+            if existing is not None:
+                return False
+            claims[task_id] = {
+                "claimed_at": _now(),
+                "claim_owner_run_id": record.get("owner_run_id"),
+                "delivery_phase": "claimed_pending_delivery",
+            }
+            result = record.setdefault("result", {})
+            result.update(claims[task_id])
+            return True
+
+        try:
+            return await self._mutate(session_key, claim)
+        except ValueError:
+            return None
+
+    async def mark_termination(
+        self,
+        session_key: str,
+        task_id: str,
+        termination_state: str,
+        *,
+        evidence: dict[str, Any] | None = None,
+        grace_seconds: float | None = None,
+    ) -> None:
+        if termination_state not in TERMINATION_STATES:
+            raise ValueError(f"invalid termination state: {termination_state}")
+
+        def update(_goal: dict[str, Any], orchestration: dict[str, Any]) -> None:
+            record = orchestration["tasks"].get(task_id)
+            if not isinstance(record, dict) or record.get("status") != "running":
+                return
+            now = _now()
+            record["termination_state"] = termination_state
+            record["termination_evidence"] = deepcopy(evidence) if evidence else None
+            if termination_state == "cancel_requested":
+                record["cancel_requested_at"] = now
+                if grace_seconds is not None:
+                    record["grace_deadline_at"] = (
+                        datetime.now(timezone.utc) + timedelta(seconds=max(0.0, grace_seconds))
+                    ).isoformat().replace("+00:00", "Z")
+            if termination_state in {"cooperatively_exited", "force_killed"}:
+                record["ended_at"] = record.get("ended_at") or now
+            if termination_state == "termination_failed":
+                record["status"] = "lost"
+                record["ended_at"] = record.get("ended_at") or now
+                record["error"] = "child termination could not be confirmed"
+
+        await self._mutate(session_key, update)
+
+    async def mark_delivery(self, session_key: str, task_id: str, phase: str) -> None:
+        if phase not in {"claimed_pending_delivery", "delivered"}:
+            raise ValueError("invalid result delivery phase")
+
+        def update(_goal: dict[str, Any], orchestration: dict[str, Any]) -> None:
+            record = orchestration["tasks"].get(task_id)
+            if not isinstance(record, dict):
+                return
+            result = record.setdefault("result", {})
+            result["delivery_phase"] = phase
+            claim = orchestration.setdefault("result_claims", {}).get(task_id)
+            if isinstance(claim, dict):
+                claim["delivery_phase"] = phase
+
+        await self._mutate(session_key, update)
+
+    async def recover_runtime(self, running_task_ids: set[str] | None = None) -> int:
+        """Fail closed for durable running tasks without a provable live executor."""
+        active = running_task_ids or set()
+        recovered = 0
+        for info in self._sessions.list_sessions():
+            session_key = info.get("key") if isinstance(info, dict) else None
+            if not isinstance(session_key, str) or not session_key:
+                continue
+
+            def recover(_goal: dict[str, Any], orchestration: dict[str, Any]) -> int:
+                changed = 0
+                for task_id, record in orchestration["tasks"].items():
+                    if (
+                        not isinstance(record, dict)
+                        or record.get("status") != "running"
+                        or task_id in active
+                    ):
+                        continue
+                    record["status"] = "lost"
+                    record["termination_state"] = "termination_failed"
+                    executor = record.get("executor")
+                    backend = executor.get("backend") if isinstance(executor, dict) else None
+                    record["termination_evidence"] = {
+                        "backend": str(backend or "asyncio"),
+                        "exit_observed": False,
+                        "executor_present": False,
+                    }
+                    record["deadline_expired"] = (
+                        deadline_remaining_seconds(record.get("deadline_at")) == 0
+                    )
+                    record["ended_at"] = _now()
+                    record["error"] = "subagent executor is absent after runtime recovery"
+                    changed += 1
+                return changed
+
+            try:
+                recovered += await self._mutate(session_key, recover)
+            except ValueError:
+                continue
+        return recovered

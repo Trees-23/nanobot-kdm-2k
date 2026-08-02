@@ -31,6 +31,7 @@ AuditEdgeType = Literal[
     "parent_run",
     "resumed_from",
     "retry_of",
+    "tool_recovery",
 ]
 AuditRunKind = Literal["main", "child_agent", "continuation", "unknown"]
 AuditLaneSide = Literal["left", "center", "right"]
@@ -144,6 +145,7 @@ class AuditGraphEdge(BaseModel):
     target: str
     relation: AuditEdgeType | None = None
     anchor: AuditEdgeAnchor | None = None
+    evidence_count: int | None = None
 
 
 class AuditGraphRegion(BaseModel):

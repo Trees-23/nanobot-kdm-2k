@@ -1,0 +1,14 @@
+{
+  "head": "34c71bba06c252accd61f88eb5a1a18f49b75dac",
+  "image_id": "sha256:d30eaab8fe77f40ba5437e7228e514aa322d0e7c1edcfcf0e02c2765c957a4e9",
+  "index_sha256": {"host":"50e9f10240e0f879a4d96f81001a1291e0e8728a4611be01b49bcc50cefed007", "image":"50e9f10240e0f879a4d96f81001a1291e0e8728a4611be01b49bcc50cefed007", "served_8765":"50e9f10240e0f879a4d96f81001a1291e0e8728a4611be01b49bcc50cefed007"},
+  "main_bundle": "assets/index-BuUmvGLA.js",
+  "channel_webui_tree": true,
+  "npm_modules_transformed": 2940,
+  "pip_check": "No broken requirements found",
+  "health": {"status":"ok"},
+  "paper_sha256": "5d59e98c52e2077bb08e594f79d9943f455199a186e27acaf954e4f17f1f4583",
+  "proctor_prompt_sha256": "4e04860c85c08ae40371fb31bd1cedb3c404ec9ef75f989c26559947f14fda99",
+  "fixture_sha256": {"cooperative_child.py":"7916fbfdbae08cd824253c8c999f9abd420ef5a36a42cbfee8ab247ebba6469b", "stubborn_tree.py":"538f7f53a283933409167ccda0a3e3e4d57fcefeccbf5b5ace928ce7473d79a9", "recovery-target/config.json":"90305dbfb5a452904e6405584ccc1f50b58028d5378c8cbf4f095dd88e62eb53"},
+  "secret_archived": false
+}
