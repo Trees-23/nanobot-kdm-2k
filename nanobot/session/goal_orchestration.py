@@ -177,6 +177,11 @@ class GoalOrchestrationStore:
                 "deadline_expired": False,
                 "termination_state": "none",
                 "termination_evidence": None,
+                "executor": {
+                    "backend": "asyncio",
+                    "executor_id": None,
+                    "process_instance_id": None,
+                },
                 "ended_at": None,
                 "error": None,
                 "result": {
@@ -193,6 +198,31 @@ class GoalOrchestrationStore:
             return deepcopy(record)
 
         return await self._mutate(session_key, add)
+
+    async def mark_executor(
+        self,
+        session_key: str,
+        task_id: str,
+        executor: dict[str, Any],
+    ) -> None:
+        """Persist the bounded executor identity used for restart-safe diagnosis."""
+        allowed = {
+            "backend",
+            "executor_id",
+            "process_instance_id",
+            "supervisor_instance_id",
+            "pid",
+            "pgid",
+        }
+        bounded = {key: executor[key] for key in allowed if key in executor}
+
+        def update(_goal: dict[str, Any], orchestration: dict[str, Any]) -> None:
+            record = orchestration["tasks"].get(task_id)
+            if not isinstance(record, dict) or record.get("status") != "running":
+                return
+            record["executor"] = deepcopy(bounded)
+
+        await self._mutate(session_key, update)
 
     async def remove_registration(self, session_key: str, task_id: str) -> None:
         def remove(_goal: dict[str, Any], orchestration: dict[str, Any]) -> None:

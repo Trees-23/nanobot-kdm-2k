@@ -12,8 +12,9 @@ from typing import Any, Callable
 
 from loguru import logger
 
+from nanobot.agent.child_executor import ChildHandle, ProcessChildExecutor
 from nanobot.agent.hook import AgentHook, AgentHookContext
-from nanobot.agent.runner import AgentRunner, AgentRunSpec
+from nanobot.agent.runner import AgentRunner, AgentRunResult, AgentRunSpec
 from nanobot.agent.tools.context import (
     RequestContext,
     ToolContext,
@@ -111,6 +112,9 @@ class SubagentManager:
         llm_wall_timeout_for_session: Callable[[str | None], float | None] | None = None,
         audit_emitter: Any | None = None,
         goal_orchestration: Any | None = None,
+        child_executor: ProcessChildExecutor | None = None,
+        child_runtime_config: dict[str, Any] | None = None,
+        child_audit_root: str | None = None,
     ):
         if workspace is None:
             raise TypeError("SubagentManager.__init__() missing required argument: 'workspace'")
@@ -161,9 +165,13 @@ class SubagentManager:
         self.runner = AgentRunner(audit_emitter=audit_emitter)
         self._audit_emitter = audit_emitter
         self._goal_orchestration = goal_orchestration
+        self._child_executor = child_executor
+        self._child_runtime_config = child_runtime_config
+        self._child_audit_root = child_audit_root
         self._exec_session_manager = ExecSessionManager()
         self._llm_wall_timeout_for_session = llm_wall_timeout_for_session
         self._running_tasks: dict[str, asyncio.Task[None]] = {}
+        self._executor_handles: dict[str, ChildHandle] = {}
         self._task_statuses: dict[str, SubagentStatus] = {}
         self._session_tasks: dict[str, set[str]] = {}  # session_key -> {task_id, ...}
         self._terminal_statuses: OrderedDict[str, SubagentStatus] = OrderedDict()
@@ -372,6 +380,114 @@ class SubagentManager:
             return result
         return f"Subagent [{display_label}] started (id: {task_id}). I'll notify you when it completes."
 
+    def _uses_process_executor(self) -> bool:
+        return self._child_executor is not None and self._child_runtime_config is not None
+
+    async def _run_process_child(
+        self,
+        *,
+        task_id: str,
+        task: str,
+        label: str,
+        origin: dict[str, Any],
+        status: SubagentStatus,
+        runtime: LLMRuntime,
+        origin_message_id: str | None,
+        workspace_scope: WorkspaceScope | None,
+        audit_context: AuditRunContext | None,
+    ) -> AgentRunResult:
+        executor = self._child_executor
+        if executor is None or self._child_runtime_config is None:
+            raise RuntimeError("process child executor is not configured")
+        root = workspace_scope.project_path if workspace_scope is not None else self.workspace
+        llm_timeout = (
+            self._llm_wall_timeout_for_session(status.session_key)
+            if self._llm_wall_timeout_for_session
+            else None
+        )
+        raw_audit = None
+        if audit_context is not None:
+            raw_audit = {
+                "trace_id": audit_context.trace_id,
+                "turn_id": audit_context.turn_id,
+                "run_id": audit_context.run_id,
+                "parent_run_id": audit_context.parent_run_id,
+                "resumed_from_run_id": audit_context.resumed_from_run_id,
+                "source_type": audit_context.source_type,
+                "source_metadata": audit_context.source_metadata,
+            }
+        handle = await executor.start({
+            "task_id": task_id,
+            "task": task,
+            "label": label,
+            "origin": origin,
+            "origin_message_id": origin_message_id,
+            "workspace": str(root),
+            "restrict_to_workspace": (
+                workspace_scope.restrict_to_workspace
+                if workspace_scope is not None
+                else self.restrict_to_workspace
+            ),
+            "runtime": {
+                "model": runtime.model,
+                "model_preset": runtime.model_preset,
+                "context_window_tokens": runtime.context_window_tokens,
+                "generation": {
+                    "temperature": runtime.generation.temperature,
+                    "max_tokens": runtime.generation.max_tokens,
+                    "reasoning_effort": runtime.generation.reasoning_effort,
+                },
+            },
+            "config": self._child_runtime_config,
+            "audit_root": self._child_audit_root,
+            "audit_context": raw_audit,
+            "disabled_skills": sorted(self.disabled_skills),
+            "max_iterations": self.max_iterations,
+            "max_tool_result_chars": self.max_tool_result_chars,
+            "fail_on_tool_error": self.fail_on_tool_error,
+            "llm_timeout_s": llm_timeout,
+        })
+        self._executor_handles[task_id] = handle
+        status.termination_evidence = {
+            "backend": executor.backend,
+            "executor_id": handle.identity.executor_id,
+            "process_instance_id": handle.identity.process_instance_id,
+            "force_kill_available": executor.force_kill_available,
+        }
+        if status.required and status.session_key and self._goal_orchestration is not None:
+            await self._goal_orchestration.mark_executor(
+                status.session_key,
+                task_id,
+                {
+                    "backend": executor.backend,
+                    "executor_id": handle.identity.executor_id,
+                    "process_instance_id": handle.identity.process_instance_id,
+                    "supervisor_instance_id": handle.identity.supervisor_instance_id,
+                    "pid": handle.identity.pid,
+                    "pgid": handle.identity.pgid,
+                },
+            )
+        try:
+            exited = await executor.wait(handle)
+        finally:
+            self._executor_handles.pop(task_id, None)
+        if exited is None or exited.result is None:
+            if status.termination_state in {"cooperatively_exited", "force_killed"}:
+                raise asyncio.CancelledError
+            raise RuntimeError("child worker exited without a result envelope")
+        raw = exited.result
+        return AgentRunResult(
+            final_content=raw.get("final_content") if isinstance(raw.get("final_content"), str) else None,
+            messages=[],
+            tools_used=list(raw.get("tools_used") or []),
+            usage=dict(raw.get("usage") or {}),
+            stop_reason=str(raw.get("stop_reason") or "error"),
+            error=raw.get("error") if isinstance(raw.get("error"), str) else None,
+            error_kind=raw.get("error_kind") if isinstance(raw.get("error_kind"), str) else None,
+            tool_events=list(raw.get("tool_events") or []),
+            had_injections=bool(raw.get("had_injections")),
+        )
+
     async def _run_subagent(
         self,
         task_id: str,
@@ -415,62 +531,75 @@ class SubagentManager:
             terminal_persisted = True
 
         try:
-            root = workspace_scope.project_path if workspace_scope is not None else self.workspace
-            cfg = None
-            if workspace_scope is not None:
-                cfg = self._subagent_tools_config()
-                cfg.restrict_to_workspace = workspace_scope.restrict_to_workspace
-            tools = self._build_tools(workspace=root, tools_config=cfg)
-            system_prompt = self._build_subagent_prompt(workspace=root)
-            messages: list[dict[str, Any]] = [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": task},
-            ]
-
-            sess_key = origin.get("session_key")
-            llm_timeout = (
-                self._llm_wall_timeout_for_session(sess_key)
-                if self._llm_wall_timeout_for_session
-                else None
-            )
-            request_metadata = {}
-            if audit_context is not None:
-                request_metadata[AUDIT_CONTEXT_META] = {
-                    "trace_id": audit_context.trace_id,
-                    "turn_id": audit_context.turn_id,
-                    "run_id": audit_context.run_id,
-                }
-            request_token = bind_request_context(RequestContext(
-                channel=origin["channel"],
-                chat_id=origin["chat_id"],
-                message_id=origin_message_id,
-                session_key=sess_key,
-                runtime=runtime,
-                metadata=request_metadata,
-            ))
-            token = bind_workspace_scope(workspace_scope) if workspace_scope is not None else None
-            try:
-                result = await self.runner.run(AgentRunSpec(
-                    initial_messages=messages,
-                    tools=tools,
+            if self._uses_process_executor():
+                result = await self._run_process_child(
+                    task_id=task_id,
+                    task=task,
+                    label=label,
+                    origin=origin,
+                    status=status,
                     runtime=runtime,
-                    max_iterations=self.max_iterations,
-                    max_tool_result_chars=self.max_tool_result_chars,
-                    hook=_SubagentHook(task_id, status),
-                    max_iterations_message="Task completed but no final response was generated.",
-                    finalize_on_max_iterations=False,
-                    error_message=None,
-                    fail_on_tool_error=self.fail_on_tool_error,
-                    checkpoint_callback=_on_checkpoint,
-                    session_key=sess_key,
-                    workspace=root,
-                    llm_timeout_s=llm_timeout,
+                    origin_message_id=origin_message_id,
+                    workspace_scope=workspace_scope,
                     audit_context=audit_context,
+                )
+            else:
+                root = workspace_scope.project_path if workspace_scope is not None else self.workspace
+                cfg = None
+                if workspace_scope is not None:
+                    cfg = self._subagent_tools_config()
+                    cfg.restrict_to_workspace = workspace_scope.restrict_to_workspace
+                tools = self._build_tools(workspace=root, tools_config=cfg)
+                system_prompt = self._build_subagent_prompt(workspace=root)
+                messages: list[dict[str, Any]] = [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": task},
+                ]
+
+                sess_key = origin.get("session_key")
+                llm_timeout = (
+                    self._llm_wall_timeout_for_session(sess_key)
+                    if self._llm_wall_timeout_for_session
+                    else None
+                )
+                request_metadata = {}
+                if audit_context is not None:
+                    request_metadata[AUDIT_CONTEXT_META] = {
+                        "trace_id": audit_context.trace_id,
+                        "turn_id": audit_context.turn_id,
+                        "run_id": audit_context.run_id,
+                    }
+                request_token = bind_request_context(RequestContext(
+                    channel=origin["channel"],
+                    chat_id=origin["chat_id"],
+                    message_id=origin_message_id,
+                    session_key=sess_key,
+                    runtime=runtime,
+                    metadata=request_metadata,
                 ))
-            finally:
-                if token is not None:
-                    reset_workspace_scope(token)
-                reset_request_context(request_token)
+                token = bind_workspace_scope(workspace_scope) if workspace_scope is not None else None
+                try:
+                    result = await self.runner.run(AgentRunSpec(
+                        initial_messages=messages,
+                        tools=tools,
+                        runtime=runtime,
+                        max_iterations=self.max_iterations,
+                        max_tool_result_chars=self.max_tool_result_chars,
+                        hook=_SubagentHook(task_id, status),
+                        max_iterations_message="Task completed but no final response was generated.",
+                        finalize_on_max_iterations=False,
+                        error_message=None,
+                        fail_on_tool_error=self.fail_on_tool_error,
+                        checkpoint_callback=_on_checkpoint,
+                        session_key=sess_key,
+                        workspace=root,
+                        llm_timeout_s=llm_timeout,
+                        audit_context=audit_context,
+                    ))
+                finally:
+                    if token is not None:
+                        reset_workspace_scope(token)
+                    reset_request_context(request_token)
             status.phase = "done"
             status.stop_reason = result.stop_reason
 
@@ -518,6 +647,23 @@ class SubagentManager:
                 await self._announce_result(
                     task_id, label, task, terminal_error, origin, "error", origin_message_id
                 )
+            elif result.stop_reason == "cancelled":
+                terminal_status = (
+                    "timed_out" if task_id in self._timeout_task_ids else "cancelled"
+                )
+                if status.termination_state not in {"force_killed", "termination_failed"}:
+                    status.termination_state = "cooperatively_exited"
+                    status.termination_evidence = {
+                        **(status.termination_evidence or {}),
+                        "exit_observed": True,
+                        "reaped": True,
+                    }
+                terminal_error = (
+                    "subagent task exceeded the required-join deadline"
+                    if terminal_status == "timed_out"
+                    else "subagent task was cancelled"
+                )
+                await _persist_terminal()
             else:
                 terminal_error = (
                     f"Subagent stopped with non-success reason {result.stop_reason!r}; "
@@ -532,8 +678,9 @@ class SubagentManager:
                 terminal_status = "lost"
             else:
                 terminal_status = "timed_out" if task_id in self._timeout_task_ids else "cancelled"
-                status.termination_state = "cooperatively_exited"
-                status.termination_evidence = {"backend": "asyncio", "exit_observed": True}
+                if status.termination_state not in {"force_killed", "termination_failed"}:
+                    status.termination_state = "cooperatively_exited"
+                    status.termination_evidence = {"backend": "asyncio", "exit_observed": True}
             terminal_error = (
                 "subagent task exceeded the required-join deadline"
                 if terminal_status == "timed_out"
@@ -655,52 +802,72 @@ class SubagentManager:
         ]
         for task_id in task_ids:
             await self._request_cancellation(task_id, grace_seconds=grace_seconds)
-        tasks = [self._running_tasks[tid] for tid in task_ids]
+        process_task_ids = [task_id for task_id in task_ids if task_id in self._executor_handles]
+        tasks = [self._running_tasks[tid] for tid in task_ids if tid not in self._executor_handles]
         for task in tasks:
             task.cancel()
         pending: set[asyncio.Task[None]] = set()
         if tasks:
             _done, pending = await asyncio.wait(tasks, timeout=max(0.0, grace_seconds))
+        pending_process = await self._wait_or_force_process_tasks(
+            process_task_ids,
+            grace_seconds=grace_seconds,
+        )
         for task_id in task_ids:
             status = self.get_status(task_id)
             if status is None:
                 continue
             task = self._running_tasks.get(task_id)
-            if task is not None and task in pending:
+            if task_id in pending_process or (task is not None and task in pending):
                 await self._mark_termination_failed(task_id)
             else:
-                status.termination_state = "cooperatively_exited"
-                status.termination_evidence = {"backend": "asyncio", "exit_observed": True}
+                if status.termination_state != "force_killed":
+                    status.termination_state = "cooperatively_exited"
+                    status.termination_evidence = {
+                        **(status.termination_evidence or {"backend": "asyncio"}),
+                        "exit_observed": True,
+                        "reaped": True,
+                    }
                 status.terminal_status = "cancelled"
                 status.error = status.error or "subagent task was cancelled"
                 if status.required and self._goal_orchestration is not None:
+                    termination_state = status.termination_state
                     await self._goal_orchestration.mark_termination(
                         session_key,
                         task_id,
-                        "cooperatively_exited",
+                        termination_state,
                         evidence=status.termination_evidence,
                     )
                     await self._goal_orchestration.finish(
                         session_key, task_id, "cancelled", status.error
                     )
         self.clear_terminal_statuses_by_session(session_key)
-        return len(tasks)
+        return len(task_ids)
 
     async def timeout_tasks(self, task_ids: list[str], grace_seconds: float = 2.0) -> bool:
         """Cancel selected children and report whether every task actually exited."""
         active = [
             self._running_tasks[task_id]
             for task_id in task_ids
-            if task_id in self._running_tasks and not self._running_tasks[task_id].done()
+            if (
+                task_id in self._running_tasks
+                and task_id not in self._executor_handles
+                and not self._running_tasks[task_id].done()
+            )
         ]
+        process_task_ids = [task_id for task_id in task_ids if task_id in self._executor_handles]
         self._timeout_task_ids.update(task_ids)
         for task_id in task_ids:
             await self._request_cancellation(task_id, grace_seconds=grace_seconds)
         for task in active:
             task.cancel()
-        if not active:
-            return True
-        _done, pending = await asyncio.wait(active, timeout=max(0.0, grace_seconds))
+        pending: set[asyncio.Task[None]] = set()
+        if active:
+            _done, pending = await asyncio.wait(active, timeout=max(0.0, grace_seconds))
+        pending_process = await self._wait_or_force_process_tasks(
+            process_task_ids,
+            grace_seconds=grace_seconds,
+        )
         if pending:
             pending_ids = [
                 task_id for task_id in task_ids
@@ -708,17 +875,26 @@ class SubagentManager:
             ]
             for task_id in pending_ids:
                 await self._mark_termination_failed(task_id)
+        if pending_process:
+            for task_id in pending_process:
+                await self._mark_termination_failed(task_id)
+        if pending or pending_process:
             return False
         for task_id in task_ids:
             status = self._task_statuses.get(task_id)
             if status is not None:
-                status.termination_state = "cooperatively_exited"
-                status.termination_evidence = {"backend": "asyncio", "exit_observed": True}
+                if status.termination_state != "force_killed":
+                    status.termination_state = "cooperatively_exited"
+                    status.termination_evidence = {
+                        **(status.termination_evidence or {"backend": "asyncio"}),
+                        "exit_observed": True,
+                        "reaped": True,
+                    }
                 if status.required and status.session_key and self._goal_orchestration is not None:
                     await self._goal_orchestration.mark_termination(
                         status.session_key,
                         task_id,
-                        "cooperatively_exited",
+                        status.termination_state,
                         evidence=status.termination_evidence,
                     )
                     await self._goal_orchestration.finish(
@@ -727,7 +903,63 @@ class SubagentManager:
                         "timed_out",
                         "subagent task exceeded the required-join deadline",
                     )
-        return all(task.done() for task in active)
+        return all(task.done() for task in active) and not pending_process
+
+    async def _wait_or_force_process_tasks(
+        self,
+        task_ids: list[str],
+        *,
+        grace_seconds: float,
+    ) -> set[str]:
+        """Escalate only owned workers whose cooperative exit was not observed."""
+        executor = self._child_executor
+        if executor is None:
+            return set(task_ids)
+        pending: set[str] = set()
+        for task_id in task_ids:
+            handle = self._executor_handles.get(task_id)
+            if handle is None:
+                continue
+            exited = await executor.wait(handle, grace_seconds)
+            if exited is not None:
+                continue
+            status = self._task_statuses.get(task_id)
+            if status is not None:
+                status.termination_state = "force_kill_requested"
+                status.termination_evidence = {
+                    **(status.termination_evidence or {}),
+                    "force_kill_requested": True,
+                }
+                if status.required and status.session_key and self._goal_orchestration is not None:
+                    await self._goal_orchestration.mark_termination(
+                        status.session_key,
+                        task_id,
+                        "force_kill_requested",
+                        evidence=status.termination_evidence,
+                    )
+            forced = await executor.force_kill(handle)
+            if forced.termination_confirmed:
+                if status is not None:
+                    status.termination_state = "force_killed"
+                    status.termination_evidence = {
+                        **(status.termination_evidence or {}),
+                        "exit_observed": forced.exit_observed,
+                        "reaped": forced.reaped,
+                        "descendants_cleared": forced.descendants_cleared,
+                    }
+                    if status.required and status.session_key and self._goal_orchestration is not None:
+                        await self._goal_orchestration.mark_termination(
+                            status.session_key,
+                            task_id,
+                            "force_killed",
+                            evidence=status.termination_evidence,
+                        )
+                parent_task = self._running_tasks.get(task_id)
+                if parent_task is not None:
+                    await asyncio.wait({parent_task}, timeout=1.0)
+            else:
+                pending.add(task_id)
+        return pending
 
     async def _request_cancellation(self, task_id: str, *, grace_seconds: float) -> None:
         status = self._task_statuses.get(task_id)
@@ -735,7 +967,10 @@ class SubagentManager:
             return
         status.termination_state = "cancel_requested"
         status.cancel_requested_at = time.monotonic()
-        status.termination_evidence = {"backend": "asyncio", "request_sent": True}
+        status.termination_evidence = {
+            **(status.termination_evidence or {"backend": "asyncio"}),
+            "request_sent": True,
+        }
         if status.required and status.session_key and self._goal_orchestration is not None:
             await self._goal_orchestration.mark_termination(
                 status.session_key,
@@ -750,6 +985,9 @@ class SubagentManager:
                 "grace_waiting",
                 evidence=status.termination_evidence,
             )
+        handle = self._executor_handles.get(task_id)
+        if handle is not None and self._child_executor is not None:
+            await self._child_executor.request_cancel(handle)
 
     async def _mark_termination_failed(self, task_id: str) -> None:
         self._termination_failed_ids.add(task_id)
@@ -758,9 +996,11 @@ class SubagentManager:
             return
         status.termination_state = "termination_failed"
         status.termination_evidence = {
-            "backend": "asyncio",
+            **(status.termination_evidence or {"backend": "asyncio"}),
             "exit_observed": False,
-            "force_kill_available": False,
+            "force_kill_available": bool(
+                self._child_executor is not None and self._child_executor.force_kill_available
+            ),
         }
         status.terminal_status = "lost"
         status.error = "child termination could not be confirmed"
@@ -774,12 +1014,19 @@ class SubagentManager:
 
     async def close(self) -> None:
         """Cancel running subagents and close their shared exec sessions."""
-        tasks = [task for task in self._running_tasks.values() if not task.done()]
+        process_task_ids = list(self._executor_handles)
+        await self._wait_or_force_process_tasks(process_task_ids, grace_seconds=0.1)
+        tasks = [
+            task for task_id, task in self._running_tasks.items()
+            if task_id not in self._executor_handles and not task.done()
+        ]
         for task in tasks:
             task.cancel()
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
         self._terminal_statuses.clear()
+        if self._child_executor is not None:
+            await self._child_executor.close()
         await self._exec_session_manager.close_all()
 
     def get_running_count(self) -> int:

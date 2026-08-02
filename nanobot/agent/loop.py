@@ -286,6 +286,9 @@ class AgentLoop:
         model: str | None = None,
         max_iterations: int | None = None,
         max_concurrent_subagents: int | None = None,
+        child_executor_backend: str = "asyncio",
+        child_runtime_config: dict[str, Any] | None = None,
+        child_audit_root: str | None = None,
         context_window_tokens: int | None = None,
         context_block_limit: int | None = None,
         max_tool_result_chars: int | None = None,
@@ -398,6 +401,13 @@ class AgentLoop:
         self._file_state_store = FileStateStore()
         self._exec_session_manager = ExecSessionManager()
         self.runner = AgentRunner(audit_emitter=self.audit_runtime.emitter)
+        child_executor = None
+        if child_runtime_config is not None and child_executor_backend != "asyncio":
+            from nanobot.agent.child_executor import ProcessChildExecutor
+
+            candidate = ProcessChildExecutor()
+            if candidate.force_kill_available:
+                child_executor = candidate
         self.subagents = SubagentManager(
             workspace=workspace,
             bus=bus,
@@ -411,6 +421,9 @@ class AgentLoop:
             llm_wall_timeout_for_session=lambda sk: runner_wall_llm_timeout_s(self.sessions, sk),
             audit_emitter=self.audit_runtime.emitter,
             goal_orchestration=self.goal_orchestration,
+            child_executor=child_executor,
+            child_runtime_config=child_runtime_config,
+            child_audit_root=child_audit_root,
         )
         self._unified_session = unified_session
         self._running = False
@@ -503,6 +516,17 @@ class AgentLoop:
                 config.audit,
                 root=get_audit_dir(config.audit.path),
             )
+        from nanobot.agent.child_worker import build_child_config_snapshot
+        from nanobot.config.paths import get_audit_dir
+
+        child_runtime_config = extra.pop(
+            "child_runtime_config",
+            build_child_config_snapshot(config),
+        )
+        child_audit_root = extra.pop(
+            "child_audit_root",
+            str(get_audit_dir(config.audit.path)),
+        )
         return cls(
             bus=bus,
             provider=provider,
@@ -510,6 +534,9 @@ class AgentLoop:
             model=model,
             max_iterations=defaults.max_tool_iterations,
             max_concurrent_subagents=defaults.max_concurrent_subagents,
+            child_executor_backend=defaults.subagent_executor_backend,
+            child_runtime_config=child_runtime_config,
+            child_audit_root=child_audit_root,
             context_window_tokens=context_window_tokens,
             context_block_limit=defaults.context_block_limit,
             max_tool_result_chars=defaults.max_tool_result_chars,
