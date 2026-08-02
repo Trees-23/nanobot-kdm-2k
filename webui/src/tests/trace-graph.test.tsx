@@ -189,7 +189,7 @@ describe("TraceGraph", () => {
     expect(await screen.findByText("因果链：2 个节点 / 1 条边")).toBeInTheDocument();
   });
 
-  it("focuses explicit tool recovery without adding it to causal focus", async () => {
+  it("focuses explicit tool relations without adding them to causal focus", async () => {
     const graph = graphFixture();
     graph.nodes.push({
       ...graph.nodes[0],
@@ -208,6 +208,20 @@ describe("TraceGraph", () => {
       anchor: { source_event_id: "failed-event", target_event_id: "recovered-event" },
     });
     graph.edges.push({
+      id: "tool_retry:failed:recovered",
+      type: "tool_retry",
+      source: "run:1",
+      target: "tool:recovered",
+      anchor: { source_event_id: "failed-event", target_event_id: "retry-event" },
+    });
+    graph.edges.push({
+      id: "tool_continuation:failed:recovered",
+      type: "tool_continuation",
+      source: "run:1",
+      target: "tool:recovered",
+      anchor: { source_event_id: "failed-event", target_event_id: "continued-event" },
+    });
+    graph.edges.push({
       id: "sequence:failed:recovered",
       type: "sequence",
       source: "run:1",
@@ -219,7 +233,7 @@ describe("TraceGraph", () => {
       </div>,
     );
 
-    expect(await screen.findByText("恢复链路：2 个节点 / 1 条边")).toBeInTheDocument();
+    expect(await screen.findByText("恢复链路：2 个节点 / 3 条边")).toBeInTheDocument();
     const recovery = graph.edges.find((edge) => edge.id === "tool_recovery:failed:recovered")!;
     const sequence = graph.edges.find((edge) => edge.id === "sequence:failed:recovered")!;
     expect(edgeHandles(recovery, graph)).toEqual({ sourceHandle: "right-source", targetHandle: "left-target" });

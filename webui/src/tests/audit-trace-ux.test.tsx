@@ -151,6 +151,9 @@ describe("audit trace UX", () => {
         error_type: "TimeoutError",
         error_code: "web_search_timeout",
         error_summary: "DuckDuckGo search timed out after 30s",
+        error_message: "Error: DuckDuckGo search timed out after 30s; request id omitted",
+        error_source: "timeout",
+        retryability: "retryable",
         effective_timeout_ms: 30_000,
         safe_input_summary: "query omitted; provider=duckduckgo",
         impact: "run_failed",
@@ -171,7 +174,11 @@ describe("audit trace UX", () => {
     );
 
     expect(screen.getByText("根因")).toBeInTheDocument();
-    expect(screen.getByText("DuckDuckGo search timed out after 30s")).toBeInTheDocument();
+    expect(screen.getByText("Error: DuckDuckGo search timed out after 30s; request id omitted")).toBeInTheDocument();
+    expect(screen.getByText("错误来源")).toBeInTheDocument();
+    expect(screen.getByText("timeout")).toBeInTheDocument();
+    expect(screen.getByText("可重试性")).toBeInTheDocument();
+    expect(screen.getByText("retryable")).toBeInTheDocument();
     expect(screen.getByText(/导致 Run 失败/)).toBeInTheDocument();
     expect(screen.queryByText("Provider")).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "查看 Payload" }));

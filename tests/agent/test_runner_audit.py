@@ -2,6 +2,8 @@ import asyncio
 import json
 from unittest.mock import AsyncMock, MagicMock
 
+import pytest
+
 from nanobot.agent.runner import AgentRunner
 from nanobot.agent.tools.await_subagents import AwaitSubagentsTool
 from nanobot.agent.tools.base import ToolResult
@@ -10,6 +12,8 @@ from nanobot.agent.tools.filesystem import ListDirTool, ReadFileTool
 from nanobot.agent.tools.registry import ToolRegistry
 from nanobot.agent.tools.spawn import SpawnTool
 from nanobot.audit.context import AuditRunContext, set_run_cause
+from nanobot.audit.emitter import AuditEmitter
+from nanobot.audit.redaction import AuditRedactor
 from nanobot.providers.base import LLMProvider, LLMResponse, ToolCallRequest
 from nanobot.session.goal_orchestration import GoalOrchestrationStore
 from nanobot.session.goal_state import GOAL_STATE_KEY
@@ -221,6 +225,56 @@ async def test_list_dir_error_keeps_safe_diagnostics_without_payload_dependency(
     assert terminal.error_code == "tool_error"
     assert terminal.error_source == "tool_result"
     assert terminal.retryability == "unknown"
+
+
+@pytest.mark.parametrize(
+    ("mode", "expects_output_payload"),
+    [("metadata_only", False), ("full", True)],
+)
+async def test_list_dir_diagnostics_respect_payload_mode(
+    tmp_path,
+    mode: str,
+    expects_output_payload: bool,
+) -> None:
+    provider = MagicMock(spec=LLMProvider)
+    provider.chat_with_retry = AsyncMock(
+        side_effect=[
+            LLMResponse(
+                content="",
+                tool_calls=[ToolCallRequest(
+                    id="missing-directory",
+                    name="list_dir",
+                    arguments={"path": "missing"},
+                )],
+                finish_reason="tool_calls",
+            ),
+            LLMResponse(content="continued"),
+        ]
+    )
+    registry = ToolRegistry()
+    registry.register(ListDirTool(workspace=tmp_path, allowed_dir=tmp_path))
+    writer = AsyncMock()
+    emitter = AuditEmitter(writer=writer, redactor=AuditRedactor(), mode=mode)
+
+    await AgentRunner(audit_emitter=emitter).run(
+        make_run_spec(
+            provider,
+            initial_messages=[],
+            tools=registry,
+            model="test-model",
+            max_iterations=2,
+            max_tool_result_chars=10_000,
+            audit_context=AuditRunContext("trace", "turn", "run"),
+        )
+    )
+
+    items = [call.args[0] for call in writer.submit.await_args_list]
+    terminal = next(item for item in items if item.event.event_type == "tool_finished")
+    assert terminal.event.error_message == "Error: Directory not found: missing"
+    assert terminal.event.error_source == "tool_result"
+    assert (terminal.payload is not None) is expects_output_payload
+    if mode == "metadata_only":
+        assert all(item.payload is None for item in items)
 
 
 async def test_prepare_validation_error_uses_complete_failure_contract() -> None:

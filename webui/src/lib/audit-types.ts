@@ -30,6 +30,8 @@ export type TraceEdgeType =
   | "parent_run"
   | "resumed_from"
   | "retry_of"
+  | "tool_retry"
+  | "tool_continuation"
   | "tool_recovery";
 
 export type AuditRunKind = "main" | "child_agent" | "continuation" | "unknown";
@@ -127,12 +129,17 @@ export interface AuditNodeSummary {
   error_type?: string | null;
   error_code?: string | null;
   error_summary?: string | null;
+  error_message?: string | null;
+  error_source?: string | null;
+  retryability?: string | null;
+  operation_evidence_kind?: string | null;
   failed_event_id?: string | null;
   effective_timeout_ms?: number | null;
   safe_input_summary?: string | null;
   impact?: "run_failed" | "run_continued" | "unknown" | "pending" | null;
-  recovery_status?: "recovered" | "unrecovered" | "continued" | "unknown" | "pending" | null;
+  recovery_status?: "recovered" | "unrecovered" | "continued" | "unresolved" | "pending" | null;
   recovered_by_event_id?: string | null;
+  recovery_evidence_kind?: string | null;
   evidence_source?: "recorded" | "legacy_inferred" | "unknown" | null;
   fatal_event_id?: string | null;
   failure_policy?: string | null;
@@ -230,6 +237,7 @@ export interface AuditGraphResponse {
     source: string;
     target: string;
     anchor?: { source_event_id?: string | null; target_event_id?: string | null } | null;
+    evidence_kind?: string | null;
   }>;
   first_anomaly: {
     node_id: string;
@@ -264,6 +272,7 @@ export interface AuditGraphEdge {
   target: string;
   anchor?: { source_event_id?: string | null; target_event_id?: string | null } | null;
   evidence_count?: number | null;
+  evidence_kind?: string | null;
 }
 
 export interface AuditEventItem {

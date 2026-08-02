@@ -16,7 +16,12 @@ import { useAuditSessions } from "@/hooks/useAuditSessions";
 import { useAuditTimeline } from "@/hooks/useAuditTimeline";
 import { useMediaQuery } from "@/hooks/useMediaQuery";
 import { AuditApiError, fetchAuditPayload } from "@/lib/audit-api";
-import type { AuditGraphEdge, AuditPayloadResponse, AuditTraceListItem } from "@/lib/audit-types";
+import type {
+  AuditGraphEdge,
+  AuditPayloadResponse,
+  AuditTraceListItem,
+  TraceEdgeType,
+} from "@/lib/audit-types";
 import { cn } from "@/lib/utils";
 
 export interface TraceSelection {
@@ -33,6 +38,12 @@ export const EMPTY_TRACE_SELECTION: TraceSelection = {
   runId: null,
   nodeId: null,
   eventId: null,
+};
+
+const TOOL_RELATION_LABELS: Partial<Record<TraceEdgeType, string>> = {
+  tool_retry: "Tool 重试关系",
+  tool_continuation: "Tool 继续关系",
+  tool_recovery: "Tool 恢复关系",
 };
 
 export function TraceWorkbench({
@@ -283,19 +294,20 @@ export function TraceWorkbench({
                   {selectedEdge ? (
                     <aside className="absolute right-3 top-12 z-10 w-[min(360px,calc(100%-24px))] rounded-md border border-border/70 bg-background/95 p-3 text-xs shadow-lg" aria-label="恢复关系检查器">
                       <div className="flex items-center justify-between gap-2">
-                        <h2 className="font-semibold">{selectedEdge.type === "tool_recovery" ? "Tool 恢复关系" : "关系检查器"}</h2>
+                        <h2 className="font-semibold">{TOOL_RELATION_LABELS[selectedEdge.type] ?? "关系检查器"}</h2>
                         <Button type="button" variant="ghost" size="icon" className="h-7 w-7" aria-label="关闭关系检查器" title="关闭关系检查器" onClick={() => setSelectedEdge(null)}><X className="h-3.5 w-3.5" /></Button>
                       </div>
                       <dl className="mt-2 divide-y divide-border/45">
                         <div className="grid grid-cols-[72px_minmax(0,1fr)] gap-2 py-1.5"><dt className="text-muted-foreground">失败端</dt><dd className="min-w-0 truncate">{edgeSource?.label ?? "节点未找到"} · {edgeSource?.status ?? "unknown"}</dd></div>
-                        <div className="grid grid-cols-[72px_minmax(0,1fr)] gap-2 py-1.5"><dt className="text-muted-foreground">恢复端</dt><dd className="min-w-0 truncate">{edgeTarget?.label ?? "节点未找到"} · {edgeTarget?.status ?? "unknown"}</dd></div>
+                        <div className="grid grid-cols-[72px_minmax(0,1fr)] gap-2 py-1.5"><dt className="text-muted-foreground">后续端</dt><dd className="min-w-0 truncate">{edgeTarget?.label ?? "节点未找到"} · {edgeTarget?.status ?? "unknown"}</dd></div>
                         <div className="grid grid-cols-[72px_minmax(0,1fr)] gap-2 py-1.5"><dt className="text-muted-foreground">失败 Event</dt><dd className="min-w-0 break-all font-mono text-[10px]">{selectedEdge.anchor?.source_event_id ?? "不可用"}</dd></div>
-                        <div className="grid grid-cols-[72px_minmax(0,1fr)] gap-2 py-1.5"><dt className="text-muted-foreground">恢复 Event</dt><dd className="min-w-0 break-all font-mono text-[10px]">{selectedEdge.anchor?.target_event_id ?? "不可用"}</dd></div>
+                        <div className="grid grid-cols-[72px_minmax(0,1fr)] gap-2 py-1.5"><dt className="text-muted-foreground">后续 Event</dt><dd className="min-w-0 break-all font-mono text-[10px]">{selectedEdge.anchor?.target_event_id ?? "不可用"}</dd></div>
+                        <div className="grid grid-cols-[72px_minmax(0,1fr)] gap-2 py-1.5"><dt className="text-muted-foreground">证据类型</dt><dd className="min-w-0 break-words">{selectedEdge.evidence_kind ?? "未记录"}</dd></div>
                         <div className="grid grid-cols-[72px_minmax(0,1fr)] gap-2 py-1.5"><dt className="text-muted-foreground">证据计数</dt><dd>{selectedEdge.evidence_count ?? 0}</dd></div>
                       </dl>
                       <div className="mt-2 grid gap-1.5">
                         {selectedEdge.anchor?.source_event_id ? <Button type="button" variant="outline" size="sm" className="h-7 justify-start text-[11px]" onClick={() => void locateEvent(selectedEdge.anchor!.source_event_id!)}>定位失败端 Event {selectedEdge.anchor.source_event_id.slice(0, 12)}</Button> : <p className="text-[10.5px] text-muted-foreground">失败端 Event 不可定位</p>}
-                        {selectedEdge.anchor?.target_event_id ? <Button type="button" variant="outline" size="sm" className="h-7 justify-start text-[11px]" onClick={() => void locateEvent(selectedEdge.anchor!.target_event_id!)}>定位恢复端 Event {selectedEdge.anchor.target_event_id.slice(0, 12)}</Button> : <p className="text-[10.5px] text-muted-foreground">恢复端 Event 不可定位</p>}
+                        {selectedEdge.anchor?.target_event_id ? <Button type="button" variant="outline" size="sm" className="h-7 justify-start text-[11px]" onClick={() => void locateEvent(selectedEdge.anchor!.target_event_id!)}>定位后续端 Event {selectedEdge.anchor.target_event_id.slice(0, 12)}</Button> : <p className="text-[10.5px] text-muted-foreground">后续端 Event 不可定位</p>}
                       </div>
                     </aside>
                   ) : null}

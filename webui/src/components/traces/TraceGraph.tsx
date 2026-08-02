@@ -65,6 +65,8 @@ function AuditEdge(props: EdgeProps) {
     parent_run: { stroke: "hsl(var(--foreground) / .55)", width: 1.4 },
     resumed_from: { stroke: "#3b82f6", dash: "6 4", width: 1.5 },
     retry_of: { stroke: "#d97706", dash: "3 3", width: 1.5 },
+    tool_retry: { stroke: "#ca8a04", dash: "3 3", width: 1.7 },
+    tool_continuation: { stroke: "#2563eb", dash: "7 4", width: 1.7 },
     tool_recovery: { stroke: "#0891b2", dash: "2 5", width: 2 },
   };
   const style = styles[type ?? "sequence"];
@@ -93,10 +95,10 @@ export function edgeHandles(edge: AuditGraphEdge, graph: AuditGraphResponse) {
   return {
     sourceHandle: edge.type === "spawn_branch"
       ? (graph.nodes.find((node) => node.id === edge.target)?.lane_side === "left" ? "left-source" : "right-source")
-      : edge.type === "tool_recovery" ? sideSource : "bottom-source",
+      : edge.type.startsWith("tool_") ? sideSource : "bottom-source",
     targetHandle: edge.type === "result_return"
       ? oppositeTarget
-      : edge.type === "tool_recovery" ? oppositeTarget : "top-target",
+      : edge.type.startsWith("tool_") ? oppositeTarget : "top-target",
   };
 }
 
@@ -115,7 +117,7 @@ function relatedIds(
     causal: ["caused_by", "retry", "retry_of"],
     context: ["sequence"],
     branch: ["spawn_branch", "parent_run"],
-    resume: ["result_return", "resumed_from", "tool_recovery"],
+    resume: ["result_return", "resumed_from", "tool_retry", "tool_continuation", "tool_recovery"],
   };
   const result = new Set([selectedId]);
   const edgeIds = new Set<string>();
@@ -373,7 +375,7 @@ export function TraceGraph({
       type: "audit",
       data: { auditType: edge.relation ?? edge.type },
       markerEnd: { type: MarkerType.ArrowClosed, width: 12, height: 12 },
-      zIndex: ["caused_by", "spawn_branch", "result_return", "tool_recovery"].includes(edge.type) ? 3 : 1,
+      zIndex: ["caused_by", "spawn_branch", "result_return", "tool_retry", "tool_continuation", "tool_recovery"].includes(edge.type) ? 3 : 1,
       style: highlighted.size > 0 && !focusResult.edgeIds.has(edge.id)
         ? { opacity: 0.16 }
         : undefined,

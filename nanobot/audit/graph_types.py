@@ -31,6 +31,8 @@ AuditEdgeType = Literal[
     "parent_run",
     "resumed_from",
     "retry_of",
+    "tool_retry",
+    "tool_continuation",
     "tool_recovery",
 ]
 AuditRunKind = Literal["main", "child_agent", "continuation", "unknown"]
@@ -67,12 +69,17 @@ class AuditNodeSummary(BaseModel):
     error_type: str | None = None
     error_code: str | None = None
     error_summary: str | None = None
+    error_message: str | None = None
+    error_source: str | None = None
+    retryability: str | None = None
+    operation_evidence_kind: str | None = None
     failed_event_id: str | None = None
     effective_timeout_ms: int | None = None
     safe_input_summary: str | None = None
     impact: Literal["run_failed", "run_continued", "unknown", "pending"] | None = None
-    recovery_status: Literal["recovered", "unrecovered", "continued", "unknown", "pending"] | None = None
+    recovery_status: Literal["recovered", "unrecovered", "continued", "unresolved", "pending"] | None = None
     recovered_by_event_id: str | None = None
+    recovery_evidence_kind: str | None = None
     evidence_source: Literal["recorded", "legacy_inferred", "unknown"] | None = None
     fatal_event_id: str | None = None
     failure_policy: str | None = None
@@ -146,6 +153,7 @@ class AuditGraphEdge(BaseModel):
     relation: AuditEdgeType | None = None
     anchor: AuditEdgeAnchor | None = None
     evidence_count: int | None = None
+    evidence_kind: str | None = None
 
 
 class AuditGraphRegion(BaseModel):
