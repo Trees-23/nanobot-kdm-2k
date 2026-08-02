@@ -1,0 +1,9 @@
+{
+  "schema_version": 1,
+  "source": "试卷.md#发送给被测-Agent-的唯一输入",
+  "prompt": {
+    "chars": 861,
+    "utf8_bytes": 1429,
+    "sha256": "96b1648f938d84fc0256303767d343633dfbc8025e91f04b9e071e3f10b27629"
+  }
+}
