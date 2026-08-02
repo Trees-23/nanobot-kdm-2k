@@ -118,26 +118,36 @@ class ProcessChildExecutor:
             start_new_session=True,
             env=self._child_environment(),
         )
-        pid = process.pid
-        identity = ChildProcessIdentity(
-            executor_id=executor_id,
-            process_instance_id=process_instance_id,
-            supervisor_instance_id=self.supervisor_instance_id,
-            pid=pid,
-            pgid=os.getpgid(pid),
-            proc_start_ticks=self._proc_start_ticks(pid),
-        )
-        exit_future: asyncio.Future[ChildExit] = asyncio.get_running_loop().create_future()
-        handle = ChildHandle(
-            identity=identity,
-            process=process,
-            exit_future=exit_future,
-            reader_task=None,  # type: ignore[arg-type]
-        )
-        handle.reader_task = asyncio.create_task(self._read_worker(handle))
-        self._handles[executor_id] = handle
-        await self._write(handle, envelope)
-        return handle
+        handle: ChildHandle | None = None
+        try:
+            pid = process.pid
+            identity = ChildProcessIdentity(
+                executor_id=executor_id,
+                process_instance_id=process_instance_id,
+                supervisor_instance_id=self.supervisor_instance_id,
+                pid=pid,
+                pgid=os.getpgid(pid),
+                proc_start_ticks=self._proc_start_ticks(pid),
+            )
+            exit_future: asyncio.Future[ChildExit] = asyncio.get_running_loop().create_future()
+            handle = ChildHandle(
+                identity=identity,
+                process=process,
+                exit_future=exit_future,
+                reader_task=None,  # type: ignore[arg-type]
+            )
+            handle.reader_task = asyncio.create_task(self._read_worker(handle))
+            self._handles[executor_id] = handle
+            await self._write(handle, envelope)
+            return handle
+        except BaseException:
+            if handle is not None:
+                await self.force_kill(handle)
+                await asyncio.gather(handle.reader_task, return_exceptions=True)
+            else:
+                self._signal_group(process.pid, signal.SIGKILL)
+                await process.wait()
+            raise
 
     async def request_cancel(self, handle: ChildHandle) -> None:
         """Request cooperative cancellation without claiming the worker exited."""

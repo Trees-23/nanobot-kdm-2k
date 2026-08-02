@@ -83,6 +83,31 @@ async def test_oversized_start_frame_is_rejected_before_process_creation(monkeyp
 
 
 @pytest.mark.asyncio
+async def test_start_write_failure_kills_and_reaps_created_worker(monkeypatch) -> None:
+    executor = _executor()
+    created: list[asyncio.subprocess.Process] = []
+    create_process = asyncio.create_subprocess_exec
+
+    async def capture_process(*args, **kwargs):
+        process = await create_process(*args, **kwargs)
+        created.append(process)
+        return process
+
+    async def fail_write(*_args, **_kwargs):
+        raise BrokenPipeError("injected start write failure")
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", capture_process)
+    monkeypatch.setattr(executor, "_write", fail_write)
+
+    with pytest.raises(BrokenPipeError, match="injected"):
+        await executor.start({"behavior": "stubborn"})
+
+    assert len(created) == 1
+    assert created[0].returncode is not None
+    assert executor._handles == {}
+
+
+@pytest.mark.asyncio
 async def test_worker_does_not_inherit_unrelated_parent_secrets(monkeypatch) -> None:
     monkeypatch.setenv("CHILD_EXECUTOR_SECRET", "must-not-cross-process-boundary")
     executor = _executor()
