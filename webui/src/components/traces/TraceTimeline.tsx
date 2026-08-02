@@ -69,7 +69,13 @@ export function TraceTimeline({
   useEffect(() => {
     if (!open || !selectedEventId) return;
     const index = timeline.events.findIndex((event) => event.event_id === selectedEventId);
-    if (index >= 0 && viewportRef.current) viewportRef.current.scrollTop = index * ROW_HEIGHT;
+    if (index >= 0 && viewportRef.current) {
+      const nextScrollTop = index * ROW_HEIGHT;
+      viewportRef.current.scrollTop = nextScrollTop;
+      // Programmatic scroll assignments do not reliably dispatch scroll events,
+      // so keep the virtual range in sync for mobile Event navigation.
+      setScrollTop(nextScrollTop);
+    }
   }, [open, selectedEventId, timeline.events]);
 
   useEffect(() => {

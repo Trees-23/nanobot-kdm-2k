@@ -36,6 +36,27 @@ function TimelineHarness() {
   );
 }
 
+function SelectedTimelineHarness() {
+  const events = Array.from({ length: 24 }, (_, index) => auditEvent(`event-${index}`, index));
+  const selectedTimeline = {
+    ...timeline,
+    events,
+    total: events.length,
+  } as unknown as ReturnType<typeof useAuditTimeline>;
+  return (
+    <TraceTimeline
+      timeline={selectedTimeline}
+      total={events.length}
+      open
+      selectedEventId="event-20"
+      currentNodeIds={new Set()}
+      onOpenChange={vi.fn()}
+      onSelectEvent={vi.fn()}
+      onLoadPayload={vi.fn()}
+    />
+  );
+}
+
 function auditEvent(eventId: string, sequence: number) {
   return {
     event_id: eventId,
@@ -78,6 +99,13 @@ describe("audit trace UX", () => {
     expect(screen.getByRole("button", { name: "拖拽调整时间线高度" })).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "最大化时间线" }));
     expect(screen.getByRole("button", { name: "还原时间线高度" })).toBeInTheDocument();
+  });
+
+  it("renders a programmatically selected Event outside the initial virtual range", async () => {
+    render(<SelectedTimelineHarness />);
+    await waitFor(() => {
+      expect(document.querySelector('[data-event-id="event-20"]')).toHaveClass(/bg-sidebar-accent/);
+    });
   });
 
   it("requests the unified full Trace graph by default", async () => {

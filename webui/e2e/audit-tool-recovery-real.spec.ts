@@ -144,11 +144,15 @@ for (const viewport of [{ width: 1440, height: 900 }, { width: 390, height: 844 
     await inspector.getByRole("button", { name: "定位失败端 Event" }).click();
     await expect(page.getByText("Event 时间线")).toBeVisible();
     if (viewport.width < 768) {
-      await page.getByRole("button", { name: /Event 时间线/ }).first().click();
-      await expect(inspector).toBeVisible();
+      await expect(page.getByRole("button", { name: /Event 时间线/ }).first())
+        .toHaveAttribute("aria-expanded", "true");
     }
     const failedRow = page.locator(`[data-event-id="${recovery!.anchor!.source_event_id}"]`);
     await expect(failedRow).toHaveClass(/bg-sidebar-accent/);
+    if (viewport.width < 768) {
+      await page.getByRole("button", { name: /Event 时间线/ }).first().click();
+      await expect(inspector).toBeVisible();
+    }
     await inspector.getByRole("button", { name: "定位恢复端 Event" }).click();
     const recoveredRow = page.locator(`[data-event-id="${recovery!.anchor!.target_event_id}"]`);
     await expect(recoveredRow).toHaveClass(/bg-sidebar-accent/);
