@@ -121,6 +121,9 @@ def test_tool_finished_accepts_additive_diagnostics_and_recovery_link() -> None:
             "effective_timeout_ms": 30_000,
             "provider": "duckduckgo",
             "error_summary": "DuckDuckGo search timed out after 30s",
+            "error_message": "Error: DuckDuckGo search timed out after 30s",
+            "error_source": "timeout",
+            "retryability": "retryable",
             "safe_input_summary": "query omitted; provider=duckduckgo",
             "resource_key": None,
             "resource_correction_keys": [],
@@ -129,7 +132,26 @@ def test_tool_finished_accepts_additive_diagnostics_and_recovery_link() -> None:
     )
 
     assert draft.error_code == "web_search_timeout"
+    assert draft.error_message == "Error: DuckDuckGo search timed out after 30s"
+    assert draft.error_source == "timeout"
+    assert draft.retryability == "retryable"
     assert draft.recovery_of_tool_call_ids == ["prior-call"]
+
+
+def test_legacy_tool_finished_without_diagnostics_remains_readable() -> None:
+    draft = ToolFinishedDraft.model_validate(
+        {
+            **_common_event("tool_finished"),
+            "tool_call_id": "legacy-call",
+            "tool_name": "legacy_plugin",
+            "elapsed_ms": 1,
+            "status": "error",
+        }
+    )
+
+    assert draft.error_message is None
+    assert draft.error_source is None
+    assert draft.retryability is None
 
 
 def test_rejects_naive_event_timestamp() -> None:

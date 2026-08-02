@@ -1,6 +1,12 @@
 from pathlib import Path
 from types import SimpleNamespace
 
+from nanobot.agent.tool_failure import (
+    DIAGNOSTIC_UNAVAILABLE,
+    ERROR_MESSAGE_LIMIT,
+    normalize_tool_failure,
+)
+from nanobot.agent.tool_failure import ERROR_SUMMARY_LIMIT as NORMALIZED_SUMMARY_LIMIT
 from nanobot.audit.diagnostics import (
     ERROR_SUMMARY_LIMIT,
     safe_error_summary,
@@ -69,3 +75,28 @@ def test_error_summary_is_allowlisted_redacted_and_bounded() -> None:
     assert summary is not None
     assert len(summary) <= ERROR_SUMMARY_LIMIT
     assert "abcdefghijklmnopqrstuvwxyz" not in summary
+
+
+def test_normalized_failure_redacts_secrets_controls_and_retry_hint() -> None:
+    failure = normalize_tool_failure(
+        "Error: token=top-secret\x00\nBearer abcdefghijklmnopqrstuvwxyz"
+        "\n\n[Analyze the error above and try a different approach.]",
+        source="tool_result",
+    )
+
+    assert "top-secret" not in failure.message
+    assert "abcdefghijklmnopqrstuvwxyz" not in failure.message
+    assert "Analyze the error" not in failure.message
+    assert "\x00" not in failure.message
+    assert failure.error_type == "ToolError"
+    assert failure.error_code == "tool_error"
+
+
+def test_normalized_failure_is_non_empty_and_bounded() -> None:
+    failure = normalize_tool_failure("\x00" + "x" * 4_000, source="runtime")
+
+    assert failure.message
+    assert failure.summary
+    assert len(failure.message) <= ERROR_MESSAGE_LIMIT
+    assert len(failure.summary) <= NORMALIZED_SUMMARY_LIMIT
+    assert DIAGNOSTIC_UNAVAILABLE not in failure.message

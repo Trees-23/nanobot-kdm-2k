@@ -258,6 +258,30 @@ async def test_registry_rejects_unknown_builtin_tool_parameters(tmp_path) -> Non
     assert "one" not in result
 
 
+async def test_registry_retry_hint_preserves_structured_error_metadata() -> None:
+    registry = ToolRegistry()
+    tool = _FakeTool("structured_error")
+    tool.execute = AsyncMock(
+        return_value=ToolResult.error(
+            "Error: provider unavailable",
+            error_type="ProviderUnavailable",
+            error_code="provider_unavailable",
+            effective_timeout_ms=2_500,
+            provider="example",
+        )
+    )
+    registry.register(tool)
+
+    result = await registry.execute("structured_error", {})
+
+    assert isinstance(result, ToolResult)
+    assert result.error_type == "ProviderUnavailable"
+    assert result.error_code == "provider_unavailable"
+    assert result.effective_timeout_ms == 2_500
+    assert result.provider == "example"
+    assert str(result).endswith("[Analyze the error above and try a different approach.]")
+
+
 async def test_registry_preserves_successful_exec_output_that_starts_with_error() -> None:
     registry = ToolRegistry()
     output = "Error: generated report successfully\n\nExit code: 0"
