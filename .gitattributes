@@ -3,3 +3,4 @@
 
 # Audit fixtures contain byte offsets and byte-for-byte export expectations.
 tests/fixtures/audit_v1/** text eol=lf
+_other/评测/审计运行轨迹/*/fixtures/** text eol=lf
