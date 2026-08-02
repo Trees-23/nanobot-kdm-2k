@@ -1,0 +1,141 @@
+{
+  "started_at_utc": "2026-08-02T07:16:53.723852Z",
+  "session_key": "websocket:037c9acb-7b0b-425e-bd2f-456b374eb8c5",
+  "browser": {
+    "console_errors": [
+      "Failed to load resource: net::ERR_BLOCKED_BY_RESPONSE.NotSameOrigin",
+      "Failed to load resource: net::ERR_CONNECTION_RESET",
+      "WebSocket connection to 'ws://127.0.0.1:8765/?token=REDACTED' failed: Error during WebSocket handshake: net::ERR_CONNECTION_RESET",
+      "Failed to load resource: net::ERR_NETWORK_CHANGED",
+      "Failed to load resource: net::ERR_CONNECTION_REFUSED",
+      "WebSocket connection to 'ws://127.0.0.1:8765/?token=REDACTED' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED",
+      "Failed to load resource: net::ERR_CONNECTION_RESET",
+      "WebSocket connection to 'ws://127.0.0.1:8765/?token=REDACTED' failed: Error during WebSocket handshake: net::ERR_CONNECTION_RESET",
+      "Failed to load resource: net::ERR_CONNECTION_RESET",
+      "Failed to load resource: net::ERR_NETWORK_CHANGED"
+    ],
+    "page_errors": [],
+    "request_failures": [
+      {
+        "path": "http://127.0.0.1:8765/webui/bootstrap",
+        "failure": "net::ERR_CONNECTION_RESET"
+      },
+      {
+        "path": "https://icons.duckduckgo.com/ip3/openai.com.ico",
+        "failure": "net::ERR_NETWORK_CHANGED"
+      },
+      {
+        "path": "http://127.0.0.1:8765/webui/bootstrap",
+        "failure": "net::ERR_CONNECTION_REFUSED"
+      },
+      {
+        "path": "http://127.0.0.1:8765/webui/bootstrap",
+        "failure": "net::ERR_CONNECTION_RESET"
+      },
+      {
+        "path": "http://127.0.0.1:8765/api/settings/pairing",
+        "failure": "net::ERR_CONNECTION_RESET"
+      },
+      {
+        "path": "https://www.google.com/s2/favicons",
+        "failure": "net::ERR_NETWORK_CHANGED"
+      }
+    ],
+    "ws_events": [
+      {
+        "type": "close",
+        "at": "2026-08-02T07:17:02.020069Z"
+      },
+      {
+        "type": "error",
+        "at": "2026-08-02T07:17:02.020854Z",
+        "detail": "Error during WebSocket handshake: net::ERR_CONNECTION_RESET"
+      },
+      {
+        "type": "close",
+        "at": "2026-08-02T07:17:02.021177Z"
+      },
+      {
+        "type": "error",
+        "at": "2026-08-02T07:17:02.022339Z",
+        "detail": "Error in connection establishment: net::ERR_CONNECTION_REFUSED"
+      },
+      {
+        "type": "close",
+        "at": "2026-08-02T07:17:02.022486Z"
+      },
+      {
+        "type": "error",
+        "at": "2026-08-02T07:17:02.023770Z",
+        "detail": "Error during WebSocket handshake: net::ERR_CONNECTION_RESET"
+      },
+      {
+        "type": "close",
+        "at": "2026-08-02T07:17:02.024128Z"
+      }
+    ],
+    "payload_requests": []
+  },
+  "container_before_restart": {
+    "id": "6ee703c91de8ab71f331b08b5392ec34c431dc0df5b1d705f17977ed4add6a0a",
+    "image": "sha256:d6d1cc06202f09dd6dfe64b5e007b0f981a8aed4c66b3aeddb7da0ec36d7bf48",
+    "status": "running",
+    "started_at": "2026-08-02T06:57:02.599855557Z"
+  },
+  "container_after_restart": {
+    "id": "f81c3ba23e3514828c463f0a3bf7d23856168549520eadb29d6b2ab2a7ba6476",
+    "image": "sha256:d6d1cc06202f09dd6dfe64b5e007b0f981a8aed4c66b3aeddb7da0ec36d7bf48",
+    "status": "running",
+    "started_at": "2026-08-02T07:16:58.562987638Z",
+    "health": {
+      "status": "ok"
+    }
+  },
+  "restart_at_utc": "2026-08-02T07:17:02.019346Z",
+  "trace_list": {
+    "index": {
+      "state": "ready",
+      "revision": 43,
+      "coverage_complete": true,
+      "updated_at": "2026-08-02T07:17:21.130411Z",
+      "lag_ms": 245670,
+      "last_error": null
+    },
+    "items": [
+      {
+        "trace_id": "019fc14e-2517-79f9-be18-566cac4a41c4",
+        "display_status": "warning",
+        "run_count": 5,
+        "event_count": 245,
+        "integrity_status": "valid",
+        "active": false
+      }
+    ]
+  },
+  "trace_id": "019fc14e-2517-79f9-be18-566cac4a41c4",
+  "graph": {
+    "revision": 43,
+    "node_count": 86,
+    "edge_count": 88,
+    "recovery_edges": [
+      {
+        "id": "tool_recovery:tool:019fc14e-2517-79f9-be18-566cac4a41c4:019fc14f-a632-73d7-8232-611d56271897:019fc14f-d461-7400-a98d-8fa978fb9c92:tool:019fc14e-2517-79f9-be18-566cac4a41c4:019fc14f-a632-73d7-8232-611d56271897:019fc14f-df6b-798a-8f2c-a5c0a965b96f",
+        "type": "tool_recovery",
+        "source": "tool:019fc14e-2517-79f9-be18-566cac4a41c4:019fc14f-a632-73d7-8232-611d56271897:019fc14f-d461-7400-a98d-8fa978fb9c92",
+        "target": "tool:019fc14e-2517-79f9-be18-566cac4a41c4:019fc14f-a632-73d7-8232-611d56271897:019fc14f-df6b-798a-8f2c-a5c0a965b96f",
+        "relation": "tool_recovery",
+        "anchor": {
+          "source_event_id": "019fc14f-d465-73c4-a6ee-d018842946c5",
+          "target_event_id": "019fc14f-df6f-7bdf-a2f6-507c6ec8b90f"
+        },
+        "evidence_count": 1
+      }
+    ]
+  },
+  "events": {
+    "revision": 43,
+    "item_count": 200,
+    "next_cursor_present": true
+  },
+  "finished_at_utc": "2026-08-02T07:17:23.868550Z"
+}

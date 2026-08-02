@@ -1,0 +1,9 @@
+{
+  "evidence_id": "PROC-V2-16PASS",
+  "command": "pytest tests/agent/test_child_executor.py tests/integration/test_subagent_restart_real.py -q",
+  "observed": "16 passed",
+  "covered": ["IPC 超限 fork 前拒绝", "启动 IPC 写失败回收 worker", "cooperative exit", "TERM/KILL process-group、root reap、descendant cleanup", "identity mismatch fail-closed", "required termination_failed/lost", "optional 单次通知与迟到成功拒绝"],
+  "live_task_ids": {"cooperative-child":"9eded2bb", "force-kill-tree":"65bf5def", "deadline-restart":"f729b5ed", "tool-recovery":"82315864"},
+  "live_terminal_status": "四项 succeeded；delivery_count=4；barrier_satisfied=true",
+  "pid_commandline_archived": false
+}

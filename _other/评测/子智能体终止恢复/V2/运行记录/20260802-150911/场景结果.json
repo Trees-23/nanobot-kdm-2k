@@ -1,0 +1,23 @@
+{
+  "conclusion": "通过",
+  "score": 100,
+  "scenarios": {
+    "S01":{"status":"PASS","command":"pytest tests/agent/test_child_executor.py -q","field":"cooperatively_exited","evidence_id":"PROC-V2-16PASS","observed":"cooperative real-process case passed","expected":"无 SIGKILL 的协作退出","utc":"2026-08-02T07:20:00Z","attribution":"产品实现"},
+    "S02":{"status":"PASS","command":"pytest tests/agent/test_child_executor.py -q","field":"term_sent/kill_sent/reaped/descendants_cleared","evidence_id":"PROC-V2-16PASS","observed":"stubborn worker+descendant case passed","expected":"强杀并清理后代","utc":"2026-08-02T07:20:00Z","attribution":"产品实现"},
+    "S03":{"status":"PASS","command":"pytest tests/agent/test_child_executor.py -q","field":"termination_failed/lost","evidence_id":"PROC-V2-16PASS","observed":"required failure fail-closed passed","expected":"kill/reap 失败不猜成功","utc":"2026-08-02T07:20:00Z","attribution":"产品实现"},
+    "S04":{"status":"PASS","command":"pytest tests/agent/test_child_executor.py -q","field":"optional notification/late success","evidence_id":"PROC-V2-16PASS","observed":"通知一次且迟到成功被拒绝","expected":"optional owner 不阻塞","utc":"2026-08-02T07:20:00Z","attribution":"产品实现"},
+    "S05":{"status":"PASS","command":"pytest tests/integration/test_subagent_restart_real.py -q","field":"deadline initial","evidence_id":"RESTART-V2-REAL-SUITE","observed":"real interpreter case passed","expected":"绝对 deadline","utc":"2026-08-02T07:20:00Z","attribution":"真实解释器 suite"},
+    "S06":{"status":"PASS","command":"pytest tests/integration/test_subagent_restart_real.py -q","field":"restart recovery","evidence_id":"RESTART-V2-REAL-SUITE","observed":"restart case passed","expected":"重启后 deadline 不重置","utc":"2026-08-02T07:20:00Z","attribution":"真实解释器 suite"},
+    "S07":{"status":"PASS","command":"pytest tests/integration/test_subagent_restart_real.py -q","field":"executor absent","evidence_id":"RESTART-V2-REAL-SUITE","observed":"lost fail-closed case passed","expected":"不能重接则 lost","utc":"2026-08-02T07:20:00Z","attribution":"真实解释器 suite"},
+    "S08":{"status":"PASS","command":"pytest tests/integration/test_subagent_restart_real.py -q","field":"deadline expiry","evidence_id":"RESTART-V2-REAL-SUITE","observed":"expired case passed","expected":"过期不重新等待","utc":"2026-08-02T07:20:00Z","attribution":"真实解释器 suite"},
+    "S09":{"status":"PASS","command":"pytest tests/integration/test_subagent_restart_real.py -q","field":"corrupt state","evidence_id":"RESTART-V2-REAL-SUITE","observed":"corruption case passed","expected":"不清空、不猜成功","utc":"2026-08-02T07:20:00Z","attribution":"真实解释器 suite"},
+    "S10":{"status":"PASS","command":"pytest tests/integration/test_subagent_restart_real.py -q","field":"finish idempotency","evidence_id":"RESTART-V2-REAL-SUITE","observed":"finish case passed","expected":"finish 幂等","utc":"2026-08-02T07:20:00Z","attribution":"真实解释器 suite"},
+    "S11":{"status":"PASS","command":"pytest tests/integration/test_subagent_restart_real.py -q","field":"claim idempotency","evidence_id":"RESTART-V2-REAL-SUITE","observed":"claim case passed","expected":"claim 幂等","utc":"2026-08-02T07:20:00Z","attribution":"真实解释器 suite"},
+    "S12":{"status":"PASS","command":"pytest tests/integration/test_subagent_restart_real.py -q","field":"delivery/continuation","evidence_id":"RESTART-V2-REAL-SUITE","observed":"single-delivery case passed","expected":"只投递一次","utc":"2026-08-02T07:20:00Z","attribution":"真实解释器 suite"},
+    "S13":{"status":"PASS","command":"pytest tests/agent/test_child_executor.py -q","field":"process identity mismatch","evidence_id":"PROC-V2-16PASS","observed":"identity mismatch rejection passed","expected":"拒绝误杀","utc":"2026-08-02T07:20:00Z","attribution":"产品实现"},
+    "S14":{"status":"PASS","command":"GET graph/events + runtime Trace","field":"tool_recovery anchors/evidence_count","evidence_id":"AUDIT-RECOVERY-01","observed":"1 条真实 recovery edge，revision=43","expected":"同 Trace/Run 双 terminal anchor","utc":"2026-08-02T07:17:21Z","attribution":"Runtime Audit API"},
+    "S15":{"status":"PASS","command":"stable_trace_acceptance.py + Playwright spec","field":"desktop/mobile selection/Payload/errors","evidence_id":"WEB-TRACE-2VP","observed":"2 viewport，0 errors，0 Payload，唯一恢复端选中","expected":"双端侧边边定位通过","utc":"2026-08-02T07:31:00Z","attribution":"真实 8765 Chromium"}
+  },
+  "runtime_trace": "019fc14e-2517-79f9-be18-566cac4a41c4",
+  "agent_delivery": "barrier_satisfied=true, delivery_count=4"
+}

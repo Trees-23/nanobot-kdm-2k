@@ -1,0 +1,45 @@
+{
+  "trace_id": "019fc14e-2517-79f9-be18-566cac4a41c4",
+  "results": [
+    {
+      "viewport": {
+        "width": 1440,
+        "height": 900
+      },
+      "recovery_path_present": true,
+      "sequence_path_present": true,
+      "paths_differ": true,
+      "inspector_has_evidence_count": true,
+      "failed_selected": true,
+      "selected_after_recovery": [
+        "019fc14f-df6f-7bdf-a2f6-507c6ec8b90f"
+      ],
+      "payload_request_count": 0,
+      "errors": {
+        "console": [],
+        "pageerror": [],
+        "requestfailed": []
+      }
+    },
+    {
+      "viewport": {
+        "width": 390,
+        "height": 844
+      },
+      "recovery_path_present": true,
+      "sequence_path_present": true,
+      "paths_differ": true,
+      "inspector_has_evidence_count": true,
+      "failed_selected": true,
+      "selected_after_recovery": [
+        "019fc14f-df6f-7bdf-a2f6-507c6ec8b90f"
+      ],
+      "payload_request_count": 0,
+      "errors": {
+        "console": [],
+        "pageerror": [],
+        "requestfailed": []
+      }
+    }
+  ]
+}

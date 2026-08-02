@@ -1,0 +1,8 @@
+{
+  "evidence_id": "RESTART-V2-REAL-SUITE",
+  "command": "pytest tests/integration/test_subagent_restart_real.py -q",
+  "observed": "与 child executor 聚焦套件合计 16 passed",
+  "container_restart": {"before":"6ee703c91de8ab71f331b08b5392ec34c431dc0df5b1d705f17977ed4add6a0a", "after":"f81c3ba23e3514828c463f0a3bf7d23856168549520eadb29d6b2ab2a7ba6476", "health_after":{"status":"ok"}},
+  "assertions": ["绝对 UTC deadline 不重置", "restart claim 幂等", "delivery 只投递一次", "continuation/stale result 不覆盖 terminal", "损坏状态 fail-closed"],
+  "late_result_overwrite": false
+}

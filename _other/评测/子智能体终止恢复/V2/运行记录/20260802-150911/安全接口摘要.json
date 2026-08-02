@@ -1,0 +1,13 @@
+{
+  "config_sha256": "3cc4f6d77b9204f51cc08f1b2fe37d4fd1cfd26489bb96d25341641239d367c5",
+  "fail_on_tool_error": false,
+  "audit_mode": "metadata_only",
+  "audit_index_enabled": true,
+  "workspace_restrict_to_workspace": true,
+  "enabled_mcp_servers": [],
+  "web_tool_enabled": false,
+  "worker_environment_isolated": true,
+  "secret_archived": false,
+  "payload_archived": false,
+  "pid_commandline_archived": false
+}
