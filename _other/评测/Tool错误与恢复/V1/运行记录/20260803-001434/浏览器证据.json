@@ -1,0 +1,31 @@
+{
+  "command": "bunx playwright test e2e/audit-tool-recovery-real.spec.ts --project=chromium --reporter=html",
+  "exit_code": 0,
+  "tests": {
+    "passed": 2,
+    "failed": 0,
+    "duration_seconds": 13.1
+  },
+  "runtime_generator": "AgentRunner+ReadFileTool+AuditRuntime",
+  "dist_index_sha256": "7b81d0f3b49562980441e4caf2c3e96805c85dfe6b95ed45db7a7a2145cd7a61",
+  "generator_sha256": "b0f5ea0d9a25ed52cb5e3ac125d9b62a85f864005791c4fdc0d231a0d6618467",
+  "spec_sha256": "6a6485ebf06df0705955dbf8cc83d672da8e2ef59c020d3f710cadaffad14b68",
+  "viewports": {
+    "1440x900": {
+      "result": "passed",
+      "screenshot": "桌面-1440x900.png",
+      "sha256": "11604ce39339fb1218cd7222c7009340e82b00df404dccca299289ba4b377cce"
+    },
+    "390x844": {
+      "result": "passed",
+      "screenshot": "移动-390x844.png",
+      "sha256": "310c45dbd7a167087be9c37c9d2f359abfaeb273411321a21bfa60d11085d6d3"
+    }
+  },
+  "relations_verified": ["tool_retry", "tool_continuation", "tool_recovery"],
+  "event_endpoints_located": ["source", "target"],
+  "payload_auto_requests": 0,
+  "console_errors": 0,
+  "page_errors": 0,
+  "secrets_archived": false
+}

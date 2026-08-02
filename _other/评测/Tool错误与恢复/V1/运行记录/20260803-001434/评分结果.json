@@ -1,0 +1,17 @@
+{
+  "version": "V1",
+  "conclusion": "通过",
+  "score": 100,
+  "sections": {
+    "通用错误归一化": 20,
+    "Audit模式与兼容": 15,
+    "恢复语义": 30,
+    "Tool inventory": 10,
+    "真实Graph与WebUI": 20,
+    "回归质量": 5
+  },
+  "security_gate": "passed",
+  "payload_auto_requests": 0,
+  "browser_errors": 0,
+  "viewports": ["1440x900", "390x844"]
+}
