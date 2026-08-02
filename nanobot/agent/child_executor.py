@@ -100,6 +100,14 @@ class ProcessChildExecutor:
             raise RuntimeError("process-group child executor is unavailable on this platform")
         executor_id = uuid.uuid4().hex
         process_instance_id = uuid.uuid4().hex
+        envelope = {
+            "schema_version": IPC_SCHEMA_VERSION,
+            "type": "start",
+            "executor_id": executor_id,
+            "process_instance_id": process_instance_id,
+            "payload": payload,
+        }
+        self._encode_envelope(envelope)
         process = await asyncio.create_subprocess_exec(
             self.python_executable,
             "-m",
@@ -128,13 +136,7 @@ class ProcessChildExecutor:
         )
         handle.reader_task = asyncio.create_task(self._read_worker(handle))
         self._handles[executor_id] = handle
-        await self._write(handle, {
-            "schema_version": IPC_SCHEMA_VERSION,
-            "type": "start",
-            "executor_id": executor_id,
-            "process_instance_id": process_instance_id,
-            "payload": payload,
-        })
+        await self._write(handle, envelope)
         return handle
 
     async def request_cancel(self, handle: ChildHandle) -> None:
@@ -227,12 +229,17 @@ class ProcessChildExecutor:
         writer = handle.process.stdin
         if writer is None or writer.is_closing():
             return
-        encoded = json.dumps(envelope, separators=(",", ":"), ensure_ascii=True).encode() + b"\n"
-        if len(encoded) > MAX_IPC_FRAME_BYTES:
-            raise ValueError("child executor IPC frame exceeds the 1 MiB limit")
+        encoded = self._encode_envelope(envelope)
         async with handle.write_lock:
             writer.write(encoded)
             await writer.drain()
+
+    @staticmethod
+    def _encode_envelope(envelope: dict[str, Any]) -> bytes:
+        encoded = json.dumps(envelope, separators=(",", ":"), ensure_ascii=True).encode() + b"\n"
+        if len(encoded) > MAX_IPC_FRAME_BYTES:
+            raise ValueError("child executor IPC frame exceeds the 1 MiB limit")
+        return encoded
 
     async def _read_worker(self, handle: ChildHandle) -> None:
         stream = handle.process.stdout

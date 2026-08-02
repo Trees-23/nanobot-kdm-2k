@@ -12,7 +12,7 @@ const secret = "real-audit-acceptance-secret";
 let gateway: ChildProcess | null = null;
 let baseUrl = "";
 let traceId = "";
-let seededRevision = 0;
+let runtimeRevision = 0;
 let distHash = "";
 
 async function freePort(): Promise<number> {
@@ -57,8 +57,8 @@ test.beforeAll(async () => {
   const configPath = join(root, "config.json");
   const auditRoot = join(root, "audit");
   const workspace = join(root, "workspace");
-  const seed = spawnSync("python", [
-    "webui/e2e/seed-audit-tool-recovery.py",
+  const runtimeTrace = spawnSync("python", [
+    "webui/e2e/generate-audit-tool-recovery-runtime.py",
     "--root", auditRoot,
     "--config", configPath,
     "--workspace", workspace,
@@ -66,10 +66,15 @@ test.beforeAll(async () => {
     "--gateway-port", String(gatewayPort),
     "--secret", secret,
   ], { cwd: repositoryRoot, encoding: "utf-8" });
-  if (seed.status !== 0) throw new Error(seed.stderr || seed.stdout);
-  const seeded = JSON.parse(seed.stdout.trim()) as { trace_id: string; revision: number };
-  traceId = seeded.trace_id;
-  seededRevision = seeded.revision;
+  if (runtimeTrace.status !== 0) throw new Error(runtimeTrace.stderr || runtimeTrace.stdout);
+  const generated = JSON.parse(runtimeTrace.stdout.trim()) as {
+    trace_id: string;
+    revision: number;
+    generator: string;
+  };
+  expect(generated.generator).toBe("AgentRunner+ReadFileTool+AuditRuntime");
+  traceId = generated.trace_id;
+  runtimeRevision = generated.revision;
   distHash = createHash("sha256")
     .update(readFileSync(join(repositoryRoot, "nanobot/web/dist/index.html")))
     .digest("hex");
@@ -156,14 +161,17 @@ for (const viewport of [{ width: 1440, height: 900 }, { width: 390, height: 844 
     await inspector.getByRole("button", { name: "定位恢复端 Event" }).click();
     const recoveredRow = page.locator(`[data-event-id="${recovery!.anchor!.target_event_id}"]`);
     await expect(recoveredRow).toHaveClass(/bg-sidebar-accent/);
-    await expect(failedRow).not.toHaveClass(/bg-sidebar-accent/);
+    const selectedEventIds = await page.locator("[data-event-id]").evaluateAll((rows) => rows
+      .filter((row) => row.className.includes("bg-sidebar-accent"))
+      .map((row) => row.getAttribute("data-event-id")));
+    expect(selectedEventIds).toEqual([recovery!.anchor!.target_event_id]);
     expect(requests.filter((path) => path.startsWith("/api/audit/payloads/"))).toHaveLength(0);
     expect(browserErrors).toEqual([]);
 
     await testInfo.attach("real-gateway-audit-evidence.json", {
       body: JSON.stringify({
         dist_sha256: distHash,
-        seeded_revision: seededRevision,
+        runtime_revision: runtimeRevision,
         graph_revision: graph.index.revision,
         requests,
       }, null, 2),

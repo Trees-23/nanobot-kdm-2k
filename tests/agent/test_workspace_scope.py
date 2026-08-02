@@ -154,7 +154,7 @@ async def test_exec_tool_uses_scope_project_as_default_cwd(tmp_path: Path) -> No
     try:
         result = await tool.execute(
             command=(
-                'python -c "from pathlib import Path; '
+                'python3 -c "from pathlib import Path; '
                 "Path('scoped-marker.txt').write_text('ok')\""
             )
         )
@@ -181,7 +181,7 @@ async def test_exec_full_scope_allows_explicit_cwd_outside_project(tmp_path: Pat
     try:
         result = await tool.execute(
             command=(
-                'python -c "from pathlib import Path; '
+                'python3 -c "from pathlib import Path; '
                 "Path('outside-marker.txt').write_text('ok')\""
             ),
             working_dir=str(outside),

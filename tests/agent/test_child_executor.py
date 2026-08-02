@@ -12,7 +12,7 @@ from typing import Any
 
 import pytest
 
-from nanobot.agent.child_executor import ProcessChildExecutor
+from nanobot.agent.child_executor import MAX_IPC_FRAME_BYTES, ProcessChildExecutor
 from nanobot.agent.child_worker import build_child_config_snapshot
 from nanobot.agent.subagent import SubagentManager
 from nanobot.bus.queue import MessageBus
@@ -65,6 +65,21 @@ async def test_worker_natural_exit_is_observed_and_reaped() -> None:
     assert exited.result == {"status": "ok"}
     assert exited.termination_confirmed is True
     assert handle.process.returncode == 0
+
+
+@pytest.mark.asyncio
+async def test_oversized_start_frame_is_rejected_before_process_creation(monkeypatch) -> None:
+    executor = _executor()
+
+    async def unexpected_process_start(*_args, **_kwargs):
+        raise AssertionError("oversized IPC payload must not start a worker")
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", unexpected_process_start)
+
+    with pytest.raises(ValueError, match="1 MiB"):
+        await executor.start({"value": "x" * MAX_IPC_FRAME_BYTES})
+
+    assert executor._handles == {}
 
 
 @pytest.mark.asyncio
