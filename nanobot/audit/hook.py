@@ -475,6 +475,9 @@ class RunnerAuditHook(AgentHook):
             provider=outcome.provider,
             safe_input_summary=safe_input.summary,
         )
+        failure = outcome.failure
+        if failure is not None:
+            error_summary = failure.summary
         event = ToolFinishedDraft.model_validate(
             {
                 **self._common("tool_finished", iteration=context.iteration),
@@ -482,8 +485,11 @@ class RunnerAuditHook(AgentHook):
                 "tool_name": tool_call.name,
                 "elapsed_ms": max(0, (time.monotonic_ns() - started) // 1_000_000),
                 "status": status,
-                "error_type": outcome.error_type,
-                "error_code": outcome.error_code,
+                "error_type": failure.error_type if failure else outcome.error_type,
+                "error_code": failure.error_code if failure else outcome.error_code,
+                "error_message": failure.message if failure else None,
+                "error_source": failure.source if failure else None,
+                "retryability": failure.retryability if failure else None,
                 "effective_timeout_ms": outcome.effective_timeout_ms,
                 "provider": outcome.provider,
                 "error_summary": error_summary,
@@ -501,12 +507,19 @@ class RunnerAuditHook(AgentHook):
                 "result": self._json_safe(outcome.result),
                 "normalized_error": (
                     {
-                        "kind": outcome.error_type or outcome.error_kind,
-                        "code": outcome.error_code,
+                        "kind": (
+                            failure.error_type
+                            if failure
+                            else outcome.error_type or outcome.error_kind
+                        ),
+                        "code": failure.error_code if failure else outcome.error_code,
+                        "message": failure.message if failure else None,
+                        "source": failure.source if failure else None,
+                        "retryability": failure.retryability if failure else None,
                         "effective_timeout_ms": outcome.effective_timeout_ms,
                         "provider": outcome.provider,
                     }
-                    if outcome.error_type or outcome.error_kind or outcome.error_code
+                    if failure or outcome.error_type or outcome.error_kind or outcome.error_code
                     else None
                 ),
                 "side_effects": (

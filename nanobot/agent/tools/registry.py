@@ -120,7 +120,11 @@ class ToolRegistry:
             hint = f" Did you mean '{suggestion}'? Tool names must match exactly." if suggestion else ""
             return None, params, (
                 ToolResult.error(
-                    f"Error: Tool '{name}' not found.{hint} Available: {', '.join(self.tool_names)}"
+                    f"Error: Tool '{name}' not found.{hint} Available: {', '.join(self.tool_names)}",
+                    error_type="ToolNotFoundError",
+                    error_code="tool_not_found",
+                    error_source="validation",
+                    retryability="non_retryable",
                 )
             )
 
@@ -136,7 +140,11 @@ class ToolRegistry:
                 ToolResult.error(
                     f"Error: Tool '{name}' parameters must be a JSON object, got "
                     f"{type(params).__name__}. Use named parameters like "
-                    'tool_name(param1="value1", param2="value2") matching the tool schema.'
+                    'tool_name(param1="value1", param2="value2") matching the tool schema.',
+                    error_type="ValidationError",
+                    error_code="invalid_tool_arguments",
+                    error_source="validation",
+                    retryability="non_retryable",
                 )
             )
 
@@ -144,7 +152,13 @@ class ToolRegistry:
         errors = tool.validate_params(cast_params)
         if errors:
             return tool, cast_params, (
-                ToolResult.error(f"Error: Invalid parameters for tool '{name}': " + "; ".join(errors))
+                ToolResult.error(
+                    f"Error: Invalid parameters for tool '{name}': " + "; ".join(errors),
+                    error_type="ValidationError",
+                    error_code="invalid_tool_arguments",
+                    error_source="validation",
+                    retryability="non_retryable",
+                )
             )
         return tool, cast_params, None
 
@@ -188,16 +202,21 @@ class ToolRegistry:
         hint = "\n\n[Analyze the error above and try a different approach.]"
         tool, params, error = self.prepare_call(name, params)
         if error:
-            return ToolResult.error(str(error) + hint)
+            return error.with_content(str(error) + hint)
 
         try:
             assert tool is not None  # guarded by prepare_call()
             result = await tool.execute(**params)
             if is_tool_error_result(name, result):
-                return ToolResult.error(str(result) + hint)
+                return result.with_content(str(result) + hint)
             return result
         except Exception as e:
-            return ToolResult.error(f"Error executing {name}: {str(e)}" + hint)
+            return ToolResult.error(
+                f"Error executing {name}: {str(e)}" + hint,
+                error_type=type(e).__name__,
+                error_code="tool_exception",
+                error_source="exception",
+            )
 
     @property
     def tool_names(self) -> list[str]:

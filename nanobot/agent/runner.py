@@ -25,6 +25,7 @@ from nanobot.agent.hook import (
     RuntimeDecision,
     ToolAuditOutcome,
 )
+from nanobot.agent.tool_failure import ToolFailureSource, normalize_tool_failure
 from nanobot.agent.tools.base import ToolResult
 from nanobot.agent.tools.registry import ToolRegistry, is_tool_error_result
 from nanobot.audit.context import AuditRunContext
@@ -1337,6 +1338,23 @@ class AgentRunner:
                 marker in detail for marker in ("blocked", "violation", "boundary")
             ):
                 status = "blocked"
+            raw_error_type = getattr(payload, "error_type", None)
+            if status == "blocked":
+                failure_source: ToolFailureSource = "policy"
+                raw_error_type = "PolicyError"
+                raw_error_code = "policy_blocked"
+            elif raw_error_type in {"Timeout", "TimeoutError"}:
+                failure_source = "timeout"
+                raw_error_code = getattr(payload, "error_code", None)
+            elif getattr(payload, "error_source", None):
+                failure_source = getattr(payload, "error_source")
+                raw_error_code = getattr(payload, "error_code", None)
+            elif getattr(payload, "provider", None):
+                failure_source = "provider"
+                raw_error_code = getattr(payload, "error_code", None)
+            else:
+                failure_source = "tool_result"
+                raw_error_code = getattr(payload, "error_code", None)
             outcome = ToolAuditOutcome(
                 status=status,
                 result=payload,
@@ -1347,13 +1365,44 @@ class AgentRunner:
                 provider=getattr(payload, "provider", None),
                 fatal=fatal_error is not None,
                 failure_policy="fail_on_tool_error" if fatal_error is not None else None,
+                failure=(
+                    normalize_tool_failure(
+                        str(payload or "Tool execution failed"),
+                        source=failure_source,
+                        error_type=raw_error_type
+                        or (type(fatal_error).__name__ if fatal_error else None),
+                        error_code=raw_error_code,
+                        retryability=getattr(payload, "retryability", None),
+                    )
+                    if status != "ok"
+                    else None
+                ),
             )
             return result
         except asyncio.CancelledError:
-            outcome = ToolAuditOutcome("cancelled", None, "task_cancelled")
+            outcome = ToolAuditOutcome(
+                "cancelled",
+                None,
+                "task_cancelled",
+                failure=normalize_tool_failure(
+                    "Tool execution cancelled",
+                    source="cancelled",
+                    error_type="CancelledError",
+                ),
+            )
             raise
         except BaseException as error:
-            outcome = ToolAuditOutcome("error", None, type(error).__name__)
+            source = "timeout" if isinstance(error, TimeoutError) else "runtime"
+            outcome = ToolAuditOutcome(
+                "error",
+                None,
+                type(error).__name__,
+                failure=normalize_tool_failure(
+                    f"Error: {type(error).__name__}: {error}",
+                    source=source,
+                    error_type=type(error).__name__,
+                ),
+            )
             raise
         finally:
             await hook.after_execute_tool_terminal(
@@ -1382,14 +1431,25 @@ class AgentRunner:
             external_lookup_counts,
         )
         if lookup_error:
+            lookup_result = ToolResult.error(
+                lookup_error,
+                error_type="PolicyError",
+                error_code="policy_blocked",
+                error_source="policy",
+                retryability="non_retryable",
+            )
             event = {
                 "name": tool_call.name,
                 "status": "error",
                 "detail": "repeated external lookup blocked",
             }
             if spec.fail_on_tool_error:
-                return lookup_error + hint, event, RuntimeError(lookup_error)
-            return lookup_error + hint, event, None
+                return (
+                    lookup_result.with_content(lookup_error + hint),
+                    event,
+                    RuntimeError(lookup_error),
+                )
+            return lookup_result.with_content(lookup_error + hint), event, None
         prepare_call = getattr(spec.tools, "prepare_call", None)
         tool, params, prep_error = None, tool_call.arguments, None
         if callable(prepare_call):
@@ -1411,7 +1471,18 @@ class AgentRunner:
             )
             if handled is not None:
                 return handled
-            return prep_error + hint, event, (
+            prep_payload = (
+                prep_error.with_content(str(prep_error) + hint)
+                if isinstance(prep_error, ToolResult)
+                else ToolResult.error(
+                    str(prep_error) + hint,
+                    error_type="ValidationError",
+                    error_code="invalid_tool_arguments",
+                    error_source="validation",
+                    retryability="non_retryable",
+                )
+            )
+            return prep_payload, event, (
                 RuntimeError(prep_error) if spec.fail_on_tool_error else None
             )
         await hook.before_execute_tool(context, tool_call, tool, params)
@@ -1429,7 +1500,12 @@ class AgentRunner:
                 "status": "error",
                 "detail": str(exc),
             }
-            payload = f"Error: {type(exc).__name__}: {exc}"
+            payload = ToolResult.error(
+                f"Error: {type(exc).__name__}: {exc}",
+                error_type=type(exc).__name__,
+                error_code="tool_exception",
+                error_source="exception",
+            )
             handled = self._classify_violation(
                 raw_text=str(exc),
                 # Preserve legacy exception payloads without the retry hint.
