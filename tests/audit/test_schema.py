@@ -127,7 +127,10 @@ def test_tool_finished_accepts_additive_diagnostics_and_recovery_link() -> None:
             "safe_input_summary": "query omitted; provider=duckduckgo",
             "resource_key": None,
             "resource_correction_keys": [],
+            "retry_of_tool_call_ids": ["retry-call"],
+            "continuation_of_tool_call_ids": ["session-call"],
             "recovery_of_tool_call_ids": ["prior-call"],
+            "recovery_evidence_kind": "provider_receipt",
         }
     )
 
@@ -135,7 +138,10 @@ def test_tool_finished_accepts_additive_diagnostics_and_recovery_link() -> None:
     assert draft.error_message == "Error: DuckDuckGo search timed out after 30s"
     assert draft.error_source == "timeout"
     assert draft.retryability == "retryable"
+    assert draft.retry_of_tool_call_ids == ["retry-call"]
+    assert draft.continuation_of_tool_call_ids == ["session-call"]
     assert draft.recovery_of_tool_call_ids == ["prior-call"]
+    assert draft.recovery_evidence_kind == "provider_receipt"
 
 
 def test_legacy_tool_finished_without_diagnostics_remains_readable() -> None:

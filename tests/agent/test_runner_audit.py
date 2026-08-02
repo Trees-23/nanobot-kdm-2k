@@ -266,6 +266,76 @@ async def test_prepare_validation_error_uses_complete_failure_contract() -> None
     assert terminal.retryability == "non_retryable"
 
 
+async def test_runtime_emits_plugin_retry_and_exec_continuation_without_false_recovery() -> None:
+    provider = MagicMock(spec=LLMProvider)
+    provider.chat_with_retry = AsyncMock(
+        side_effect=[
+            LLMResponse(
+                content="",
+                tool_calls=[ToolCallRequest(id="plugin-1", name="mcp_example", arguments={"value": 1})],
+                finish_reason="tool_calls",
+            ),
+            LLMResponse(
+                content="",
+                tool_calls=[ToolCallRequest(id="plugin-2", name="mcp_example", arguments={"value": 1})],
+                finish_reason="tool_calls",
+            ),
+            LLMResponse(
+                content="",
+                tool_calls=[ToolCallRequest(
+                    id="session-1",
+                    name="write_stdin",
+                    arguments={"session_id": "proc-1", "chars": "input"},
+                )],
+                finish_reason="tool_calls",
+            ),
+            LLMResponse(
+                content="",
+                tool_calls=[ToolCallRequest(
+                    id="session-2",
+                    name="write_stdin",
+                    arguments={"session_id": "proc-1", "chars": ""},
+                )],
+                finish_reason="tool_calls",
+            ),
+            LLMResponse(content="continued"),
+        ]
+    )
+    tools = MagicMock()
+    tools.get_definitions.return_value = []
+    tools.prepare_call.side_effect = lambda name, params: (None, params, None)
+    tools.execute = AsyncMock(
+        side_effect=[
+            ToolResult.error("Error: plugin unavailable"),
+            "plugin response",
+            ToolResult.error("Error: process output not ready"),
+            "Process running. session_id: proc-1",
+        ]
+    )
+    emitter = RecordingEmitter()
+
+    await AgentRunner(audit_emitter=emitter).run(
+        make_run_spec(
+            provider,
+            initial_messages=[],
+            tools=tools,
+            model="test-model",
+            max_iterations=5,
+            max_tool_result_chars=10_000,
+            audit_context=AuditRunContext("trace", "turn", "run"),
+        )
+    )
+
+    terminals = [event for event in emitter.events if event.event_type == "tool_finished"]
+    assert terminals[1].retry_of_tool_call_ids == [terminals[0].tool_call_id]
+    assert terminals[1].recovery_of_tool_call_ids == []
+    assert terminals[0].recovery_fallback == "unresolved"
+    assert terminals[3].continuation_of_tool_call_ids == [terminals[2].tool_call_id]
+    assert terminals[3].retry_of_tool_call_ids == []
+    assert terminals[3].recovery_of_tool_call_ids == []
+    assert terminals[2].recovery_fallback == "continued"
+
+
 async def test_fatal_tool_error_keeps_tool_domain_and_precise_event_link() -> None:
     provider = MagicMock(spec=LLMProvider)
     provider.chat_with_retry = AsyncMock(

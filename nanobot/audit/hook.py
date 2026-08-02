@@ -18,7 +18,11 @@ from nanobot.agent.hook import (
 )
 from nanobot.agent.tools.context import bind_audit_tool_call_id, reset_audit_tool_call_id
 from nanobot.audit.context import AuditRunContext, clear_run_cause, run_cause
-from nanobot.audit.diagnostics import SafeToolInput, safe_error_summary, safe_tool_input
+from nanobot.audit.diagnostics import (
+    SafeToolInput,
+    safe_error_summary,
+    tool_operation_evidence,
+)
 from nanobot.audit.ids import new_audit_id
 from nanobot.audit.schema import (
     ContinuationRequestedDraft,
@@ -87,7 +91,7 @@ class RunnerAuditHook(AgentHook):
         self._attempt_counts: dict[str, int] = {}
         self._tool_context_tokens: dict[str, Any] = {}
         self._tool_safe_inputs: dict[str, SafeToolInput] = {}
-        self._pending_resource_failures: list[tuple[str, SafeToolInput]] = []
+        self._pending_tool_failures: list[tuple[str, SafeToolInput]] = []
         self._fatal_event_id: str | None = None
         self._failure_policy: str | None = None
 
@@ -384,7 +388,7 @@ class RunnerAuditHook(AgentHook):
         self._tool_context_tokens[tool_call.id] = bind_audit_tool_call_id(audit_tool_id)
         self._tool_started_ns[tool_call.id] = time.monotonic_ns()
         self._tool_params[tool_call.id] = params
-        self._tool_safe_inputs[tool_call.id] = safe_tool_input(
+        self._tool_safe_inputs[tool_call.id] = tool_operation_evidence(
             tool_call.name, tool, params
         )
         workspace = getattr(tool, "_workspace", None)
@@ -453,20 +457,53 @@ class RunnerAuditHook(AgentHook):
                 }
             )
             await self._emitter.emit(policy)
+        side_effects = (
+            capture_side_effect_after(side_effect_snapshot, outcome.result)
+            if side_effect_snapshot is not None
+            else []
+        )
+        retry_of_tool_call_ids: list[str] = []
+        continuation_of_tool_call_ids: list[str] = []
         recovery_of_tool_call_ids: list[str] = []
-        if status == "ok" and safe_input.resource_key:
-            remaining: list[tuple[str, SafeToolInput]] = []
-            for failed_tool_call_id, failed_input in self._pending_resource_failures:
-                related = (
+        recovery_evidence_kind: str | None = None
+        remaining_failures: list[tuple[str, SafeToolInput]] = []
+        for failed_tool_call_id, failed_input in self._pending_tool_failures:
+            exact_retry = bool(
+                safe_input.retry_key
+                and failed_input.retry_key == safe_input.retry_key
+            )
+            continuation = bool(
+                safe_input.continuation_key
+                and failed_input.continuation_key == safe_input.continuation_key
+            )
+            resource_related = bool(
+                safe_input.resource_key
+                and failed_input.resource_key
+                and (
                     failed_input.resource_key == safe_input.resource_key
                     or safe_input.resource_key in failed_input.correction_keys
                     or failed_input.resource_key in safe_input.correction_keys
                 )
-                if related:
-                    recovery_of_tool_call_ids.append(failed_tool_call_id)
-                else:
-                    remaining.append((failed_tool_call_id, failed_input))
-            self._pending_resource_failures = remaining
+            )
+            if exact_retry:
+                retry_of_tool_call_ids.append(failed_tool_call_id)
+            if continuation:
+                continuation_of_tool_call_ids.append(failed_tool_call_id)
+            verified = status == "ok" and self._recovery_verified(
+                safe_input.verification_kind,
+                outcome.result,
+                side_effects,
+            )
+            if verified and (exact_retry or resource_related):
+                recovery_of_tool_call_ids.append(failed_tool_call_id)
+                recovery_evidence_kind = (
+                    "read_path_correction"
+                    if resource_related and not exact_retry
+                    else safe_input.verification_kind
+                )
+            else:
+                remaining_failures.append((failed_tool_call_id, failed_input))
+        self._pending_tool_failures = remaining_failures
         error_summary = safe_error_summary(
             tool_call.name,
             error_code=outcome.error_code,
@@ -490,13 +527,20 @@ class RunnerAuditHook(AgentHook):
                 "error_message": failure.message if failure else None,
                 "error_source": failure.source if failure else None,
                 "retryability": failure.retryability if failure else None,
+                "operation_evidence_kind": (
+                    safe_input.verification_kind or "default_exact_retry"
+                ),
+                "recovery_fallback": safe_input.failure_fallback,
                 "effective_timeout_ms": outcome.effective_timeout_ms,
                 "provider": outcome.provider,
                 "error_summary": error_summary,
                 "safe_input_summary": safe_input.summary,
                 "resource_key": safe_input.resource_key,
                 "resource_correction_keys": list(safe_input.correction_keys),
+                "retry_of_tool_call_ids": retry_of_tool_call_ids,
+                "continuation_of_tool_call_ids": continuation_of_tool_call_ids,
                 "recovery_of_tool_call_ids": recovery_of_tool_call_ids,
+                "recovery_evidence_kind": recovery_evidence_kind,
             }
         )
         payload = ToolOutputPayloadDraft(
@@ -522,19 +566,36 @@ class RunnerAuditHook(AgentHook):
                     if failure or outcome.error_type or outcome.error_kind or outcome.error_code
                     else None
                 ),
-                "side_effects": (
-                    capture_side_effect_after(side_effect_snapshot, outcome.result)
-                    if side_effect_snapshot is not None
-                    else []
-                ),
+                "side_effects": side_effects,
             },
         )
         await self._emitter.emit(event, payload=payload, critical=True)
-        if status in {"error", "timeout"} and safe_input.resource_key:
-            self._pending_resource_failures.append((audit_tool_id, safe_input))
+        if status in {"error", "timeout", "cancelled"}:
+            self._pending_tool_failures.append((audit_tool_id, safe_input))
         if outcome.fatal and self._fatal_event_id is None:
             self._fatal_event_id = event.event_id
             self._failure_policy = outcome.failure_policy
+
+    @staticmethod
+    def _recovery_verified(
+        verification_kind: str | None,
+        result: Any,
+        side_effects: list[dict[str, Any]],
+    ) -> bool:
+        if verification_kind in {"read_success", "provider_response"}:
+            return True
+        if verification_kind == "artifact_reference":
+            return bool(str(result or "").strip())
+        if verification_kind in {"process_exit_zero", "session_exit_zero"}:
+            return "Exit code: 0" in str(result or "")
+        if verification_kind == "filesystem_after_state":
+            return bool(side_effects) and all(
+                item.get("kind") == "filesystem_path"
+                and item.get("after_exists")
+                and item.get("after_sha256")
+                for item in side_effects
+            )
+        return False
 
     async def on_finally(self, context: AgentRunHookContext) -> None:
         if self._run_finished:
