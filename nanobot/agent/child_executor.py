@@ -15,6 +15,17 @@ from typing import Any
 
 IPC_SCHEMA_VERSION = 1
 MAX_IPC_FRAME_BYTES = 1_048_576
+_CHILD_ENV_ALLOWLIST = (
+    "HOME",
+    "LANG",
+    "LC_ALL",
+    "PATH",
+    "PYTHONPATH",
+    "SSL_CERT_DIR",
+    "SSL_CERT_FILE",
+    "TZ",
+    "VIRTUAL_ENV",
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -97,6 +108,7 @@ class ProcessChildExecutor:
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.DEVNULL,
             start_new_session=True,
+            env=self._child_environment(),
         )
         pid = process.pid
         identity = ChildProcessIdentity(
@@ -266,6 +278,11 @@ class ProcessChildExecutor:
     def _proc_start_ticks(pid: int) -> str:
         stat = Path(f"/proc/{pid}/stat").read_text(encoding="ascii")
         return stat[stat.rfind(")") + 2:].split()[19]
+
+    @staticmethod
+    def _child_environment() -> dict[str, str]:
+        """Pass only runtime plumbing; provider credentials travel in pipe IPC."""
+        return {key: os.environ[key] for key in _CHILD_ENV_ALLOWLIST if key in os.environ}
 
     def _identity_matches(self, identity: ChildProcessIdentity) -> bool:
         if identity.supervisor_instance_id != self.supervisor_instance_id:

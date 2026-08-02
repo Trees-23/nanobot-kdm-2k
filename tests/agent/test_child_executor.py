@@ -68,6 +68,18 @@ async def test_worker_natural_exit_is_observed_and_reaped() -> None:
 
 
 @pytest.mark.asyncio
+async def test_worker_does_not_inherit_unrelated_parent_secrets(monkeypatch) -> None:
+    monkeypatch.setenv("CHILD_EXECUTOR_SECRET", "must-not-cross-process-boundary")
+    executor = _executor()
+    handle = await executor.start({"behavior": "echo_env"})
+
+    exited = await executor.wait(handle, 2)
+
+    assert exited is not None
+    assert exited.result == {"secret": None}
+
+
+@pytest.mark.asyncio
 async def test_cooperative_cancel_does_not_send_process_signals(monkeypatch) -> None:
     executor = _executor()
     handle = await executor.start({"behavior": "cooperative"})

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 import time
@@ -32,6 +33,9 @@ def main() -> None:
     _send(start, "lifecycle", state="started")
     if behavior == "exit":
         _send(start, "result", result={"status": "ok"})
+        return
+    if behavior == "echo_env":
+        _send(start, "result", result={"secret": os.environ.get("CHILD_EXECUTOR_SECRET")})
         return
     for line in sys.stdin:
         command = json.loads(line)
