@@ -42,7 +42,14 @@ def main() -> None:
         if command.get("type") != "cancel":
             continue
         if behavior == "cooperative":
-            _send(start, "result", result={"status": "cancelled"})
+            _send(start, "result", result={"status": "cancelled", "stop_reason": "cancelled"})
+            return
+        if behavior == "late_success":
+            time.sleep(0.1)
+            _send(start, "result", result={
+                "final_content": "stale success",
+                "stop_reason": "completed",
+            })
             return
         while True:
             time.sleep(1)

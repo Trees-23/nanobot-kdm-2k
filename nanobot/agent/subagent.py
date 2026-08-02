@@ -62,6 +62,9 @@ class SubagentStatus:
     session_key: str | None = None
     required: bool = False
     owner_run_id: str | None = None
+    origin_channel: str = "cli"
+    origin_chat_id: str = "direct"
+    origin_message_id: str | None = None
     termination_state: str = "none"
     cancel_requested_at: float | None = None
     termination_evidence: dict[str, Any] | None = None
@@ -177,6 +180,7 @@ class SubagentManager:
         self._terminal_statuses: OrderedDict[str, SubagentStatus] = OrderedDict()
         self._timeout_task_ids: set[str] = set()
         self._termination_failed_ids: set[str] = set()
+        self._termination_outcomes: dict[str, asyncio.Event] = {}
         self._spawn_lock = asyncio.Lock()
 
     def set_provider(self, provider: LLMProvider, model: str) -> None:
@@ -314,6 +318,9 @@ class SubagentManager:
             session_key=session_key,
             required=required,
             owner_run_id=owner_run_id,
+            origin_channel=origin_channel,
+            origin_chat_id=origin_chat_id,
+            origin_message_id=origin_message_id,
         )
         async with self._spawn_lock:
             if enforce_limit and self.get_running_count() >= self.max_concurrent_subagents:
@@ -471,6 +478,18 @@ class SubagentManager:
             exited = await executor.wait(handle)
         finally:
             self._executor_handles.pop(task_id, None)
+        if (
+            exited is not None
+            and exited.result is None
+            and status.termination_state == "force_kill_requested"
+        ):
+            outcome = self._termination_outcomes.setdefault(task_id, asyncio.Event())
+            try:
+                await asyncio.wait_for(outcome.wait(), timeout=1.0)
+            except TimeoutError:
+                status.termination_state = "termination_failed"
+        if status.termination_state == "termination_failed":
+            raise asyncio.CancelledError
         if exited is None or exited.result is None:
             if status.termination_state in {"cooperatively_exited", "force_killed"}:
                 raise asyncio.CancelledError
@@ -651,7 +670,9 @@ class SubagentManager:
                 terminal_status = (
                     "timed_out" if task_id in self._timeout_task_ids else "cancelled"
                 )
-                if status.termination_state not in {"force_killed", "termination_failed"}:
+                if status.termination_state not in {
+                    "force_kill_requested", "force_killed", "termination_failed"
+                }:
                     status.termination_state = "cooperatively_exited"
                     status.termination_evidence = {
                         **(status.termination_evidence or {}),
@@ -674,7 +695,10 @@ class SubagentManager:
                     task_id, label, task, terminal_error, origin, "error", origin_message_id
                 )
         except asyncio.CancelledError:
-            if task_id in self._termination_failed_ids:
+            if (
+                task_id in self._termination_failed_ids
+                or status.termination_state == "termination_failed"
+            ):
                 terminal_status = "lost"
             else:
                 terminal_status = "timed_out" if task_id in self._timeout_task_ids else "cancelled"
@@ -709,6 +733,7 @@ class SubagentManager:
                     logger.exception("Failed to persist terminal state for subagent [{}]", task_id)
             self._timeout_task_ids.discard(task_id)
             self._termination_failed_ids.discard(task_id)
+            self._termination_outcomes.pop(task_id, None)
 
     async def _announce_result(
         self,
@@ -954,6 +979,8 @@ class SubagentManager:
                             "force_killed",
                             evidence=status.termination_evidence,
                         )
+                    if outcome := self._termination_outcomes.get(task_id):
+                        outcome.set()
                 parent_task = self._running_tasks.get(task_id)
                 if parent_task is not None:
                     await asyncio.wait({parent_task}, timeout=1.0)
@@ -994,6 +1021,7 @@ class SubagentManager:
         status = self._task_statuses.get(task_id)
         if status is None:
             return
+        first_failure = status.termination_state != "termination_failed"
         status.termination_state = "termination_failed"
         status.termination_evidence = {
             **(status.termination_evidence or {"backend": "asyncio"}),
@@ -1011,6 +1039,22 @@ class SubagentManager:
                 "termination_failed",
                 evidence=status.termination_evidence,
             )
+        if first_failure:
+            await self._announce_result(
+                task_id,
+                status.label,
+                status.task_description,
+                status.error,
+                {
+                    "channel": status.origin_channel,
+                    "chat_id": status.origin_chat_id,
+                    "session_key": status.session_key,
+                },
+                "error",
+                status.origin_message_id,
+            )
+        if outcome := self._termination_outcomes.get(task_id):
+            outcome.set()
 
     async def close(self) -> None:
         """Cancel running subagents and close their shared exec sessions."""
@@ -1073,6 +1117,9 @@ class SubagentManager:
             session_key=status.session_key,
             required=status.required,
             owner_run_id=status.owner_run_id,
+            origin_channel=status.origin_channel,
+            origin_chat_id=status.origin_chat_id,
+            origin_message_id=status.origin_message_id,
             termination_state=status.termination_state,
             termination_evidence=status.termination_evidence,
         )

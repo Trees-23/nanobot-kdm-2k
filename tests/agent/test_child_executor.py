@@ -12,7 +12,7 @@ from typing import Any
 
 import pytest
 
-from nanobot.agent.child_executor import MAX_IPC_FRAME_BYTES, ProcessChildExecutor
+from nanobot.agent.child_executor import MAX_IPC_FRAME_BYTES, ChildExit, ProcessChildExecutor
 from nanobot.agent.child_worker import build_child_config_snapshot
 from nanobot.agent.subagent import SubagentManager
 from nanobot.bus.queue import MessageBus
@@ -25,6 +25,43 @@ pytestmark = pytest.mark.skipif(not os.path.exists("/proc/self/stat"), reason="L
 
 def _executor() -> ProcessChildExecutor:
     return ProcessChildExecutor(worker_module="tests.agent.fixtures.child_executor_worker")
+
+
+class _BehaviorExecutor(ProcessChildExecutor):
+    def __init__(self, behavior: str, *, fail_force_kill: bool = False) -> None:
+        super().__init__(worker_module="tests.agent.fixtures.child_executor_worker")
+        self.behavior = behavior
+        self.fail_force_kill = fail_force_kill
+
+    async def start(self, _payload: dict[str, Any]):
+        return await super().start({"behavior": self.behavior})
+
+    async def force_kill(self, handle, **kwargs) -> ChildExit:
+        if not self.fail_force_kill:
+            return await super().force_kill(handle, **kwargs)
+        return ChildExit(
+            returncode=0,
+            result=None,
+            exit_observed=False,
+            reaped=False,
+            descendants_cleared=False,
+            forced=True,
+            reason="injected_termination_failure",
+        )
+
+
+def _runtime(config: Config) -> LLMRuntime:
+    provider = make_provider(config)
+    return LLMRuntime.capture(provider, "worker-model", context_window_tokens=4096)
+
+
+async def _wait_for_handle(manager: SubagentManager, task_id: str):
+    for _ in range(100):
+        handle = manager._executor_handles.get(task_id)
+        if handle is not None:
+            return handle
+        await asyncio.sleep(0.01)
+    raise AssertionError("process child handle was not registered")
 
 
 class _ProviderHandler(BaseHTTPRequestHandler):
@@ -130,7 +167,7 @@ async def test_cooperative_cancel_does_not_send_process_signals(monkeypatch) -> 
     exited = await executor.wait(handle, 2)
 
     assert exited is not None
-    assert exited.result == {"status": "cancelled"}
+    assert exited.result == {"status": "cancelled", "stop_reason": "cancelled"}
     assert exited.forced is False
     assert signals == []
 
@@ -166,6 +203,94 @@ async def test_identity_mismatch_refuses_to_signal_process_group() -> None:
     handle.identity = original_identity
     cleaned = await executor.force_kill(handle, term_grace_seconds=0.01)
     assert cleaned.termination_confirmed is True
+
+
+def _process_manager(
+    tmp_path,
+    executor: ProcessChildExecutor,
+) -> tuple[SubagentManager, LLMRuntime]:
+    config = Config.model_validate({
+        "agents": {
+            "defaults": {
+                "workspace": str(tmp_path),
+                "model": "worker-model",
+                "provider": "worker_test",
+            },
+        },
+        "providers": {
+            "worker_test": {
+                "apiKey": "pipe-only-test-key",
+                "apiBase": "http://127.0.0.1:9/v1",
+            },
+        },
+        "audit": {"mode": "off"},
+    })
+    manager = SubagentManager(
+        workspace=tmp_path,
+        bus=MessageBus(),
+        max_tool_result_chars=16_000,
+        child_executor=executor,
+        child_runtime_config={},
+    )
+    return manager, _runtime(config)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("behavior", "expected_termination"),
+    [("cooperative", "cooperatively_exited"), ("descendant", "force_killed")],
+)
+async def test_manager_preserves_confirmed_process_termination_state(
+    tmp_path,
+    behavior: str,
+    expected_termination: str,
+) -> None:
+    executor = _BehaviorExecutor(behavior)
+    manager, runtime = _process_manager(tmp_path, executor)
+    spawned = await manager.spawn("bounded child", runtime=runtime, structured=True)
+    task_id = spawned["task_id"]
+    handle = await _wait_for_handle(manager, task_id)
+
+    assert await manager.timeout_tasks([task_id], grace_seconds=0.05) is True
+    await asyncio.gather(*list(manager._running_tasks.values()), return_exceptions=True)
+    await asyncio.sleep(0)
+
+    status = manager.get_status(task_id)
+    assert status is not None
+    assert status.terminal_status == "timed_out"
+    assert status.termination_state == expected_termination
+    assert handle.process.returncode is not None
+    await manager.close()
+
+
+@pytest.mark.asyncio
+async def test_optional_termination_failure_notifies_once_and_rejects_late_success(tmp_path) -> None:
+    executor = _BehaviorExecutor("late_success", fail_force_kill=True)
+    manager, runtime = _process_manager(tmp_path, executor)
+    spawned = await manager.spawn(
+        "optional late child",
+        runtime=runtime,
+        session_key="test:optional",
+        structured=True,
+    )
+    task_id = spawned["task_id"]
+    await _wait_for_handle(manager, task_id)
+
+    assert await manager.timeout_tasks([task_id], grace_seconds=0.01) is False
+    assert manager.bus.inbound_size == 1
+    await manager._mark_termination_failed(task_id)
+    assert manager.bus.inbound_size == 1
+
+    await asyncio.gather(*list(manager._running_tasks.values()), return_exceptions=True)
+    await asyncio.sleep(0)
+    status = manager.get_status(task_id)
+    assert status is not None
+    assert status.required is False
+    assert status.terminal_status == "lost"
+    assert status.termination_state == "termination_failed"
+    assert status.error == "child termination could not be confirmed"
+    assert manager.bus.inbound_size == 1
+    await manager.close()
 
 
 @pytest.mark.asyncio
