@@ -236,8 +236,28 @@ describe("TraceGraph", () => {
     expect(await screen.findByText("恢复链路：2 个节点 / 3 条边")).toBeInTheDocument();
     const recovery = graph.edges.find((edge) => edge.id === "tool_recovery:failed:recovered")!;
     const sequence = graph.edges.find((edge) => edge.id === "sequence:failed:recovered")!;
-    expect(edgeHandles(recovery, graph)).toEqual({ sourceHandle: "right-source", targetHandle: "left-target" });
+    expect(edgeHandles(recovery, graph)).toEqual({ sourceHandle: "right-source", targetHandle: "right-target" });
+    expect(edgeHandles(graph.edges.find((edge) => edge.id === "tool_retry:failed:recovered")!, graph)).toEqual({
+      sourceHandle: "right-source",
+      targetHandle: "right-target",
+    });
+    expect(edgeHandles(graph.edges.find((edge) => edge.id === "tool_continuation:failed:recovered")!, graph)).toEqual({
+      sourceHandle: "right-source",
+      targetHandle: "right-target",
+    });
     expect(edgeHandles(sequence, graph)).toEqual({ sourceHandle: "bottom-source", targetHandle: "top-target" });
+    const routeMetadata = JSON.parse(screen.getByTestId("trace-graph").dataset.toolRoutes ?? "[]") as Array<{
+      edgeId: string;
+      slot: number;
+      railX: number;
+    }>;
+    expect(routeMetadata.map((route) => route.edgeId).sort()).toEqual([
+      "tool_continuation:failed:recovered",
+      "tool_recovery:failed:recovered",
+      "tool_retry:failed:recovered",
+    ]);
+    expect(new Set(routeMetadata.map((route) => route.slot)).size).toBe(3);
+    expect(routeMetadata.every((route) => Number.isFinite(route.railX))).toBe(true);
     rerender(
       <div style={{ width: 900, height: 700 }}>
         <TraceGraph graph={graph} selectedNodeId="run:1" focusMode="causal" onSelectNode={vi.fn()} onFocusMode={vi.fn()} />
