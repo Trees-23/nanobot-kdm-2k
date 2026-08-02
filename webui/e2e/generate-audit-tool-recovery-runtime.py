@@ -20,10 +20,10 @@ from nanobot.config.schema import AuditConfig
 from nanobot.providers.base import LLMProvider, LLMResponse, ToolCallRequest
 from nanobot.utils.llm_runtime import LLMRuntime
 
-TRACE_ID = "trace-runtime-tool-recovery"
-TURN_ID = "turn-runtime-tool-recovery"
-RUN_ID = "run-runtime-tool-recovery"
-SESSION_KEY = "websocket:runtime-tool-recovery"
+TRACE_ID = "trace-runtime-tool-recovery-rail-20260803"
+TURN_ID = "turn-runtime-tool-recovery-rail-20260803"
+RUN_ID = "run-runtime-tool-recovery-rail-20260803"
+SESSION_KEY = "websocket:runtime-tool-recovery-rail-20260803"
 
 
 class _ScriptedTool(Tool):
@@ -234,6 +234,7 @@ def main() -> None:
     args.config.write_text(json.dumps(config), encoding="utf-8")
     print(json.dumps({
         "trace_id": TRACE_ID,
+        "session_key": SESSION_KEY,
         "revision": revision,
         "generator": "AgentRunner+ReadFileTool+AuditRuntime",
     }))

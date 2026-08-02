@@ -153,9 +153,7 @@ function routePoints(
     y: edge.sourcePoint.y,
   }, obstacles, clearance);
   if (sourceHorizontal && obstacles.length) {
-    const stubX = edge.sourcePoint.x + clearance * 2;
-    appendPoint(points, { x: stubX, y: edge.sourcePoint.y });
-    appendPoint(points, { x: stubX, y: corridorY(edge.sourcePoint.y, obstacles, clearance) });
+    appendPoint(points, { x: edge.sourcePoint.x, y: corridorY(edge.sourcePoint.y, obstacles, clearance) });
     appendPoint(points, { x: railX, y: points.at(-1)!.y });
   } else {
     appendPoint(points, { x: railX, y: edge.sourcePoint.y });
@@ -164,10 +162,9 @@ function routePoints(
   const targetHorizontal = horizontalIntersects({ x: railX, y: edge.targetPoint.y }, edge.targetPoint, obstacles, clearance);
   if (targetHorizontal && obstacles.length) {
     const targetCorridorY = corridorY(edge.targetPoint.y, obstacles, clearance);
-    const stubX = edge.targetPoint.x + clearance * 2;
     appendPoint(points, { x: railX, y: targetCorridorY });
-    appendPoint(points, { x: stubX, y: targetCorridorY });
-    appendPoint(points, { x: stubX, y: edge.targetPoint.y });
+    appendPoint(points, { x: edge.targetPoint.x, y: targetCorridorY });
+    appendPoint(points, { x: edge.targetPoint.x, y: edge.targetPoint.y });
   } else {
     appendPoint(points, { x: railX, y: edge.targetPoint.y });
   }

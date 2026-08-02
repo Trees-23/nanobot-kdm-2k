@@ -79,24 +79,18 @@ function AuditEdge(props: EdgeProps) {
   };
   const style = styles[type ?? "sequence"];
   return (
-    <g
-      data-tool-route={toolRoute ? "true" : undefined}
-      data-tool-rail-x={toolRoute?.railX}
-      data-tool-slot={toolRoute?.slot}
-    >
-      <BaseEdge
-        path={path}
-        markerStart={props.markerStart}
-        markerEnd={props.markerEnd}
-        interactionWidth={Math.max(props.interactionWidth ?? 20, 32)}
-        style={{
-          ...props.style,
-          stroke: style.stroke,
-          strokeWidth: style.width,
-          strokeDasharray: style.dash,
-        }}
-      />
-    </g>
+    <BaseEdge
+      path={path}
+      markerStart={props.markerStart}
+      markerEnd={props.markerEnd}
+      interactionWidth={Math.max(props.interactionWidth ?? 20, 32)}
+      style={{
+        ...props.style,
+        stroke: style.stroke,
+        strokeWidth: style.width,
+        strokeDasharray: style.dash,
+      }}
+    />
   );
 }
 
@@ -549,7 +543,11 @@ export function TraceGraph({
         <div className="absolute left-3 top-3 z-10 flex items-center gap-1 rounded-md border border-border/70 bg-background/95 p-1 shadow-sm backdrop-blur">
           {toolbarButton("适配整张图", (
             <Button type="button" variant="ghost" size="icon" className="h-8 w-8" aria-label="适配整张图" onClick={() => {
-              void flowRef.current?.fitView({ padding: 0.2, duration: motionDuration(200) });
+              if (graphRouteBounds) {
+                void flowRef.current?.fitBounds(graphRouteBounds, { padding: 0.2, duration: motionDuration(200) });
+              } else {
+                void flowRef.current?.fitView({ padding: 0.2, duration: motionDuration(200) });
+              }
               setFeedback("已适配整张图");
             }}>
               <Focus className="h-3.5 w-3.5" />

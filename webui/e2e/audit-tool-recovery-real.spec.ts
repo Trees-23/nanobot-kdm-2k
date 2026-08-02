@@ -12,6 +12,7 @@ const secret = "real-audit-acceptance-secret";
 let gateway: ChildProcess | null = null;
 let baseUrl = "";
 let traceId = "";
+let sessionKey = "";
 let runtimeRevision = 0;
 let distHash = "";
 
@@ -69,11 +70,13 @@ test.beforeAll(async () => {
   if (runtimeTrace.status !== 0) throw new Error(runtimeTrace.stderr || runtimeTrace.stdout);
   const generated = JSON.parse(runtimeTrace.stdout.trim()) as {
     trace_id: string;
+    session_key: string;
     revision: number;
     generator: string;
   };
   expect(generated.generator).toBe("AgentRunner+ReadFileTool+AuditRuntime");
   traceId = generated.trace_id;
+  sessionKey = generated.session_key;
   runtimeRevision = generated.revision;
   distHash = createHash("sha256")
     .update(readFileSync(join(repositoryRoot, "nanobot/web/dist/index.html")))
@@ -119,7 +122,7 @@ for (const viewport of [{ width: 1440, height: 900 }, { width: 390, height: 844 
     expect(graphResponse.ok).toBeTruthy();
     const graph = await graphResponse.json() as {
       nodes: Array<{ id: string; summary: { tool_name?: string; error_message?: string; error_source?: string; retryability?: string; recovery_status?: string } }>;
-      edges: Array<{ id: string; type: string; source: string; anchor?: { source_event_id?: string; target_event_id?: string } }>;
+      edges: Array<{ id: string; type: string; source: string; target: string; anchor?: { source_event_id?: string; target_event_id?: string } }>;
       index: { revision: number };
     };
     const recovery = graph.edges.find((edge) => edge.type === "tool_recovery");
@@ -155,12 +158,123 @@ for (const viewport of [{ width: 1440, height: 900 }, { width: 390, height: 844 
       "d",
       await sequenceEdge.locator("path").first().getAttribute("d") ?? "",
     );
+
+    const routeMetadata = await page.getByTestId("trace-graph").evaluate((element) => {
+      const raw = element.getAttribute("data-tool-routes");
+      return raw ? JSON.parse(raw) as Array<{ edgeId: string; slot: number; railX: number }> : [];
+    });
+    expect(routeMetadata.map((route) => route.edgeId).sort()).toEqual([
+      continuation!.id,
+      recovery!.id,
+      retry!.id,
+    ].sort());
+    expect(routeMetadata.every((route) => Number.isFinite(route.railX))).toBe(true);
+
+    const geometry = await page.evaluate((payload) => {
+      const { edgeIds, endpoints, routes } = payload;
+      type Point = { x: number; y: number };
+      type Rect = { left: number; top: number; right: number; bottom: number };
+      const graph = document.querySelector<HTMLElement>('[data-testid="trace-graph"]');
+      const canvas = graph?.querySelector<HTMLElement>(".react-flow__renderer");
+      if (!graph || !canvas) throw new Error("trace graph canvas missing");
+      const canvasRect = canvas.getBoundingClientRect();
+      const nodes = new Map<string, Rect>();
+      graph.querySelectorAll<HTMLElement>(".react-flow__node").forEach((node) => {
+        const id = node.dataset.id;
+        if (id) nodes.set(id, node.getBoundingClientRect());
+      });
+      const routeGroups = edgeIds.map((edgeId) => {
+        const group = graph.querySelector<SVGGElement>(`.react-flow__edge[data-id="${CSS.escape(edgeId)}"]`);
+        const path = group?.querySelector<SVGPathElement>("path.react-flow__edge-path");
+        const route = routes.find((candidate) => candidate.edgeId === edgeId);
+        if (!group || !route || !path) throw new Error(`missing route ${edgeId}`);
+        const d = path.getAttribute("d") ?? "";
+        const graphPoints = [...d.matchAll(/[ML]\\s+(-?\\d+(?:\\.\\d+)?)\\s+(-?\\d+(?:\\.\\d+)?)/g)]
+          .map((match) => ({ x: Number(match[1]), y: Number(match[2]) }));
+        const matrix = path.getScreenCTM();
+        if (!matrix) throw new Error(`missing transform ${edgeId}`);
+        const screenPoints = graphPoints.map((point) => {
+          const transformed = new DOMPoint(point.x, point.y).matrixTransform(matrix);
+          return { x: transformed.x, y: transformed.y };
+        });
+        const matrixRail = new DOMPoint(route.railX, 0).matrixTransform(matrix);
+        return {
+          edgeId,
+          railX: route.railX,
+          railScreenX: matrixRail.x,
+          screenPoints,
+          source: endpoints[edgeId]?.source,
+          target: endpoints[edgeId]?.target,
+          inCanvas: screenPoints.every((point) => point.x >= canvasRect.left - 1
+            && point.x <= canvasRect.right + 1
+            && point.y >= canvasRect.top - 1
+            && point.y <= canvasRect.bottom + 1),
+        };
+      });
+      const maxNodeRight = Math.max(...[...nodes.values()].map((rect) => rect.right));
+      const failures: string[] = [];
+      for (const route of routeGroups) {
+        if (route.railScreenX <= maxNodeRight) failures.push(`${route.edgeId}:rail`);
+        if (!route.inCanvas) failures.push(`${route.edgeId}:clipped`);
+        for (const [nodeId, rect] of nodes) {
+          if (nodeId === route.source || nodeId === route.target) continue;
+          for (const [index, start] of route.screenPoints.entries()) {
+            const end = route.screenPoints[index + 1];
+            if (!end) break;
+            const horizontal = start.y === end.y;
+            const vertical = start.x === end.x;
+            const intersects = horizontal
+              ? start.y > rect.top && start.y < rect.bottom
+                && Math.max(start.x, end.x) > rect.left && Math.min(start.x, end.x) < rect.right
+              : vertical
+                ? start.x > rect.left && start.x < rect.right
+                  && Math.max(start.y, end.y) > rect.top && Math.min(start.y, end.y) < rect.bottom
+                : false;
+            if (intersects) failures.push(`${route.edgeId}:${nodeId}`);
+          }
+        }
+      }
+      return { routeCount: routeGroups.length, maxNodeRight, failures };
+    }, {
+      edgeIds: [retry!.id, continuation!.id, recovery!.id],
+      endpoints: Object.fromEntries([retry!, continuation!, recovery!].map((edge) => [edge.id, {
+        source: edge.source,
+        target: edge.target,
+      }])),
+      routes: routeMetadata,
+    });
+    expect(geometry.routeCount).toBe(3);
+    expect(geometry.failures).toEqual([]);
+
+    const initialRouteMetadata = routeMetadata;
+    await page.reload();
+    await expect(page.getByTestId("trace-graph")).toBeVisible();
+    const reloadedNodeInspector = page.getByRole("complementary", { name: "节点检查器" });
+    if (await reloadedNodeInspector.isVisible()) {
+      await reloadedNodeInspector.getByRole("button", { name: "关闭节点检查器" }).click();
+    }
+    const refreshedRouteMetadata = await page.getByTestId("trace-graph").evaluate((element) => {
+      const raw = element.getAttribute("data-tool-routes");
+      return raw ? JSON.parse(raw) as Array<{ edgeId: string; slot: number; railX: number }> : [];
+    });
+    expect(refreshedRouteMetadata).toEqual(initialRouteMetadata);
     const selectRelation = async (edge: { id: string; type: string }) => {
       if (viewport.width < 768) {
         await page.getByTestId(`tool-relation-${edge.type}`).click();
         return;
       }
-      await page.locator(`.react-flow__edge[data-id="${edge.id}"] .react-flow__edge-interaction`).click();
+      await page.getByRole("button", { name: "适配整张图" }).click();
+      await page.waitForTimeout(250);
+      const interactionPath = page.locator(`.react-flow__edge[data-id="${edge.id}"] .react-flow__edge-interaction`);
+      const clickPoint = await interactionPath.evaluate((path) => {
+        const svgPath = path as SVGPathElement;
+        const graphPoint = svgPath.getPointAtLength(svgPath.getTotalLength() / 2);
+        const matrix = svgPath.getScreenCTM();
+        if (!matrix) throw new Error("edge interaction transform missing");
+        const screenPoint = new DOMPoint(graphPoint.x, graphPoint.y).matrixTransform(matrix);
+        return { x: screenPoint.x, y: screenPoint.y };
+      });
+      await page.mouse.click(clickPoint.x, clickPoint.y);
     };
     for (const [edge, title] of [
       [retry!, "Tool 重试关系"],
@@ -181,6 +295,7 @@ for (const viewport of [{ width: 1440, height: 900 }, { width: 390, height: 844 
     await expect(inspector).toContainText(recovery!.anchor!.source_event_id!);
     await expect(inspector).toContainText(recovery!.anchor!.target_event_id!);
     expect(requests.filter((path) => path.startsWith("/api/audit/payloads/"))).toHaveLength(0);
+    expect(sessionKey).toBe("websocket:runtime-tool-recovery-rail-20260803");
 
     await testInfo.attach(`tool-recovery-${viewport.width}x${viewport.height}.png`, {
       body: await page.screenshot({ fullPage: true }),

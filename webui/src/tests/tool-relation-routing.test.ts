@@ -104,6 +104,22 @@ describe("tool relation routing", () => {
     }
   });
 
+  it("leaves no horizontal stub inside a close cross-lane obstacle", () => {
+    const closeNodes = [
+      { id: "source", x: 100, y: 100, width: 100, height: 40 },
+      { id: "close-blocker", x: 215, y: 80, width: 100, height: 80 },
+      { id: "target", x: 100, y: 260, width: 100, height: 40 },
+    ];
+    const route = buildToolRelationRoutes({
+      edges: [{ id: "close-cross", type: "tool_recovery", source: "source", target: "target" }],
+      nodeBounds: closeNodes,
+      rightBoundary: 315,
+    }).get("close-cross")!;
+    for (const segment of segments(route.points)) {
+      expect(segmentIntersectsBounds(segment, closeNodes[1], 8)).toBe(false);
+    }
+  });
+
   it("recomputes the rail from the current visible bounding box", () => {
     const expanded = buildToolRelationRoutes({ edges: [edges[0]], nodeBounds: nodes, rightBoundary: 200 }).get("recovery")!;
     const collapsed = buildToolRelationRoutes({
