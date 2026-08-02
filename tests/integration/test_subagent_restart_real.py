@@ -42,7 +42,11 @@ def _run(root: Path, action: str) -> dict[str, Any]:
 
 def _crash(process: subprocess.Popen[str]) -> None:
     process.kill()
-    assert process.wait(timeout=5) < 0
+    return_code = process.wait(timeout=5)
+    if sys.platform == "win32":
+        assert return_code != 0
+    else:
+        assert return_code < 0
 
 
 def test_s05_s07_s11_waiting_child_restart_is_lost_without_new_deadline(tmp_path) -> None:

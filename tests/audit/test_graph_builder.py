@@ -464,6 +464,79 @@ def test_explicit_recovery_distinguishes_three_config_paths() -> None:
     assert recovery_edges[0].evidence_count == 1
 
 
+def test_explicit_tool_retry_continuation_and_recovery_are_distinct() -> None:
+    events = [
+        _event(1, "run_started"),
+        _event(2, "tool_started", tool_call_id="failed", tool_name="exec"),
+        _event(
+            3,
+            "tool_finished",
+            tool_call_id="failed",
+            tool_name="exec",
+            elapsed_ms=1,
+            status="timeout",
+            error_message="Error: command timed out",
+            error_summary="command timed out",
+            error_type="TimeoutError",
+            error_code="tool_timeout",
+            error_source="timeout",
+            retryability="retryable",
+        ),
+        _event(4, "tool_started", tool_call_id="retry", tool_name="exec"),
+        _event(
+            5,
+            "tool_finished",
+            tool_call_id="retry",
+            tool_name="exec",
+            elapsed_ms=1,
+            status="error",
+            retry_of_tool_call_ids=["failed", "dangling"],
+        ),
+        _event(6, "tool_started", tool_call_id="continue", tool_name="write_stdin"),
+        _event(
+            7,
+            "tool_finished",
+            tool_call_id="continue",
+            tool_name="write_stdin",
+            elapsed_ms=1,
+            status="ok",
+            continuation_of_tool_call_ids=["failed"],
+        ),
+        _event(8, "tool_started", tool_call_id="recovered", tool_name="exec"),
+        _event(
+            9,
+            "tool_finished",
+            tool_call_id="recovered",
+            tool_name="exec",
+            elapsed_ms=1,
+            status="ok",
+            recovery_of_tool_call_ids=["failed"],
+            recovery_evidence_kind="process_exit_zero",
+        ),
+        _event(10, "run_finished", status="succeeded", stop_reason="completed"),
+    ]
+
+    graph = AuditGraphBuilder().build(
+        trace_id="trace-1", level="trace_full", events=events
+    )
+    relations = {edge.type: edge for edge in graph.edges if edge.type.startswith("tool_")}
+
+    assert set(relations) == {"tool_retry", "tool_continuation", "tool_recovery"}
+    assert relations["tool_retry"].anchor.source_event_id == "e3"
+    assert relations["tool_continuation"].anchor.target_event_id == "e7"
+    assert relations["tool_recovery"].anchor.target_event_id == "e9"
+    assert relations["tool_recovery"].evidence_kind == "process_exit_zero"
+    failed = next(
+        node for node in graph.nodes
+        if node.type == "tool_call" and node.summary.identifier == "failed"
+    )
+    assert failed.summary.error_message == "Error: command timed out"
+    assert failed.summary.error_source == "timeout"
+    assert failed.summary.retryability == "retryable"
+    assert failed.summary.recovery_status == "recovered"
+    assert failed.summary.recovery_evidence_kind == "process_exit_zero"
+
+
 def test_fatal_tool_timeout_drives_run_diagnostics_without_payload_content() -> None:
     events = [
         _event(1, "run_started", run_id="child"),

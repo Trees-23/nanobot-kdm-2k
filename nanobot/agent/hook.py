@@ -9,6 +9,7 @@ from typing import Any
 
 from loguru import logger
 
+from nanobot.agent.tool_failure import NormalizedToolFailure
 from nanobot.providers.base import LLMResponse, ToolCallRequest
 from nanobot.utils.llm_runtime import LLMRuntime
 
@@ -38,6 +39,7 @@ class ToolAuditOutcome:
     provider: str | None = None
     fatal: bool = False
     failure_policy: str | None = None
+    failure: NormalizedToolFailure | None = None
 
 
 @dataclass(slots=True)

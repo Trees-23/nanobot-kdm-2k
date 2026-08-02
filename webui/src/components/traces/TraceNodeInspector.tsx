@@ -57,6 +57,10 @@ export function TraceNodeInspector({
       ["安全输入", node.summary.safe_input_summary],
       ["错误类型", node.summary.error_type],
       ["错误码", node.summary.error_code],
+      ["错误来源", node.summary.error_source],
+      ["可重试性", node.summary.retryability],
+      ["操作证据", node.summary.operation_evidence_kind],
+      ["恢复证据", node.summary.recovery_evidence_kind],
       ["有效 timeout", node.summary.effective_timeout_ms == null ? null : `${node.summary.effective_timeout_ms} ms`],
       ["Iteration", node.iteration],
       ["Run ID", node.run_id],
@@ -116,9 +120,15 @@ export function TraceNodeInspector({
     recovered: "已由后续确定性调用恢复",
     unrecovered: "未恢复",
     continued: "未证明恢复，但 Run 已继续",
-    unknown: "恢复状态未知",
+    unresolved: "证据不足，恢复状态未决",
     pending: "恢复状态待定",
-  }[node.summary.recovery_status ?? "unknown"];
+  }[node.summary.recovery_status ?? "unresolved"];
+  const errorMessage = node.summary.error_message ?? node.summary.error_summary;
+  const isFailedTool = node.type === "tool_call" && Boolean(
+    node.summary.failure_kind
+    || errorMessage
+    || ["failed", "warning", "cancelled", "interrupted"].includes(node.status),
+  );
 
   return (
     <aside className="flex h-full min-h-0 w-full flex-col border-l border-border/60 bg-background" aria-label="节点检查器">
@@ -132,10 +142,12 @@ export function TraceNodeInspector({
         </Button>
       </div>
       <div className="min-h-0 flex-1 overflow-y-auto px-3 py-3 text-xs">
-        {node.summary.error_summary ? (
+        {isFailedTool ? (
           <section className="mb-4 rounded-md border border-destructive/30 bg-destructive/5 p-3">
             <h3 className="text-[11px] font-semibold text-destructive">根因</h3>
-            <p className="mt-1 text-[12px] font-medium">{node.summary.error_summary}</p>
+            <p className="mt-1 whitespace-pre-wrap break-words text-[12px] font-medium">
+              {errorMessage ?? "历史版本未记录错误详情"}
+            </p>
             <p className="mt-2 text-[10.5px] text-muted-foreground">影响：{impactLabel}</p>
             <p className="mt-1 text-[10.5px] text-muted-foreground">恢复：{recoveryLabel}</p>
             {node.summary.evidence_source === "legacy_inferred" ? (

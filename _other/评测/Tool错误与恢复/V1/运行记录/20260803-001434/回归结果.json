@@ -1,0 +1,32 @@
+{
+  "python_full": {
+    "command": "pytest",
+    "passed": 5284,
+    "failed": 1,
+    "skipped": 18,
+    "deselected": 1,
+    "duration_seconds": 434.68,
+    "failure": "tests/agent/test_child_executor.py::test_manager_preserves_confirmed_process_termination_state[cooperative-cooperatively_exited]",
+    "failure_scope": "本次未修改的 child executor 终止时序"
+  },
+  "python_failure_rerun": {
+    "passed": 1,
+    "failed": 0,
+    "duration_seconds": 0.1
+  },
+  "ruff": {
+    "command": "ruff check nanobot/ tests/agent tests/audit tests/tools",
+    "result": "passed"
+  },
+  "webui_full": {
+    "command": "bun run test",
+    "files_passed": 44,
+    "tests_passed": 609,
+    "failed": 0
+  },
+  "webui_build": {
+    "command": "bun run build",
+    "result": "passed",
+    "warning": "既有主 chunk 超过 500 kB"
+  }
+}

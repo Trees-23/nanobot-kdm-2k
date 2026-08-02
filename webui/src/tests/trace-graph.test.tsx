@@ -189,7 +189,7 @@ describe("TraceGraph", () => {
     expect(await screen.findByText("因果链：2 个节点 / 1 条边")).toBeInTheDocument();
   });
 
-  it("focuses explicit tool recovery without adding it to causal focus", async () => {
+  it("focuses explicit tool relations without adding them to causal focus", async () => {
     const graph = graphFixture();
     graph.nodes.push({
       ...graph.nodes[0],
@@ -208,6 +208,20 @@ describe("TraceGraph", () => {
       anchor: { source_event_id: "failed-event", target_event_id: "recovered-event" },
     });
     graph.edges.push({
+      id: "tool_retry:failed:recovered",
+      type: "tool_retry",
+      source: "run:1",
+      target: "tool:recovered",
+      anchor: { source_event_id: "failed-event", target_event_id: "retry-event" },
+    });
+    graph.edges.push({
+      id: "tool_continuation:failed:recovered",
+      type: "tool_continuation",
+      source: "run:1",
+      target: "tool:recovered",
+      anchor: { source_event_id: "failed-event", target_event_id: "continued-event" },
+    });
+    graph.edges.push({
       id: "sequence:failed:recovered",
       type: "sequence",
       source: "run:1",
@@ -219,11 +233,31 @@ describe("TraceGraph", () => {
       </div>,
     );
 
-    expect(await screen.findByText("恢复链路：2 个节点 / 1 条边")).toBeInTheDocument();
+    expect(await screen.findByText("恢复链路：2 个节点 / 3 条边")).toBeInTheDocument();
     const recovery = graph.edges.find((edge) => edge.id === "tool_recovery:failed:recovered")!;
     const sequence = graph.edges.find((edge) => edge.id === "sequence:failed:recovered")!;
-    expect(edgeHandles(recovery, graph)).toEqual({ sourceHandle: "right-source", targetHandle: "left-target" });
+    expect(edgeHandles(recovery, graph)).toEqual({ sourceHandle: "right-source", targetHandle: "right-target" });
+    expect(edgeHandles(graph.edges.find((edge) => edge.id === "tool_retry:failed:recovered")!, graph)).toEqual({
+      sourceHandle: "right-source",
+      targetHandle: "right-target",
+    });
+    expect(edgeHandles(graph.edges.find((edge) => edge.id === "tool_continuation:failed:recovered")!, graph)).toEqual({
+      sourceHandle: "right-source",
+      targetHandle: "right-target",
+    });
     expect(edgeHandles(sequence, graph)).toEqual({ sourceHandle: "bottom-source", targetHandle: "top-target" });
+    const routeMetadata = JSON.parse(screen.getByTestId("trace-graph").dataset.toolRoutes ?? "[]") as Array<{
+      edgeId: string;
+      slot: number;
+      railX: number;
+    }>;
+    expect(routeMetadata.map((route) => route.edgeId).sort()).toEqual([
+      "tool_continuation:failed:recovered",
+      "tool_recovery:failed:recovered",
+      "tool_retry:failed:recovered",
+    ]);
+    expect(new Set(routeMetadata.map((route) => route.slot)).size).toBe(3);
+    expect(routeMetadata.every((route) => Number.isFinite(route.railX))).toBe(true);
     rerender(
       <div style={{ width: 900, height: 700 }}>
         <TraceGraph graph={graph} selectedNodeId="run:1" focusMode="causal" onSelectNode={vi.fn()} onFocusMode={vi.fn()} />

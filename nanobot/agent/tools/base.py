@@ -138,6 +138,8 @@ class ToolResult(str):
     error_code: str | None
     effective_timeout_ms: int | None
     provider: str | None
+    error_source: str | None
+    retryability: str | None
 
     def __new__(
         cls,
@@ -149,6 +151,8 @@ class ToolResult(str):
         error_code: str | None = None,
         effective_timeout_ms: int | None = None,
         provider: str | None = None,
+        error_source: str | None = None,
+        retryability: str | None = None,
     ) -> ToolResult:
         obj = str.__new__(cls, content)
         obj.is_error = is_error
@@ -157,6 +161,8 @@ class ToolResult(str):
         obj.error_code = error_code
         obj.effective_timeout_ms = effective_timeout_ms
         obj.provider = provider
+        obj.error_source = error_source
+        obj.retryability = retryability
         return obj
 
     @classmethod
@@ -169,6 +175,8 @@ class ToolResult(str):
         error_code: str | None = None,
         effective_timeout_ms: int | None = None,
         provider: str | None = None,
+        error_source: str | None = None,
+        retryability: str | None = None,
     ) -> ToolResult:
         return cls(
             content,
@@ -178,6 +186,8 @@ class ToolResult(str):
             error_code=error_code,
             effective_timeout_ms=effective_timeout_ms,
             provider=provider,
+            error_source=error_source,
+            retryability=retryability,
         )
 
     def with_content(self, content: str) -> ToolResult:
@@ -190,6 +200,8 @@ class ToolResult(str):
             error_code=self.error_code,
             effective_timeout_ms=self.effective_timeout_ms,
             provider=self.provider,
+            error_source=self.error_source,
+            retryability=self.retryability,
         )
 
 
