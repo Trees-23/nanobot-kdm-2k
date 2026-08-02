@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from nanobot.agent.runner import AgentRunner, AgentRunSpec
+from nanobot.agent.tools.base import Tool, ToolResult
 from nanobot.agent.tools.filesystem import ReadFileTool
 from nanobot.agent.tools.registry import ToolRegistry
 from nanobot.audit.context import AuditRunContext
@@ -25,8 +26,31 @@ RUN_ID = "run-runtime-tool-recovery"
 SESSION_KEY = "websocket:runtime-tool-recovery"
 
 
+class _ScriptedTool(Tool):
+    def __init__(self, name: str, results: list[str]) -> None:
+        self._name = name
+        self._results = results
+
+    @property
+    def name(self) -> str:
+        return self._name
+
+    @property
+    def description(self) -> str:
+        return "Deterministic audit acceptance tool."
+
+    @property
+    def parameters(self) -> dict[str, Any]:
+        return {"type": "object", "additionalProperties": True}
+
+    async def execute(self, **_kwargs: Any) -> str:
+        if not self._results:
+            raise RuntimeError(f"unexpected {self.name} invocation")
+        return self._results.pop(0)
+
+
 class RecoveryProvider(LLMProvider):
-    """Deterministic local provider that drives two real read_file calls."""
+    """Drive recovery, retry, and continuation through the real Runner."""
 
     def __init__(self) -> None:
         super().__init__()
@@ -46,6 +70,42 @@ class RecoveryProvider(LLMProvider):
                     id="provider-recovered-read",
                     name="read_file",
                     arguments={"path": "recovery-target/config.json"},
+                )],
+                finish_reason="tool_calls",
+            ),
+            LLMResponse(
+                content="",
+                tool_calls=[ToolCallRequest(
+                    id="provider-plugin-failed",
+                    name="mcp_fixture",
+                    arguments={"operation": "status"},
+                )],
+                finish_reason="tool_calls",
+            ),
+            LLMResponse(
+                content="",
+                tool_calls=[ToolCallRequest(
+                    id="provider-plugin-retry",
+                    name="mcp_fixture",
+                    arguments={"operation": "status"},
+                )],
+                finish_reason="tool_calls",
+            ),
+            LLMResponse(
+                content="",
+                tool_calls=[ToolCallRequest(
+                    id="provider-session-failed",
+                    name="write_stdin",
+                    arguments={"session_id": "fixture-session", "chars": "input"},
+                )],
+                finish_reason="tool_calls",
+            ),
+            LLMResponse(
+                content="",
+                tool_calls=[ToolCallRequest(
+                    id="provider-session-continued",
+                    name="write_stdin",
+                    arguments={"session_id": "fixture-session", "chars": ""},
                 )],
                 finish_reason="tool_calls",
             ),
@@ -87,12 +147,23 @@ async def _generate(root: Path, workspace: Path) -> int:
     )
     tools = ToolRegistry()
     tools.register(ReadFileTool(workspace=workspace, restrict_to_workspace=True))
+    tools.register(_ScriptedTool(
+        "mcp_fixture",
+        [ToolResult.error("Error: fixture plugin unavailable"), "fixture plugin response"],
+    ))
+    tools.register(_ScriptedTool(
+        "write_stdin",
+        [
+            ToolResult.error("Error: process output not ready"),
+            "Process running. session_id: fixture-session",
+        ],
+    ))
     try:
         result = await AgentRunner(audit_emitter=audit.emitter).run(AgentRunSpec(
             initial_messages=[{"role": "user", "content": "Recover the local config read."}],
             tools=tools,
             runtime=runtime,
-            max_iterations=3,
+            max_iterations=7,
             max_tool_result_chars=10_000,
             fail_on_tool_error=False,
             workspace=workspace,

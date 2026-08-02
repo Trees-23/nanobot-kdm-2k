@@ -75,7 +75,7 @@ function AuditEdge(props: EdgeProps) {
       path={path}
       markerStart={props.markerStart}
       markerEnd={props.markerEnd}
-      interactionWidth={props.interactionWidth}
+      interactionWidth={Math.max(props.interactionWidth ?? 20, 32)}
       style={{
         ...props.style,
         stroke: style.stroke,
@@ -87,6 +87,11 @@ function AuditEdge(props: EdgeProps) {
 }
 
 const edgeTypes = { audit: AuditEdge };
+const toolRelationLabels: Partial<Record<TraceEdgeType, string>> = {
+  tool_retry: "Tool 重试关系",
+  tool_continuation: "Tool 继续关系",
+  tool_recovery: "Tool 恢复关系",
+};
 
 export function edgeHandles(edge: AuditGraphEdge, graph: AuditGraphResponse) {
   const sourceSide = graph.nodes.find((node) => node.id === edge.source)?.lane_side;
@@ -381,6 +386,20 @@ export function TraceGraph({
         : undefined,
     })), [focusResult.edgeIds, graph.edges, hiddenAttemptIds, hiddenCollapsedIds, highlighted]);
 
+  const toolRelationEdges = useMemo(
+    () => graph.edges.filter((edge) => ["tool_retry", "tool_continuation", "tool_recovery"].includes(edge.type)),
+    [graph.edges],
+  );
+
+  const selectEdge = useCallback((edge: AuditGraphEdge) => {
+    onSelectEdge?.(edge);
+    void flowRef.current?.fitView({
+      nodes: [{ id: edge.source }, { id: edge.target }],
+      duration: motionDuration(200),
+      padding: 0.8,
+    });
+  }, [onSelectEdge]);
+
   const locateFirstAnomaly = () => {
     if (!graph.first_anomaly) return;
     onSelectNode(graph.first_anomaly.node_id);
@@ -443,7 +462,7 @@ export function TraceGraph({
         }}
         onEdgeClick={(_, edge) => {
           const selected = graph.edges.find((candidate) => candidate.id === edge.id);
-          if (selected) onSelectEdge?.(selected);
+          if (selected) selectEdge(selected);
         }}
         onPaneClick={() => onSelectNode(null)}
         proOptions={{ hideAttribution: true }}
@@ -487,6 +506,25 @@ export function TraceGraph({
           ))}
           {visibleSemantic.length > 100 ? <span className="px-1 text-[10px] text-muted-foreground"><MapIcon className="mr-1 inline h-3 w-3" />{visibleSemantic.length}</span> : null}
         </div>
+        {toolRelationEdges.length ? (
+          <div className="absolute right-3 top-3 z-10 flex max-w-[calc(100%-96px)] gap-1 overflow-x-auto rounded-md border border-border/70 bg-background/95 p-1 shadow-sm backdrop-blur md:hidden" data-testid="tool-relation-selector">
+            {toolRelationEdges.map((edge) => (
+              <Button
+                key={edge.id}
+                type="button"
+                variant="ghost"
+                size="sm"
+                className="h-8 shrink-0 px-2 text-[10px]"
+                aria-label={toolRelationLabels[edge.type] ?? edge.type}
+                title={toolRelationLabels[edge.type] ?? edge.type}
+                data-testid={`tool-relation-${edge.type}`}
+                onClick={() => selectEdge(edge)}
+              >
+                {edge.type === "tool_retry" ? "重试" : edge.type === "tool_continuation" ? "继续" : "恢复"}
+              </Button>
+            ))}
+          </div>
+        ) : null}
       </TooltipProvider>
       {focusMode ? (
         <div role="status" className="absolute left-3 top-14 z-10 flex items-center gap-2 rounded-md border border-border/70 bg-background/95 px-2.5 py-1.5 text-[10.5px] shadow-sm">

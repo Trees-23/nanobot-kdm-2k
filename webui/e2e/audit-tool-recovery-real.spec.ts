@@ -118,17 +118,35 @@ for (const viewport of [{ width: 1440, height: 900 }, { width: 390, height: 844 
     });
     expect(graphResponse.ok).toBeTruthy();
     const graph = await graphResponse.json() as {
-      nodes: Array<{ id: string }>;
+      nodes: Array<{ id: string; summary: { tool_name?: string; error_message?: string; error_source?: string; retryability?: string; recovery_status?: string } }>;
       edges: Array<{ id: string; type: string; source: string; anchor?: { source_event_id?: string; target_event_id?: string } }>;
       index: { revision: number };
     };
     const recovery = graph.edges.find((edge) => edge.type === "tool_recovery");
+    const retry = graph.edges.find((edge) => edge.type === "tool_retry");
+    const continuation = graph.edges.find((edge) => edge.type === "tool_continuation");
     expect(recovery).toBeTruthy();
+    expect(retry).toBeTruthy();
+    expect(continuation).toBeTruthy();
+    const failedRead = graph.nodes.find((node) => node.id === recovery!.source);
+    expect(failedRead?.summary.error_message).toContain("File not found");
+    expect(failedRead?.summary.error_source).toBe("tool_result");
+    expect(failedRead?.summary.retryability).toBe("unknown");
+    expect(failedRead?.summary.recovery_status).toBe("recovered");
+    expect(graph.nodes.find((node) => node.id === retry!.source)?.summary.recovery_status).toBe("unresolved");
+    expect(graph.nodes.find((node) => node.id === continuation!.source)?.summary.recovery_status).toBe("continued");
 
-    const nodeParam = viewport.width >= 1440 ? `&node=${encodeURIComponent(recovery!.source)}` : "";
+    const nodeParam = `&node=${encodeURIComponent(recovery!.source)}`;
     const route = `/#/traces/${encodeURIComponent(traceId)}?bootstrapSecret=${encodeURIComponent(secret)}${nodeParam}`;
     await page.goto(`${baseUrl}${route}`);
     await expect(page.getByTestId("trace-graph")).toBeVisible();
+    const nodeInspector = page.getByRole("complementary", { name: "节点检查器" });
+    await expect(nodeInspector).toBeVisible();
+    await expect(nodeInspector).toContainText("File not found");
+    await expect(nodeInspector).toContainText("错误来源");
+    await expect(nodeInspector).toContainText("可重试性");
+    await nodeInspector.getByRole("button", { name: "关闭节点检查器" }).click();
+    await expect(nodeInspector).toBeHidden();
     const recoveryEdge = page.locator(`.react-flow__edge[data-id="${recovery!.id}"]`);
     await expect(recoveryEdge.locator("path").first()).toHaveAttribute("d", /.+/);
     const sequenceEdge = page.locator(`.react-flow__edge[data-id^="sequence:"]`).first();
@@ -137,7 +155,25 @@ for (const viewport of [{ width: 1440, height: 900 }, { width: 390, height: 844 
       "d",
       await sequenceEdge.locator("path").first().getAttribute("d") ?? "",
     );
-    await recoveryEdge.click({ force: true });
+    const selectRelation = async (edge: { id: string; type: string }) => {
+      if (viewport.width < 768) {
+        await page.getByTestId(`tool-relation-${edge.type}`).click();
+        return;
+      }
+      await page.locator(`.react-flow__edge[data-id="${edge.id}"] .react-flow__edge-interaction`).click();
+    };
+    for (const [edge, title] of [
+      [retry!, "Tool 重试关系"],
+      [continuation!, "Tool 继续关系"],
+      [recovery!, "Tool 恢复关系"],
+    ] as const) {
+      await selectRelation(edge);
+      const relationInspector = page.getByRole("complementary", { name: "恢复关系检查器" });
+      await expect(relationInspector).toContainText(title);
+      await expect(relationInspector).toContainText("证据类型");
+      await relationInspector.getByRole("button", { name: "关闭关系检查器" }).click();
+    }
+    await selectRelation(recovery!);
 
     const inspector = page.getByRole("complementary", { name: "恢复关系检查器" });
     await expect(inspector).toBeVisible();
@@ -145,6 +181,11 @@ for (const viewport of [{ width: 1440, height: 900 }, { width: 390, height: 844 
     await expect(inspector).toContainText(recovery!.anchor!.source_event_id!);
     await expect(inspector).toContainText(recovery!.anchor!.target_event_id!);
     expect(requests.filter((path) => path.startsWith("/api/audit/payloads/"))).toHaveLength(0);
+
+    await testInfo.attach(`tool-recovery-${viewport.width}x${viewport.height}.png`, {
+      body: await page.screenshot({ fullPage: true }),
+      contentType: "image/png",
+    });
 
     await inspector.getByRole("button", { name: "定位失败端 Event" }).click();
     await expect(page.getByText("Event 时间线")).toBeVisible();
@@ -158,7 +199,7 @@ for (const viewport of [{ width: 1440, height: 900 }, { width: 390, height: 844 
       await page.getByRole("button", { name: /Event 时间线/ }).first().click();
       await expect(inspector).toBeVisible();
     }
-    await inspector.getByRole("button", { name: "定位恢复端 Event" }).click();
+    await inspector.getByRole("button", { name: "定位后续端 Event" }).click();
     const recoveredRow = page.locator(`[data-event-id="${recovery!.anchor!.target_event_id}"]`);
     await expect(recoveredRow).toHaveClass(/bg-sidebar-accent/);
     const selectedEventIds = await page.locator("[data-event-id]").evaluateAll((rows) => rows

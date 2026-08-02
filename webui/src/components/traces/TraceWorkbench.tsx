@@ -353,7 +353,7 @@ export function TraceWorkbench({
             if (!open) onSelectionChange({ ...selection, nodeId: null, eventId: null });
           }}
         >
-          <SheetContent side="right" className="w-[min(100vw,400px)] p-0" aria-describedby={undefined}>
+          <SheetContent side="right" className="w-[min(100vw,400px)] p-0" aria-describedby={undefined} showCloseButton={false}>
             <SheetTitle className="sr-only">节点检查器</SheetTitle>
             {selectedNode ? (
               <TraceNodeInspector
@@ -369,7 +369,7 @@ export function TraceWorkbench({
         </Sheet>
       ) : null}
       <Sheet open={Boolean(payloadId)} onOpenChange={(open) => { if (!open) setPayloadId(null); }}>
-        <SheetContent side="right" className="w-[min(100vw,640px)] p-0" aria-describedby={undefined}>
+        <SheetContent side="right" className="w-[min(100vw,640px)] p-0" aria-describedby={undefined} showCloseButton={false}>
           <SheetTitle className="sr-only">Payload 查看器</SheetTitle>
           <PayloadViewer
             payload={payload}
