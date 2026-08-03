@@ -75,7 +75,6 @@ _STATUS_TRANSITIONS: dict[SubagentTaskStatus, frozenset[SubagentTaskStatus]] = {
     SubagentTaskStatus.RUNNING: TERMINAL_TASK_STATUSES,
 }
 
-
 class SubagentExecutionPhase(StrEnum):
     INITIALIZING = "initializing"
     RUNNING_MODEL = "running_model"
@@ -101,6 +100,30 @@ class SubagentDeliveryPhase(StrEnum):
     CLAIMED_PENDING_DELIVERY = "claimed_pending_delivery"
     DELIVERED = "delivered"
     DELIVERY_FAILED = "delivery_failed"
+
+
+_TERMINATION_TRANSITIONS = {
+    SubagentTerminationState.NONE: frozenset({
+        SubagentTerminationState.CANCEL_REQUESTED,
+        SubagentTerminationState.COOPERATIVELY_EXITED,
+        SubagentTerminationState.TERMINATION_FAILED,
+    }),
+    SubagentTerminationState.CANCEL_REQUESTED: frozenset({
+        SubagentTerminationState.GRACE_WAITING,
+        SubagentTerminationState.COOPERATIVELY_EXITED,
+        SubagentTerminationState.FORCE_KILL_REQUESTED,
+        SubagentTerminationState.TERMINATION_FAILED,
+    }),
+    SubagentTerminationState.GRACE_WAITING: frozenset({
+        SubagentTerminationState.COOPERATIVELY_EXITED,
+        SubagentTerminationState.FORCE_KILL_REQUESTED,
+        SubagentTerminationState.TERMINATION_FAILED,
+    }),
+    SubagentTerminationState.FORCE_KILL_REQUESTED: frozenset({
+        SubagentTerminationState.FORCE_KILLED,
+        SubagentTerminationState.TERMINATION_FAILED,
+    }),
+}
 
 
 class TerminationState(BaseModel):
@@ -356,6 +379,15 @@ class SubagentTaskStore:
             raise ValueError("subagent task storage identity mismatch")
         return task
 
+    def list_tasks(self) -> list[SubagentTask]:
+        tasks: list[SubagentTask] = []
+        for path in sorted(self.root.glob("*.json")):
+            raw = json.loads(path.read_text(encoding="utf-8"))
+            if not isinstance(raw, dict):
+                raise ValueError("subagent task record must be a JSON object")
+            tasks.append(SubagentTask.model_validate(self._normalize_legacy(raw)))
+        return tasks
+
     async def transition_status(
         self,
         task_id: str,
@@ -386,13 +418,119 @@ class SubagentTaskStore:
                 task.finished_at = occurred_at
             if error is not None:
                 task.error = error[:MAX_TASK_ERROR_CHARS]
+            if target == SubagentTaskStatus.LOST:
+                event_type = "subagent_lost"
+            elif target in TERMINAL_TASK_STATUSES:
+                event_type = "subagent_terminal"
+            elif target == SubagentTaskStatus.QUEUED:
+                event_type = "subagent_admitted"
+            else:
+                event_type = "subagent_phase_changed"
             self._commit(
                 task,
-                "subagent_terminal" if target in TERMINAL_TASK_STATUSES else "subagent_admitted",
+                event_type,
                 occurred_at,
                 {"from_status": before, "to_status": target.value},
             )
             return task.model_copy(deep=True)
+
+    async def update_runtime(
+        self,
+        task_id: str,
+        *,
+        phase: SubagentExecutionPhase | str | None = None,
+        executor: dict[str, Any] | None = None,
+        progress: dict[str, Any] | None = None,
+        usage: dict[str, Any] | None = None,
+        now: datetime | None = None,
+    ) -> SubagentTask:
+        async with self._lock(task_id):
+            task = self._required(task_id)
+            if SubagentTaskStatus(task.status) in TERMINAL_TASK_STATUSES:
+                return task
+            changed: dict[str, Any] = {}
+            if phase is not None and task.phase != phase:
+                task.phase = SubagentExecutionPhase(phase)
+                changed["phase"] = str(task.phase)
+            if executor is not None and task.executor != executor:
+                task.executor = dict(executor)
+                changed["executor_recorded"] = True
+            if progress is not None and task.progress != progress:
+                task.progress = dict(progress)
+                changed["progress_updated"] = True
+            if usage is not None and task.usage != usage:
+                task.usage = dict(usage)
+                changed["usage_updated"] = True
+            if not changed:
+                return task
+            event_type = (
+                "subagent_usage_updated"
+                if set(changed) == {"usage_updated"}
+                else "subagent_phase_changed"
+            )
+            self._commit(task, event_type, now or _utc_now(), changed)
+            return task.model_copy(deep=True)
+
+    async def record_termination(
+        self,
+        task_id: str,
+        state: SubagentTerminationState | str,
+        *,
+        evidence: dict[str, Any] | None = None,
+        now: datetime | None = None,
+    ) -> SubagentTask:
+        async with self._lock(task_id):
+            task = self._required(task_id)
+            current = SubagentTerminationState(task.termination.state)
+            target = SubagentTerminationState(state)
+            if current == target:
+                return task
+            if SubagentTaskStatus(task.status) in TERMINAL_TASK_STATUSES:
+                return task
+            if target not in _TERMINATION_TRANSITIONS.get(current, frozenset()):
+                raise InvalidSubagentTaskTransitionError(
+                    f"invalid termination transition: {current} -> {target}"
+                )
+            occurred_at = now or _utc_now()
+            task.termination.state = target
+            task.termination.evidence = dict(evidence) if evidence is not None else None
+            if target == SubagentTerminationState.TERMINATION_FAILED:
+                task.status = SubagentTaskStatus.LOST
+                task.finished_at = task.finished_at or occurred_at
+                task.error = task.error or "child termination could not be confirmed"
+            task.revision += 1
+            summary = {"from_termination": current.value, "to_termination": target.value}
+            task.lifecycle_outbox.append(
+                self._event(task, "subagent_termination_decided", occurred_at, summary)
+            )
+            if target == SubagentTerminationState.TERMINATION_FAILED:
+                task.lifecycle_outbox.append(
+                    self._event(
+                        task,
+                        "subagent_lost",
+                        occurred_at,
+                        {"to_status": SubagentTaskStatus.LOST.value},
+                    )
+                )
+            self._write(task)
+            return task.model_copy(deep=True)
+
+    async def recover_runtime(self, running_task_ids: set[str] | None = None) -> int:
+        active = running_task_ids or set()
+        recovered = 0
+        for task in self.list_tasks():
+            if task.task_id in active or task.status not in {
+                SubagentTaskStatus.QUEUED,
+                SubagentTaskStatus.RUNNING,
+            }:
+                continue
+            await self.record_termination(
+                task.task_id,
+                SubagentTerminationState.TERMINATION_FAILED,
+                evidence={"executor_present": False, "exit_observed": False},
+            )
+            recovered += 1
+        return recovered
 
     async def mark_result_ready(
         self,

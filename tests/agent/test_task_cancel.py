@@ -38,6 +38,7 @@ def _make_loop(*, tools_config=None):
          patch("nanobot.agent.loop.SessionManager"), \
          patch("nanobot.agent.loop.SubagentManager") as mock_sub_mgr:
         mock_sub_mgr.return_value.cancel_by_session = AsyncMock(return_value=0)
+        mock_sub_mgr.return_value.recover_runtime = AsyncMock(return_value=0)
         loop = AgentLoop(bus=bus, provider=provider, workspace=workspace, tools_config=tools_config)
     return loop, bus
 
@@ -237,10 +238,13 @@ class TestSubagentCancellation:
         from nanobot.bus.queue import MessageBus
 
         bus = MessageBus()
+        task_store = MagicMock()
+        task_store.load.return_value = None
         mgr = SubagentManager(
             workspace=MagicMock(),
             bus=bus,
             max_tool_result_chars=_MAX_TOOL_RESULT_CHARS,
+            task_store=task_store,
         )
 
         cancelled = asyncio.Event()
@@ -484,10 +488,13 @@ class TestSubagentAnnounceSessionKey:
         from nanobot.bus.queue import MessageBus
 
         bus = MessageBus()
+        task_store = MagicMock()
+        task_store.load.return_value = None
         mgr = SubagentManager(
             workspace=MagicMock(),
             bus=bus,
             max_tool_result_chars=_MAX_TOOL_RESULT_CHARS,
+            task_store=task_store,
         )
         return mgr, bus
 

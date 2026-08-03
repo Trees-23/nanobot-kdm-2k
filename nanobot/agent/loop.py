@@ -1247,6 +1247,7 @@ class AgentLoop:
         await self.audit_runtime.ensure_started()
         self._running = True
         try:
+            await self.subagents.recover_runtime()
             await self.goal_orchestration.recover_runtime(
                 self.subagents.running_task_ids()
             )

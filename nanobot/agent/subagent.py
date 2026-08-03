@@ -37,10 +37,19 @@ from nanobot.security.workspace_access import (
     reset_workspace_scope,
     workspace_sandbox_status,
 )
+from nanobot.session.subagent_tasks import (
+    SubagentExecutionPhase,
+    SubagentTaskStatus,
+    SubagentTaskStore,
+)
 from nanobot.utils.llm_runtime import LLMRuntime
 from nanobot.utils.prompt_templates import render_template
 
 TERMINAL_STATUS_CACHE_LIMIT = 256
+
+
+class _SubagentTaskPersistenceError(RuntimeError):
+    """Durable task truth could not be committed; result delivery must stop."""
 
 
 @dataclass(slots=True)
@@ -118,6 +127,7 @@ class SubagentManager:
         child_executor: ProcessChildExecutor | None = None,
         child_runtime_config: dict[str, Any] | None = None,
         child_audit_root: str | None = None,
+        task_store: SubagentTaskStore | None = None,
     ):
         if workspace is None:
             raise TypeError("SubagentManager.__init__() missing required argument: 'workspace'")
@@ -171,6 +181,7 @@ class SubagentManager:
         self._child_executor = child_executor
         self._child_runtime_config = child_runtime_config
         self._child_audit_root = child_audit_root
+        self._task_store = task_store or SubagentTaskStore(workspace)
         self._exec_session_manager = ExecSessionManager()
         self._llm_wall_timeout_for_session = llm_wall_timeout_for_session
         self._running_tasks: dict[str, asyncio.Task[None]] = {}
@@ -322,22 +333,44 @@ class SubagentManager:
             origin_chat_id=origin_chat_id,
             origin_message_id=origin_message_id,
         )
+        durable_session_key = session_key or f"{origin_channel}:{origin_chat_id}"
         async with self._spawn_lock:
             if enforce_limit and self.get_running_count() >= self.max_concurrent_subagents:
                 raise RuntimeError("subagent concurrency limit reached")
             if required:
                 if not session_key or self._goal_orchestration is None:
                     raise ValueError("required subagents need an active goal in the current session")
-                await self._goal_orchestration.register(
-                    session_key,
-                    task_id=task_id,
-                    label=display_label,
-                    group=task_group,
-                    child_run_id=status.child_run_id,
-                    spawn_tool_call_id=spawn_tool_call_id,
-                    owner_run_id=owner_run_id,
-                    replaces_task_id=replaces_task_id,
-                )
+            await self._task_store.create(
+                task_id=task_id,
+                owner_session_key=durable_session_key,
+                owner_run_id=owner_run_id,
+                child_run_id=status.child_run_id,
+                spawn_tool_call_id=spawn_tool_call_id,
+                label=display_label,
+                required=required,
+                task_group=task_group,
+                replaces_task_id=replaces_task_id,
+            )
+            await self._task_store.transition_status(task_id, SubagentTaskStatus.QUEUED)
+            if required:
+                try:
+                    await self._goal_orchestration.register(
+                        session_key,
+                        task_id=task_id,
+                        label=display_label,
+                        group=task_group,
+                        child_run_id=status.child_run_id,
+                        spawn_tool_call_id=spawn_tool_call_id,
+                        owner_run_id=owner_run_id,
+                        replaces_task_id=replaces_task_id,
+                    )
+                except BaseException as exc:
+                    await self._task_store.transition_status(
+                        task_id,
+                        SubagentTaskStatus.FAILED,
+                        error=f"required obligation registration failed: {type(exc).__name__}",
+                    )
+                    raise
             self._task_statuses[task_id] = status
             try:
                 bg_task = asyncio.create_task(
@@ -356,6 +389,11 @@ class SubagentManager:
                 )
             except BaseException:
                 self._task_statuses.pop(task_id, None)
+                await self._task_store.transition_status(
+                    task_id,
+                    SubagentTaskStatus.FAILED,
+                    error="subagent scheduling failed",
+                )
                 if required and session_key:
                     await self._goal_orchestration.remove_registration(session_key, task_id)
                 raise
@@ -461,6 +499,18 @@ class SubagentManager:
             "process_instance_id": handle.identity.process_instance_id,
             "force_kill_available": executor.force_kill_available,
         }
+        if self._task_store.load(task_id) is not None:
+            await self._task_store.update_runtime(
+                task_id,
+                executor={
+                    "backend": executor.backend,
+                    "executor_id": handle.identity.executor_id,
+                    "process_instance_id": handle.identity.process_instance_id,
+                    "supervisor_instance_id": handle.identity.supervisor_instance_id,
+                    "pid": handle.identity.pid,
+                    "pgid": handle.identity.pgid,
+                },
+            )
         if status.required and status.session_key and self._goal_orchestration is not None:
             await self._goal_orchestration.mark_executor(
                 status.session_key,
@@ -523,31 +573,79 @@ class SubagentManager:
         """Execute the subagent task and announce the result."""
         logger.info("Subagent [{}] starting task: {}", task_id, label)
 
+        durable_task = self._task_store.load(task_id)
+        if durable_task is not None:
+            await self._task_store.transition_status(task_id, SubagentTaskStatus.RUNNING)
+
         async def _on_checkpoint(payload: dict) -> None:
             status.phase = payload.get("phase", status.phase)
             status.iteration = payload.get("iteration", status.iteration)
+            if self._task_store.load(task_id) is not None:
+                phase = status.phase
+                if phase not in {item.value for item in SubagentExecutionPhase}:
+                    phase = SubagentExecutionPhase.INITIALIZING
+                await self._task_store.update_runtime(
+                    task_id,
+                    phase=phase,
+                    progress={"iteration": status.iteration},
+                )
 
         terminal_status = "failed"
         terminal_error: str | None = None
-        terminal_persisted = False
+        task_terminal_persisted = False
+        goal_terminal_persisted = not required or not status.session_key
+        runtime_usage: dict[str, Any] = {}
 
         async def _persist_terminal() -> None:
-            nonlocal terminal_persisted
-            if terminal_persisted or not required or not status.session_key:
-                return
-            if self._goal_orchestration is None:
-                return
-            if status.termination_state != "none":
-                await self._goal_orchestration.mark_termination(
-                    status.session_key,
-                    task_id,
-                    status.termination_state,
-                    evidence=status.termination_evidence,
-                )
-            await self._goal_orchestration.finish(
-                status.session_key, task_id, terminal_status, terminal_error
-            )
-            terminal_persisted = True
+            nonlocal task_terminal_persisted, goal_terminal_persisted
+            if not task_terminal_persisted and self._task_store.load(task_id) is not None:
+                try:
+                    await self._task_store.update_runtime(
+                        task_id,
+                        usage=runtime_usage or status.usage,
+                    )
+                    if status.termination_state != "none":
+                        await self._task_store.record_termination(
+                            task_id,
+                            status.termination_state,
+                            evidence=status.termination_evidence,
+                        )
+                    await self._task_store.transition_status(
+                        task_id,
+                        SubagentTaskStatus(terminal_status),
+                        error=terminal_error,
+                    )
+                except Exception as exc:
+                    raise _SubagentTaskPersistenceError(
+                        f"failed to persist terminal task {task_id}"
+                    ) from exc
+                task_terminal_persisted = True
+            if (
+                not goal_terminal_persisted
+                and status.session_key
+                and self._goal_orchestration is not None
+            ):
+                try:
+                    if status.termination_state != "none":
+                        await self._goal_orchestration.mark_termination(
+                            status.session_key,
+                            task_id,
+                            status.termination_state,
+                            evidence=status.termination_evidence,
+                        )
+                    await self._goal_orchestration.finish(
+                        status.session_key,
+                        task_id,
+                        terminal_status,
+                        terminal_error,
+                    )
+                except Exception:
+                    logger.exception(
+                        "Failed to persist Goal obligation terminal state for subagent [{}]",
+                        task_id,
+                    )
+                else:
+                    goal_terminal_persisted = True
 
         try:
             if self._uses_process_executor():
@@ -621,6 +719,9 @@ class SubagentManager:
                     reset_request_context(request_token)
             status.phase = "done"
             status.stop_reason = result.stop_reason
+            result_usage = dict(getattr(result, "usage", {}) or {})
+            status.usage = result_usage
+            runtime_usage.update(result_usage)
 
             if result.stop_reason == "completed":
                 terminal_status = "succeeded"
@@ -715,6 +816,11 @@ class SubagentManager:
                 )
             )
             raise
+        except _SubagentTaskPersistenceError as exc:
+            status.phase = "error"
+            status.error = str(exc)
+            terminal_error = str(exc)
+            logger.exception("Subagent [{}] durable terminal persistence failed", task_id)
         except Exception as e:
             status.phase = "error"
             status.error = str(e)
@@ -726,11 +832,10 @@ class SubagentManager:
             status.terminal_status = terminal_status
             if terminal_error:
                 status.error = terminal_error
-            if required and status.session_key and self._goal_orchestration is not None:
-                try:
-                    await _persist_terminal()
-                except Exception:
-                    logger.exception("Failed to persist terminal state for subagent [{}]", task_id)
+            try:
+                await _persist_terminal()
+            except Exception:
+                logger.exception("Failed to persist terminal state for subagent [{}]", task_id)
             self._timeout_task_ids.discard(task_id)
             self._termination_failed_ids.discard(task_id)
             self._termination_outcomes.pop(task_id, None)
@@ -955,6 +1060,12 @@ class SubagentManager:
                     **(status.termination_evidence or {}),
                     "force_kill_requested": True,
                 }
+                if self._task_store.load(task_id) is not None:
+                    await self._task_store.record_termination(
+                        task_id,
+                        "force_kill_requested",
+                        evidence=status.termination_evidence,
+                    )
                 if status.required and status.session_key and self._goal_orchestration is not None:
                     await self._goal_orchestration.mark_termination(
                         status.session_key,
@@ -972,6 +1083,12 @@ class SubagentManager:
                         "reaped": forced.reaped,
                         "descendants_cleared": forced.descendants_cleared,
                     }
+                    if self._task_store.load(task_id) is not None:
+                        await self._task_store.record_termination(
+                            task_id,
+                            "force_killed",
+                            evidence=status.termination_evidence,
+                        )
                     if status.required and status.session_key and self._goal_orchestration is not None:
                         await self._goal_orchestration.mark_termination(
                             status.session_key,
@@ -998,6 +1115,17 @@ class SubagentManager:
             **(status.termination_evidence or {"backend": "asyncio"}),
             "request_sent": True,
         }
+        if self._task_store.load(task_id) is not None:
+            await self._task_store.record_termination(
+                task_id,
+                "cancel_requested",
+                evidence=status.termination_evidence,
+            )
+            await self._task_store.record_termination(
+                task_id,
+                "grace_waiting",
+                evidence=status.termination_evidence,
+            )
         if status.required and status.session_key and self._goal_orchestration is not None:
             await self._goal_orchestration.mark_termination(
                 status.session_key,
@@ -1032,6 +1160,12 @@ class SubagentManager:
         }
         status.terminal_status = "lost"
         status.error = "child termination could not be confirmed"
+        if self._task_store.load(task_id) is not None:
+            await self._task_store.record_termination(
+                task_id,
+                "termination_failed",
+                evidence=status.termination_evidence,
+            )
         if status.required and status.session_key and self._goal_orchestration is not None:
             await self._goal_orchestration.mark_termination(
                 status.session_key,
@@ -1140,6 +1274,10 @@ class SubagentManager:
 
     def running_task_ids(self) -> set[str]:
         return {task_id for task_id, task in self._running_tasks.items() if not task.done()}
+
+    async def recover_runtime(self) -> int:
+        """Fail closed durable tasks whose executor is absent after restart."""
+        return await self._task_store.recover_runtime(self.running_task_ids())
 
     async def wait_for(self, task_ids: list[str], timeout: float) -> None:
         tasks = [self._running_tasks[task_id] for task_id in task_ids if task_id in self._running_tasks]

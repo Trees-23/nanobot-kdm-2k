@@ -14,6 +14,7 @@ from nanobot.session.subagent_tasks import (
     SubagentTaskDTO,
     SubagentTaskStatus,
     SubagentTaskStore,
+    SubagentTerminationState,
 )
 
 
@@ -170,3 +171,69 @@ async def test_public_dto_exposes_only_safe_usage_and_budget_fields(tmp_path):
 
 def test_test_clock_is_utc_aware():
     assert datetime.now(timezone.utc).utcoffset() is not None
+
+
+@pytest.mark.asyncio
+async def test_termination_failed_atomically_marks_task_lost(tmp_path):
+    store = SubagentTaskStore(tmp_path)
+    await store.create(task_id="task-a", owner_session_key="test:a")
+    await store.transition_status("task-a", SubagentTaskStatus.QUEUED)
+    await store.transition_status("task-a", SubagentTaskStatus.RUNNING)
+
+    lost = await store.record_termination(
+        "task-a",
+        SubagentTerminationState.TERMINATION_FAILED,
+        evidence={"exit_observed": False},
+    )
+
+    assert lost.status == SubagentTaskStatus.LOST
+    assert lost.termination.state == SubagentTerminationState.TERMINATION_FAILED
+    assert lost.termination.evidence == {"exit_observed": False}
+    assert lost.finished_at is not None
+    assert [event.event_type for event in lost.lifecycle_outbox[-2:]] == [
+        "subagent_termination_decided",
+        "subagent_lost",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_late_termination_cannot_override_success(tmp_path):
+    store = SubagentTaskStore(tmp_path)
+    await store.create(task_id="task-a", owner_session_key="test:a")
+    await store.transition_status("task-a", SubagentTaskStatus.QUEUED)
+    await store.transition_status("task-a", SubagentTaskStatus.RUNNING)
+    succeeded = await store.transition_status("task-a", SubagentTaskStatus.SUCCEEDED)
+
+    late = await store.record_termination(
+        "task-a",
+        SubagentTerminationState.TERMINATION_FAILED,
+        evidence={"exit_observed": False},
+    )
+
+    assert late.status == SubagentTaskStatus.SUCCEEDED
+    assert late.termination.state == SubagentTerminationState.NONE
+    assert late.revision == succeeded.revision
+
+
+@pytest.mark.asyncio
+async def test_restart_recovery_is_idempotent_for_queued_and_running_tasks(tmp_path):
+    store = SubagentTaskStore(tmp_path)
+    await store.create(task_id="queued", owner_session_key="test:a")
+    await store.transition_status("queued", SubagentTaskStatus.QUEUED)
+    await store.create(task_id="running", owner_session_key="test:a")
+    await store.transition_status("running", SubagentTaskStatus.QUEUED)
+    await store.transition_status("running", SubagentTaskStatus.RUNNING)
+
+    restarted = SubagentTaskStore(tmp_path)
+    assert await restarted.recover_runtime(set()) == 2
+    assert await restarted.recover_runtime(set()) == 0
+
+    for task_id in ("queued", "running"):
+        task = restarted.load(task_id)
+        assert task is not None
+        assert task.status == SubagentTaskStatus.LOST
+        assert task.termination.state == SubagentTerminationState.TERMINATION_FAILED
+        assert task.termination.evidence == {
+            "executor_present": False,
+            "exit_observed": False,
+        }
