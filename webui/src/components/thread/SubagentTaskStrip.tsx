@@ -1,4 +1,4 @@
-import { ChevronDown, ChevronUp, ListTodo, X } from "lucide-react";
+import { ChevronDown, ChevronUp, EyeOff, ListTodo, X } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 
 import { auditValueLabel } from "@/lib/audit-display";
@@ -32,13 +32,45 @@ function usageSummary(task: SubagentTaskPayload): string {
 
 export function SubagentTaskStrip({ tasks }: { tasks: SubagentTaskPayload[] }) {
   const [open, setOpen] = useState(false);
+  const [filter, setFilter] = useState<"active" | "all">("active");
+  const [hiddenTerminalIds, setHiddenTerminalIds] = useState<Set<string>>(
+    () => new Set(),
+  );
   const panelRef = useRef<HTMLDivElement>(null);
   const toggleRef = useRef<HTMLButtonElement>(null);
-  const visible = tasks.length > 0;
   const activeCount = tasks.filter((task) => ACTIVE_STATUSES.has(task.status)).length;
-  const recent = [...tasks]
+  const visibleTasks = tasks.filter(
+    (task) => ACTIVE_STATUSES.has(task.status) || !hiddenTerminalIds.has(task.task_id),
+  );
+  const visible = visibleTasks.length > 0;
+  const effectiveFilter = activeCount > 0 ? filter : "all";
+  const recent = visibleTasks
+    .filter((task) => effectiveFilter === "all" || ACTIVE_STATUSES.has(task.status))
     .sort((left, right) => right.created_at.localeCompare(left.created_at))
     .slice(0, 20);
+
+  function hideTerminalTasks(): void {
+    setHiddenTerminalIds((previous) => {
+      const next = new Set(previous);
+      tasks.forEach((task) => {
+        if (!ACTIVE_STATUSES.has(task.status)) next.add(task.task_id);
+      });
+      return next;
+    });
+    setOpen(false);
+  }
+
+  useEffect(() => {
+    setHiddenTerminalIds((previous) => {
+      const terminalIds = new Set(
+        tasks
+          .filter((task) => !ACTIVE_STATUSES.has(task.status))
+          .map((task) => task.task_id),
+      );
+      const retained = new Set([...previous].filter((taskId) => terminalIds.has(taskId)));
+      return retained.size === previous.size ? previous : retained;
+    });
+  }, [tasks]);
 
   useEffect(() => {
     if (!visible) setOpen(false);
@@ -97,6 +129,47 @@ export function SubagentTaskStrip({ tasks }: { tasks: SubagentTaskPayload[] }) {
               <X className="h-4 w-4" />
             </button>
           </div>
+          <div className="flex items-center justify-between gap-2 border-b border-border/45 px-3 py-2">
+            <div
+              className="inline-flex h-7 items-center rounded-md bg-muted/70 p-0.5"
+              role="group"
+              aria-label="Filter subagent tasks"
+            >
+              <button
+                type="button"
+                className={cn(
+                  "h-6 rounded px-2 text-[10.5px] font-medium text-muted-foreground",
+                  effectiveFilter === "active" && "bg-background text-foreground shadow-sm",
+                )}
+                aria-pressed={effectiveFilter === "active"}
+                disabled={activeCount === 0}
+                onClick={() => setFilter("active")}
+              >
+                Active
+              </button>
+              <button
+                type="button"
+                className={cn(
+                  "h-6 rounded px-2 text-[10.5px] font-medium text-muted-foreground",
+                  effectiveFilter === "all" && "bg-background text-foreground shadow-sm",
+                )}
+                aria-pressed={effectiveFilter === "all"}
+                onClick={() => setFilter("all")}
+              >
+                All
+              </button>
+            </div>
+            {visibleTasks.some((task) => !ACTIVE_STATUSES.has(task.status)) ? (
+              <button
+                type="button"
+                className="inline-flex h-7 items-center gap-1.5 rounded-md px-2 text-[10.5px] font-medium text-muted-foreground hover:bg-muted/65 hover:text-foreground"
+                onClick={hideTerminalTasks}
+              >
+                <EyeOff className="h-3.5 w-3.5" />
+                Hide completed
+              </button>
+            ) : null}
+          </div>
           <div className="max-h-[24dvh] divide-y divide-border/45 overflow-y-auto px-3 sm:max-h-[min(52dvh,25rem)]">
             {recent.map((task) => {
               const budget = budgetSummary(task);
@@ -134,8 +207,19 @@ export function SubagentTaskStrip({ tasks }: { tasks: SubagentTaskPayload[] }) {
       <div className="flex min-h-[36px] items-center gap-2 px-3 py-2" role="status">
         <ListTodo className="h-4 w-4 shrink-0 text-violet-600 dark:text-violet-400" />
         <span className="min-w-0 flex-1 truncate text-[12px] font-medium text-foreground/75">
-          {activeCount > 0 ? `${activeCount} active` : "No active"} · {tasks.length} subagent task{tasks.length === 1 ? "" : "s"}
+          {activeCount > 0 ? `${activeCount} active` : "No active"} · {visibleTasks.length} subagent task{visibleTasks.length === 1 ? "" : "s"}
         </span>
+        {activeCount === 0 ? (
+          <button
+            type="button"
+            className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-full text-muted-foreground hover:bg-muted/55 hover:text-foreground"
+            aria-label="Dismiss completed subagent tasks"
+            title="Dismiss completed subagent tasks"
+            onClick={hideTerminalTasks}
+          >
+            <X className="h-4 w-4" />
+          </button>
+        ) : null}
         <button
           ref={toggleRef}
           type="button"
