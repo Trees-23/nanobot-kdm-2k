@@ -108,7 +108,13 @@ describe("TraceGraph", () => {
 
     rerender(
       <div style={{ width: 900, height: 700 }}>
-        <TraceGraph graph={graph} selectedNodeId="run:1" focusMode={null} onSelectNode={vi.fn()} onFocusMode={vi.fn()} />
+        <TraceGraph
+          graph={structuredClone(graph)}
+          selectedNodeId="run:1"
+          focusMode={null}
+          onSelectNode={vi.fn()}
+          onFocusMode={vi.fn()}
+        />
       </div>,
     );
 
@@ -153,6 +159,48 @@ describe("TraceGraph", () => {
     expect(screen.queryByText("Operation 1")).not.toBeInTheDocument();
     fireEvent.click(expand);
     expect(await screen.findByText("Operation 1")).toBeInTheDocument();
+  });
+
+  it("names the model attempt control for its next action", async () => {
+    const graph = graphFixture();
+    const model = {
+      ...graph.nodes[0],
+      id: "model:1",
+      type: "model_call" as const,
+      status: "succeeded" as const,
+      label: "Model call",
+      expandable: true,
+      summary: { kind: "model_call" as const, provider: "openai", model: "gpt-test" },
+      order: 1,
+    };
+    const attempt = {
+      ...model,
+      id: "attempt:1",
+      type: "model_attempt" as const,
+      label: "Attempt 1",
+      expandable: false,
+      summary: { kind: "model_attempt" as const, provider: "openai", model: "gpt-test" },
+      order: 2,
+    };
+    graph.nodes.push(model, attempt);
+    graph.regions[0].member_node_ids.push(model.id, attempt.id);
+    graph.expansion_groups.push({
+      id: "attempts:model:1",
+      owner_node_id: model.id,
+      member_node_ids: [attempt.id],
+      default_expanded: false,
+    });
+
+    render(
+      <div style={{ width: 900, height: 700 }}>
+        <TraceGraph graph={graph} selectedNodeId={null} focusMode={null} onSelectNode={vi.fn()} onFocusMode={vi.fn()} />
+      </div>,
+    );
+
+    fireEvent.click(await screen.findByRole("button", { name: "展开模型尝试" }));
+    expect(await screen.findByRole("button", { name: "收起模型尝试" })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "收起模型尝试" }));
+    expect(await screen.findByRole("button", { name: "展开模型尝试" })).toBeInTheDocument();
   });
 
   it("locates the backend-declared first anomaly", async () => {

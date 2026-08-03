@@ -140,8 +140,8 @@ function TraceNodeComponent({ data }: NodeProps) {
           <button
             type="button"
             className="nodrag nopan grid h-7 w-7 shrink-0 place-items-center rounded-md text-muted-foreground hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-            aria-label="展开模型尝试"
-            title="展开模型尝试"
+            aria-label={value.expanded ? "收起模型尝试" : "展开模型尝试"}
+            title={value.expanded ? "收起模型尝试" : "展开模型尝试"}
             onClick={(event) => {
               event.stopPropagation();
               value.onExpand(node);

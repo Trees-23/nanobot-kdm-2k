@@ -480,6 +480,9 @@ export function TraceGraph({
     ...visibleNodeBounds,
     ...[...relationRoutes.values()].map((route) => route.bounds),
   ]), [relationRoutes, visibleNodeBounds]);
+  const graphRouteBoundsKey = graphRouteBounds
+    ? `${graphRouteBounds.x}:${graphRouteBounds.y}:${graphRouteBounds.width}:${graphRouteBounds.height}`
+    : "";
 
   useEffect(() => {
     if (!graphRouteBounds || !positions.length) return;
@@ -487,7 +490,7 @@ export function TraceGraph({
       void flowRef.current?.fitBounds(graphRouteBounds, { padding: 0.2, duration: 0 });
     });
     return () => window.cancelAnimationFrame(frame);
-  }, [graphRouteBounds, positions.length]);
+  }, [graphRouteBoundsKey, positions.length]);
 
   const relationEdges = useMemo(
     () => graph.edges.filter((edge) => ROUTED_RELATION_TYPES.has(edge.type)),
@@ -570,9 +573,8 @@ export function TraceGraph({
         edgeTypes={edgeTypes}
         minZoom={0.035}
         maxZoom={1.6}
-        fitView
-        fitViewOptions={{ padding: 0.2 }}
         nodesDraggable={false}
+        autoPanOnNodeFocus={false}
         onInit={(instance) => { flowRef.current = instance; }}
         onNodeClick={(_, node) => {
           if (node.type === "traceNode") onSelectNode(node.id);
