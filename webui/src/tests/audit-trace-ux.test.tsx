@@ -185,6 +185,64 @@ describe("audit trace UX", () => {
     expect(onLoadPayload).toHaveBeenCalledWith("payload-1");
   });
 
+  it("shows Task lifecycle dimensions separately from child Run", () => {
+    const node: AuditGraphNode = {
+      id: "task:trace-1:task-a",
+      type: "task",
+      status: "succeeded",
+      label: "Task task-a",
+      started_at: "2026-01-01T00:00:00Z",
+      finished_at: "2026-01-01T00:00:30Z",
+      elapsed_ms: 30_000,
+      raw_event_ids: ["task-event-1"],
+      raw_events: [{
+        event_id: "task-event-1",
+        event_type: "subagent_result_delivered",
+        occurred_at: "2026-01-01T00:00:30Z",
+        status: null,
+        payload_id: null,
+      }],
+      region_id: "task-region:trace-1:task-a",
+      parent_node_id: null,
+      child_node_ids: [],
+      expandable: false,
+      relations: [],
+      task_id: "task-a",
+      summary: {
+        kind: "task",
+        task_id: "task-a",
+        task_revision: 8,
+        task_status: "succeeded",
+        task_phase: "finished",
+        termination_state: "confirmed_stopped",
+        delivery_phase: "delivered",
+        required_task: true,
+        lifecycle_event_count: 8,
+        owner_run_id: "run-main",
+        child_run_id: "run-child",
+      },
+      order: 0,
+    };
+
+    render(
+      <TraceNodeInspector
+        node={node}
+        focusMode={null}
+        onFocusMode={vi.fn()}
+        onClose={vi.fn()}
+        onLocateEvent={vi.fn()}
+        onLoadPayload={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByText("Task ID")).toBeInTheDocument();
+    expect(screen.getByText("task-a")).toBeInTheDocument();
+    expect(screen.getByText("执行阶段")).toBeInTheDocument();
+    expect(screen.getByText("终止状态")).toBeInTheDocument();
+    expect(screen.getByText("交付阶段")).toBeInTheDocument();
+    expect(screen.getByText("run-child")).toBeInTheDocument();
+  });
+
   it("renders honest Payload 404 and retryable 503 states", () => {
     const { rerender } = render(
       <PayloadViewer

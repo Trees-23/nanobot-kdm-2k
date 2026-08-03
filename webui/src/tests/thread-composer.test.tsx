@@ -826,6 +826,73 @@ describe("ThreadComposer", () => {
     expect(dialog).toHaveTextContent(longObjective);
   });
 
+  it("shows durable subagent task state, usage, budget, and errors", async () => {
+    render(
+      <ThreadComposer
+        onSend={vi.fn()}
+        placeholder="Type your message..."
+        subagentTasks={[
+          {
+            schema_version: 1,
+            revision: 7,
+            task_id: "task-research",
+            owner_run_id: "run-main",
+            child_run_id: "run-child",
+            label: "Research evidence",
+            required: true,
+            task_group: "research",
+            status: "running",
+            phase: "awaiting_tools",
+            termination_state: "none",
+            delivery_phase: "not_ready",
+            usage: {
+              prompt_tokens: 120,
+              completion_tokens: 30,
+              total_tokens: 150,
+              cost_usd: 0.0042,
+            },
+            budget: {
+              max_tokens: 500,
+              max_cost_usd: 0.02,
+              wall_time_seconds: 120,
+              reservation_state: "reserved",
+            },
+            created_at: "2026-08-03T00:00:00Z",
+            legacy_inferred: false,
+          },
+          {
+            schema_version: 1,
+            revision: 4,
+            task_id: "task-background",
+            label: "Background check",
+            required: false,
+            task_group: "background",
+            status: "failed",
+            phase: "finished",
+            termination_state: "confirmed_stopped",
+            delivery_phase: "not_ready",
+            usage: { prompt_tokens: 10, completion_tokens: 0, total_tokens: 10 },
+            budget: {},
+            created_at: "2026-08-03T00:00:01Z",
+            error: "Worker exited before producing a result",
+            legacy_inferred: false,
+          },
+        ]}
+      />,
+    );
+
+    expect(screen.getByRole("status")).toHaveTextContent("1 active · 2 subagent tasks");
+    fireEvent.click(screen.getByRole("button", { name: "Show subagent task details" }));
+
+    const dialog = await screen.findByRole("dialog", { name: "Subagent task details" });
+    expect(dialog).toHaveTextContent("Task → Run → Model / Tool → Delivery");
+    expect(dialog).toHaveTextContent("Research evidence");
+    expect(dialog).toHaveTextContent("Required");
+    expect(dialog).toHaveTextContent("150 tokens");
+    expect(dialog).toHaveTextContent("≤ 500 tokens");
+    expect(dialog).toHaveTextContent("Worker exited before producing a result");
+  });
+
   it("opens a slash command palette and inserts the selected command", () => {
     const onSend = vi.fn();
     render(

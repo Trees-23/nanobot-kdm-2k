@@ -53,7 +53,7 @@ function layout(request: LayoutRequest): Position[] {
   for (const [, nodes] of laneList) {
     const first = nodes[0];
     const incoming = request.edges
-      .filter((edge) => edge.target === first.id && ["spawn_branch", "result_return"].includes(edge.relation))
+      .filter((edge) => edge.target === first.id && ["spawn_branch", "task_execution", "result_return"].includes(edge.relation))
       .map((edge) => positions.get(edge.source))
       .find((value): value is Position => Boolean(value));
     const column = first.laneOrder;

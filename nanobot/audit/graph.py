@@ -877,6 +877,10 @@ class AuditGraphBuilder:
                 ),
                 None,
             )
+            child_evidence = evidence.get(
+                child_run_id or "",
+                _RunEvidence(kind="unknown", parent_run_id=owner_run_id),
+            )
             node_id = f"task:{trace_id}:{task_id}"
             region_id = f"task-region:{trace_id}:{task_id}"
             status = _task_status(grouped)
@@ -923,6 +927,12 @@ class AuditGraphBuilder:
                         ),
                     ),
                     order=0,
+                    lane_id=region_id,
+                    lane_kind=child_evidence.kind,
+                    lane_order=child_evidence.lane_order,
+                    lane_depth=child_evidence.lane_depth,
+                    lane_side=child_evidence.lane_side,
+                    run_kind=child_evidence.kind,
                     task_id=task_id,
                     terminal_status=status,
                     health_status=status,
@@ -937,6 +947,11 @@ class AuditGraphBuilder:
                     status=status,
                     member_node_ids=[node_id],
                     order=len(regions),
+                    lane_id=region_id,
+                    lane_kind=child_evidence.kind,
+                    lane_order=child_evidence.lane_order,
+                    lane_depth=child_evidence.lane_depth,
+                    lane_side=child_evidence.lane_side,
                     terminal_status=status,
                     health_status=status,
                     task_id=task_id,
