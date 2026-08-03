@@ -144,7 +144,8 @@ function relatedIds(
     causal: ["caused_by", "retry", "retry_of"],
     context: ["sequence"],
     branch: ["spawn_branch", "parent_run", "task_execution", "task_replacement"],
-    resume: ["result_return", "resumed_from", "tool_retry", "tool_continuation", "tool_recovery", "task_recovery"],
+    result: ["result_return"],
+    recovery: ["resumed_from", "tool_recovery", "task_recovery"],
   };
   const result = new Set([selectedId]);
   const edgeIds = new Set<string>();
@@ -482,7 +483,8 @@ export function TraceGraph({
     causal: "因果链",
     context: "执行上下文",
     branch: "结构分支",
-    resume: "恢复链路",
+    result: "结果回传",
+    recovery: "恢复关系",
   };
 
   const toolbarButton = (
@@ -609,7 +611,7 @@ export function TraceGraph({
           <span>
             {focusLabels[focusMode]}：{focusResult.edgeIds.size
               ? `${focusResult.nodeIds.size} 个节点 / ${focusResult.edgeIds.size} 条边`
-              : focusMode === "resume" ? "0 个节点 / 0 条边" : "零命中"}
+              : ["result", "recovery"].includes(focusMode) ? "0 个节点 / 0 条边" : "零命中"}
           </span>
           <Button type="button" variant="ghost" size="sm" className="h-6 px-1.5 text-[10px]" onClick={() => onFocusMode(null)}>清除</Button>
         </div>

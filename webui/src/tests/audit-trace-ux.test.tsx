@@ -6,6 +6,7 @@ import { SessionTraceList } from "@/components/traces/SessionTraceList";
 import { PayloadViewer } from "@/components/traces/PayloadViewer";
 import { TraceNodeInspector } from "@/components/traces/TraceNodeInspector";
 import { TraceTimeline } from "@/components/traces/TraceTimeline";
+import { TraceEdgeInspector } from "@/components/traces/TraceWorkbench";
 import { useAuditTimeline } from "@/hooks/useAuditTimeline";
 import { AuditApiError, fetchAuditGraph } from "@/lib/audit-api";
 import type { AuditGraphNode, AuditSessionListItem } from "@/lib/audit-types";
@@ -267,6 +268,29 @@ describe("audit trace UX", () => {
       />,
     );
     expect(screen.getByRole("button", { name: "重试" })).toBeInTheDocument();
+  });
+
+  it("labels result return endpoints without failure or recovery wording", () => {
+    const source: AuditGraphNode = {
+      id: "task:1", type: "task", status: "succeeded", label: "检查一级目录",
+      started_at: null, finished_at: null, elapsed_ms: null, raw_event_ids: [], region_id: "task-region:1",
+      parent_node_id: null, child_node_ids: [], expandable: false, relations: [], summary: { kind: "task" }, order: 0,
+    };
+    const target = { ...source, id: "run:continuation", type: "run" as const, label: "Main continuation", summary: { kind: "run" as const } };
+    render(
+      <TraceEdgeInspector
+        edge={{ id: "result", type: "result_return", source: source.id, target: target.id, anchor: { source_event_id: "result-event", target_event_id: "injection-event" } }}
+        source={source}
+        target={target}
+        onClose={vi.fn()}
+        onLocateEvent={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByRole("heading", { name: "结果回传" })).toBeInTheDocument();
+    expect(screen.getByText("结果来源")).toBeInTheDocument();
+    expect(screen.getByText("注入位置")).toBeInTheDocument();
+    expect(screen.queryByText(/失败端|恢复关系/)).not.toBeInTheDocument();
   });
 
   it("loads missing Events within the bounded locator and de-duplicates pages", async () => {

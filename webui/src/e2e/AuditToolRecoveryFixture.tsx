@@ -31,14 +31,14 @@ const graph: AuditGraphResponse = {
 
 function Fixture() {
   const [selectedEdge, setSelectedEdge] = useState<AuditGraphEdge | null>(null);
-  const [focusMode, setFocusMode] = useState<"resume" | null>("resume");
+  const [focusMode, setFocusMode] = useState<"recovery" | null>("recovery");
   const [located, setLocated] = useState<string[]>([]);
   const locate = (eventId: string) => setLocated((current) => [...new Set([...current, eventId])]);
   return (
     <main className="flex h-dvh min-h-0 flex-col bg-background text-foreground">
       <header className="flex h-12 shrink-0 items-center border-b px-4 text-sm font-medium">Tool recovery Chromium fixture</header>
       <section className="relative min-h-0 flex-1">
-        <TraceGraph graph={graph} selectedNodeId="failed" focusMode={focusMode} onSelectNode={() => undefined} onFocusMode={(mode) => setFocusMode(mode === "resume" ? mode : null)} onSelectEdge={setSelectedEdge} />
+        <TraceGraph graph={graph} selectedNodeId="failed" focusMode={focusMode} onSelectNode={() => undefined} onFocusMode={(mode) => setFocusMode(mode === "recovery" ? mode : null)} onSelectEdge={setSelectedEdge} />
         {selectedEdge ? <aside className="absolute right-3 top-3 z-20 w-80 rounded-md border bg-background p-3 text-xs shadow-lg" aria-label="恢复关系检查器">
           <h2 className="font-semibold">Tool 恢复关系</h2>
           <p className="mt-2">失败端：failed · failed</p><p>恢复端：recovered · succeeded</p><p>显式 recovery 证据计数：1</p>

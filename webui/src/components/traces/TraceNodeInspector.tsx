@@ -6,6 +6,7 @@ import {
   Link2,
   LocateFixed,
   Route,
+  Send,
   Timer,
   X,
 } from "lucide-react";
@@ -14,7 +15,7 @@ import { Button } from "@/components/ui/button";
 import type { AuditGraphNode, AuditNodeEventRef, TraceEdgeType } from "@/lib/audit-types";
 import { auditStatusLabel, auditValueLabel } from "@/lib/audit-display";
 
-export type TraceFocusMode = "causal" | "context" | "branch" | "resume" | null;
+export type TraceFocusMode = "causal" | "context" | "branch" | "result" | "recovery" | null;
 
 export function TraceNodeInspector({
   node,
@@ -39,7 +40,8 @@ export function TraceNodeInspector({
     { mode: "causal", label: "因果链", icon: Link2 },
     { mode: "context", label: "执行上下文", icon: Activity },
     { mode: "branch", label: "结构分支", icon: GitBranch },
-    { mode: "resume", label: "恢复链路", icon: Route },
+    { mode: "result", label: "结果回传", icon: Send },
+    { mode: "recovery", label: "恢复关系", icon: Route },
   ];
   const suppressionReason = node.type === "delivery"
     && node.summary.delivery_result === "suppressed"

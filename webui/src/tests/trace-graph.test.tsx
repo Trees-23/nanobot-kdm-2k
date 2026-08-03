@@ -229,11 +229,11 @@ describe("TraceGraph", () => {
     });
     const { rerender } = render(
       <div style={{ width: 900, height: 700 }}>
-        <TraceGraph graph={graph} selectedNodeId="run:1" focusMode="resume" onSelectNode={vi.fn()} onFocusMode={vi.fn()} />
+        <TraceGraph graph={graph} selectedNodeId="run:1" focusMode="recovery" onSelectNode={vi.fn()} onFocusMode={vi.fn()} />
       </div>,
     );
 
-    expect(await screen.findByText("恢复链路：2 个节点 / 3 条边")).toBeInTheDocument();
+    expect(await screen.findByText("恢复关系：2 个节点 / 1 条边")).toBeInTheDocument();
     const recovery = graph.edges.find((edge) => edge.id === "tool_recovery:failed:recovered")!;
     const sequence = graph.edges.find((edge) => edge.id === "sequence:failed:recovered")!;
     expect(edgeHandles(recovery, graph)).toEqual({ sourceHandle: "right-source", targetHandle: "right-target" });
@@ -269,10 +269,24 @@ describe("TraceGraph", () => {
   it("shows an explicit empty state for recovery focus", async () => {
     render(
       <div style={{ width: 900, height: 700 }}>
-        <TraceGraph graph={graphFixture()} selectedNodeId="run:1" focusMode="resume" onSelectNode={vi.fn()} onFocusMode={vi.fn()} />
+        <TraceGraph graph={graphFixture()} selectedNodeId="run:1" focusMode="recovery" onSelectNode={vi.fn()} onFocusMode={vi.fn()} />
       </div>,
     );
 
-    expect(await screen.findByText("恢复链路：0 个节点 / 0 条边")).toBeInTheDocument();
+    expect(await screen.findByText("恢复关系：0 个节点 / 0 条边")).toBeInTheDocument();
+  });
+
+  it("focuses result return without classifying it as recovery", async () => {
+    const graph = graphFixture();
+    graph.nodes.push({ ...graph.nodes[0], id: "run:continuation", label: "Continuation", order: 1 });
+    graph.edges.push({ id: "result", type: "result_return", source: "run:1", target: "run:continuation" });
+
+    render(
+      <div style={{ width: 900, height: 700 }}>
+        <TraceGraph graph={graph} selectedNodeId="run:1" focusMode="result" onSelectNode={vi.fn()} onFocusMode={vi.fn()} />
+      </div>,
+    );
+
+    expect(await screen.findByText("结果回传：2 个节点 / 1 条边")).toBeInTheDocument();
   });
 });
