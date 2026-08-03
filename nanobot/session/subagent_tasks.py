@@ -172,6 +172,8 @@ class SubagentTask(BaseModel):
     revision: int = Field(ge=1)
     task_id: str = Field(min_length=1, max_length=128)
     owner_session_key: str = Field(min_length=1, max_length=512)
+    trace_id: str | None = None
+    turn_id: str | None = None
     owner_run_id: str | None = None
     child_run_id: str | None = None
     spawn_tool_call_id: str | None = None
@@ -319,7 +321,13 @@ class SubagentTaskStore:
             task_id=task.task_id,
             revision=task.revision,
             occurred_at=occurred_at,
-            summary=summary or {},
+            summary={
+                "task_status": str(task.status),
+                "task_phase": str(task.phase),
+                "termination_state": str(task.termination.state),
+                "delivery_phase": str(task.delivery.phase),
+                **(summary or {}),
+            },
         )
 
     async def create(
@@ -327,6 +335,8 @@ class SubagentTaskStore:
         *,
         task_id: str,
         owner_session_key: str,
+        trace_id: str | None = None,
+        turn_id: str | None = None,
         label: str = "",
         owner_run_id: str | None = None,
         child_run_id: str | None = None,
@@ -352,6 +362,8 @@ class SubagentTaskStore:
                 revision=1,
                 task_id=task_id,
                 owner_session_key=owner_session_key,
+                trace_id=trace_id,
+                turn_id=turn_id,
                 owner_run_id=owner_run_id,
                 child_run_id=child_run_id,
                 spawn_tool_call_id=spawn_tool_call_id,
@@ -387,6 +399,25 @@ class SubagentTaskStore:
                 raise ValueError("subagent task record must be a JSON object")
             tasks.append(SubagentTask.model_validate(self._normalize_legacy(raw)))
         return tasks
+
+    async def mark_outbox_published(
+        self,
+        task_id: str,
+        idempotency_key: str,
+        *,
+        now: datetime | None = None,
+    ) -> bool:
+        async with self._lock(task_id):
+            task = self._required(task_id)
+            for event in task.lifecycle_outbox:
+                if event.idempotency_key != idempotency_key:
+                    continue
+                if event.published_at is not None:
+                    return False
+                event.published_at = now or _utc_now()
+                self._write(task)
+                return True
+            return False
 
     async def transition_status(
         self,
@@ -591,6 +622,20 @@ class SubagentTaskStore:
             now=now,
         )
         return task
+
+    async def mark_delivery_failed(
+        self,
+        task_id: str,
+        *,
+        now: datetime | None = None,
+    ) -> SubagentTask:
+        return await self._transition_delivery(
+            task_id,
+            expected={SubagentDeliveryPhase.CLAIMED_PENDING_DELIVERY},
+            target=SubagentDeliveryPhase.DELIVERY_FAILED,
+            event_type="subagent_delivery_failed",
+            now=now,
+        )
 
     async def _transition_delivery(
         self,

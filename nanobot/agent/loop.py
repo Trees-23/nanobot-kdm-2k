@@ -273,6 +273,7 @@ class AgentLoop:
         (TurnState.COMMAND, "dispatch"): TurnState.BUILD,
         (TurnState.COMMAND, "shortcut"): TurnState.DONE,
         (TurnState.BUILD, "ok"): TurnState.RUN,
+        (TurnState.BUILD, "skip"): TurnState.DONE,
         (TurnState.RUN, "ok"): TurnState.SAVE,
         (TurnState.SAVE, "ok"): TurnState.RESPOND,
         (TurnState.RESPOND, "ok"): TurnState.DONE,
@@ -991,25 +992,46 @@ class AgentLoop:
             items: list[dict[str, Any]] = []
 
             async def _append_injection(pending_msg: InboundMessage) -> None:
-                items.append(_to_user_message(pending_msg))
-                if audit_context is None:
-                    return
-                turn = AuditTurnContext(
-                    trace_id=audit_context.trace_id,
-                    turn_id=audit_context.turn_id,
-                    session_key=active_session_key or "unknown",
-                    source_type=audit_context.source_type,
-                    actor_type="system",
-                    link_reason="created",
-                )
-                await TurnAuditRecorder(
-                    self.audit_runtime.emitter, turn
-                ).input_injected(
-                    run=audit_context,
-                    injection_source=str(
-                        pending_msg.metadata.get("injected_event") or pending_msg.sender_id
-                    ),
-                )
+                metadata = pending_msg.metadata if isinstance(pending_msg.metadata, dict) else {}
+                task_id = metadata.get("subagent_task_id")
+                claimed = None
+                goal_claim = None
+                if isinstance(task_id, str) and task_id and audit_context is not None:
+                    claimed = await self.subagents.claim_result(task_id, audit_context.run_id)
+                    goal_claim = await self.goal_orchestration.claim_result(
+                        active_session_key or "unknown", task_id
+                    )
+                    if claimed is False or (claimed is None and goal_claim is False):
+                        return
+                try:
+                    items.append(_to_user_message(pending_msg))
+                    if audit_context is not None:
+                        turn = AuditTurnContext(
+                            trace_id=audit_context.trace_id,
+                            turn_id=audit_context.turn_id,
+                            session_key=active_session_key or "unknown",
+                            source_type=audit_context.source_type,
+                            actor_type="system",
+                            link_reason="created",
+                        )
+                        await TurnAuditRecorder(
+                            self.audit_runtime.emitter, turn
+                        ).input_injected(
+                            run=audit_context,
+                            injection_source=str(
+                                metadata.get("injected_event") or pending_msg.sender_id
+                            ),
+                        )
+                    if isinstance(task_id, str) and task_id and claimed is not None:
+                        await self.subagents.mark_result_delivered(task_id)
+                        if goal_claim is not None:
+                            await self.goal_orchestration.mark_delivery(
+                                active_session_key or "unknown", task_id, "delivered"
+                            )
+                except Exception:
+                    if isinstance(task_id, str) and task_id and claimed is True:
+                        await self.subagents.mark_result_delivery_failed(task_id)
+                    raise
 
             while len(items) < limit:
                 try:
@@ -1905,14 +1927,26 @@ class AgentLoop:
         if is_subagent:
             task_id = ctx.msg.metadata.get("subagent_task_id") if isinstance(ctx.msg.metadata, dict) else None
             if isinstance(task_id, str) and task_id:
-                claim = await self.goal_orchestration.claim_result(ctx.session.key, task_id)
-                if claim is False:
-                    return "ok"
-                if claim is True:
+                task_claim = await self.subagents.claim_result(task_id, ctx.audit_run.run_id)
+                goal_claim = await self.goal_orchestration.claim_result(ctx.session.key, task_id)
+                if task_claim is False or (task_claim is None and goal_claim is False):
+                    return "skip"
+                if task_claim is True or goal_claim is True:
                     ctx.msg.metadata["_result_claimed"] = True
-            if self._persist_subagent_followup(ctx.session, ctx.msg):
-                logger.debug("Subagent result persisted for session {}", ctx.session_key)
-                self.sessions.save(ctx.session)
+            try:
+                if self._persist_subagent_followup(ctx.session, ctx.msg):
+                    logger.debug("Subagent result persisted for session {}", ctx.session_key)
+                    self.sessions.save(ctx.session)
+                if isinstance(task_id, str) and task_id and task_claim is not None:
+                    await self.subagents.mark_result_delivered(task_id)
+                    if goal_claim is not None:
+                        await self.goal_orchestration.mark_delivery(
+                            ctx.session.key, task_id, "delivered"
+                        )
+            except Exception:
+                if isinstance(task_id, str) and task_id and task_claim is True:
+                    await self.subagents.mark_result_delivery_failed(task_id)
+                raise
 
         if ctx.kind is TurnKind.USER and (message_tool := self.tools.get("message")):
             if isinstance(message_tool, MessageTool):

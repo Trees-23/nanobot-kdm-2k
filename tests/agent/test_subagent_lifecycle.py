@@ -20,7 +20,11 @@ from nanobot.providers.base import GenerationSettings, LLMProvider
 from nanobot.session.goal_orchestration import GoalOrchestrationStore
 from nanobot.session.goal_state import GOAL_STATE_KEY
 from nanobot.session.manager import SessionManager
-from nanobot.session.subagent_tasks import SubagentTaskStatus, SubagentTaskStore
+from nanobot.session.subagent_tasks import (
+    SubagentDeliveryPhase,
+    SubagentTaskStatus,
+    SubagentTaskStore,
+)
 from nanobot.utils.llm_runtime import LLMRuntime
 
 # ---------------------------------------------------------------------------
@@ -476,6 +480,15 @@ class TestSpawn:
         assert task.owner_session_key == "test:background"
         assert task.status == SubagentTaskStatus.SUCCEEDED
         assert task.usage == {"prompt_tokens": 12, "completion_tokens": 3}
+        assert task.delivery.phase == SubagentDeliveryPhase.READY
+
+        assert await sm.claim_result(spawned["task_id"], "continuation-run") is True
+        assert await sm.claim_result(spawned["task_id"], "continuation-run") is False
+        assert await sm.mark_result_delivered(spawned["task_id"]) is True
+        delivered = SubagentTaskStore(tmp_path).load(spawned["task_id"])
+        assert delivered is not None
+        assert delivered.delivery.phase == SubagentDeliveryPhase.DELIVERED
+        assert delivered.delivery.claim_owner_run_id == "continuation-run"
 
     @pytest.mark.asyncio
     async def test_required_task_uses_task_store_without_replacing_goal_barrier(self, tmp_path):

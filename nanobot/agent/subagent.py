@@ -27,6 +27,7 @@ from nanobot.agent.tools.file_state import FileStates
 from nanobot.agent.tools.loader import ToolLoader
 from nanobot.agent.tools.registry import ToolRegistry
 from nanobot.audit.context import AuditRunContext
+from nanobot.audit.subagent_lifecycle import SubagentLifecyclePublisher
 from nanobot.bus.events import AUDIT_CONTEXT_META, InboundMessage
 from nanobot.bus.queue import MessageBus
 from nanobot.config.schema import AgentDefaults, ToolsConfig
@@ -182,6 +183,10 @@ class SubagentManager:
         self._child_runtime_config = child_runtime_config
         self._child_audit_root = child_audit_root
         self._task_store = task_store or SubagentTaskStore(workspace)
+        self._lifecycle_publisher = SubagentLifecyclePublisher(
+            self._task_store,
+            audit_emitter,
+        )
         self._exec_session_manager = ExecSessionManager()
         self._llm_wall_timeout_for_session = llm_wall_timeout_for_session
         self._running_tasks: dict[str, asyncio.Task[None]] = {}
@@ -343,6 +348,8 @@ class SubagentManager:
             await self._task_store.create(
                 task_id=task_id,
                 owner_session_key=durable_session_key,
+                trace_id=audit_context.trace_id if audit_context is not None else None,
+                turn_id=audit_context.turn_id if audit_context is not None else None,
                 owner_run_id=owner_run_id,
                 child_run_id=status.child_run_id,
                 spawn_tool_call_id=spawn_tool_call_id,
@@ -352,6 +359,7 @@ class SubagentManager:
                 replaces_task_id=replaces_task_id,
             )
             await self._task_store.transition_status(task_id, SubagentTaskStatus.QUEUED)
+            await self._lifecycle_publisher.flush_task(task_id)
             if required:
                 try:
                     await self._goal_orchestration.register(
@@ -511,6 +519,7 @@ class SubagentManager:
                     "pgid": handle.identity.pgid,
                 },
             )
+            await self._lifecycle_publisher.flush_task(task_id)
         if status.required and status.session_key and self._goal_orchestration is not None:
             await self._goal_orchestration.mark_executor(
                 status.session_key,
@@ -576,6 +585,7 @@ class SubagentManager:
         durable_task = self._task_store.load(task_id)
         if durable_task is not None:
             await self._task_store.transition_status(task_id, SubagentTaskStatus.RUNNING)
+            await self._lifecycle_publisher.flush_task(task_id)
 
         async def _on_checkpoint(payload: dict) -> None:
             status.phase = payload.get("phase", status.phase)
@@ -589,6 +599,7 @@ class SubagentManager:
                     phase=phase,
                     progress={"iteration": status.iteration},
                 )
+                await self._lifecycle_publisher.flush_task(task_id)
 
         terminal_status = "failed"
         terminal_error: str | None = None
@@ -615,6 +626,7 @@ class SubagentManager:
                         SubagentTaskStatus(terminal_status),
                         error=terminal_error,
                     )
+                    await self._lifecycle_publisher.flush_task(task_id)
                 except Exception as exc:
                     raise _SubagentTaskPersistenceError(
                         f"failed to persist terminal task {task_id}"
@@ -852,6 +864,10 @@ class SubagentManager:
     ) -> None:
         """Announce the subagent result to the main agent via the message bus."""
         status_text = "completed successfully" if status == "ok" else "failed"
+
+        if self._task_store.load(task_id) is not None:
+            await self._task_store.mark_result_ready(task_id)
+            await self._lifecycle_publisher.flush_task(task_id)
 
         announce_content = render_template(
             "agent/subagent_announce.md",
@@ -1277,7 +1293,30 @@ class SubagentManager:
 
     async def recover_runtime(self) -> int:
         """Fail closed durable tasks whose executor is absent after restart."""
-        return await self._task_store.recover_runtime(self.running_task_ids())
+        recovered = await self._task_store.recover_runtime(self.running_task_ids())
+        await self._lifecycle_publisher.flush_pending()
+        return recovered
+
+    async def claim_result(self, task_id: str, owner_run_id: str) -> bool | None:
+        if self._task_store.load(task_id) is None:
+            return None
+        _task, changed = await self._task_store.claim_result(task_id, owner_run_id)
+        await self._lifecycle_publisher.flush_task(task_id)
+        return changed
+
+    async def mark_result_delivered(self, task_id: str) -> bool:
+        if self._task_store.load(task_id) is None:
+            return False
+        await self._task_store.mark_delivered(task_id)
+        await self._lifecycle_publisher.flush_task(task_id)
+        return True
+
+    async def mark_result_delivery_failed(self, task_id: str) -> bool:
+        if self._task_store.load(task_id) is None:
+            return False
+        await self._task_store.mark_delivery_failed(task_id)
+        await self._lifecycle_publisher.flush_task(task_id)
+        return True
 
     async def wait_for(self, task_ids: list[str], timeout: float) -> None:
         tasks = [self._running_tasks[task_id] for task_id in task_ids if task_id in self._running_tasks]
