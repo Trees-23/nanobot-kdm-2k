@@ -1,7 +1,7 @@
 import asyncio
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from loguru import logger
@@ -1622,8 +1622,10 @@ async def test_durable_subagent_result_is_claimed_delivered_and_duplicate_skippe
         },
     )
 
-    await loop._process_message(message)
-    await loop._process_message(message)
+    injected = AsyncMock()
+    with patch("nanobot.audit.boundaries.TurnAuditRecorder.input_injected", injected):
+        await loop._process_message(message)
+        await loop._process_message(message)
 
     delivered = store.load("sub-durable")
     assert delivered is not None
@@ -1635,6 +1637,9 @@ async def test_durable_subagent_result_is_claimed_delivered_and_duplicate_skippe
         if row.get("subagent_task_id") == "sub-durable"
     ]
     assert len(followups) == 1
+    injected.assert_awaited_once()
+    assert injected.await_args.kwargs["injection_source"] == "subagent_result"
+    assert injected.await_args.kwargs["subagent_task_id"] == "sub-durable"
 
 
 def test_prompt_merge_does_not_replace_standalone_subagent_history_entry(tmp_path: Path) -> None:

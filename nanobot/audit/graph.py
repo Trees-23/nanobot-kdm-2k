@@ -1578,6 +1578,24 @@ class AuditGraphBuilder:
                 or index == 0
             ):
                 continue
+            task_id = getattr(event, "subagent_task_id", None)
+            task_node = task_nodes.get(task_id) if isinstance(task_id, str) else None
+            target = state.owners.get(event.event_id)
+            if task_node is not None and target is not None:
+                key = ("result_return", task_node.id, target)
+                edges[key] = AuditGraphEdge(
+                    id=f"result_return:{task_node.id}:{target}",
+                    type="result_return",
+                    relation="result_return",
+                    source=task_node.id,
+                    target=target,
+                    anchor=AuditEdgeAnchor(
+                        source_event_id=task_node.raw_event_ids[-1],
+                        target_event_id=event.event_id,
+                    ),
+                    evidence_kind="recorded_injection_task_id",
+                )
+                continue
             previous = ordered_events[index - 1]
             if (
                 previous.event_type != "run_finished"
@@ -1603,6 +1621,7 @@ class AuditGraphBuilder:
                     source_event_id=source_event,
                     target_event_id=event.event_id,
                 ),
+                evidence_kind="legacy_inferred",
             )
 
         for run_id, item in evidence.items():

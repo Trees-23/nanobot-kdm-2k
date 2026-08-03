@@ -1057,6 +1057,9 @@ class AgentLoop:
                             injection_source=str(
                                 metadata.get("injected_event") or pending_msg.sender_id
                             ),
+                            subagent_task_id=(
+                                task_id if isinstance(task_id, str) and task_id else None
+                            ),
                         )
                     if isinstance(task_id, str) and task_id and claimed is not None:
                         await self.subagents.mark_result_delivered(task_id)
@@ -1973,6 +1976,12 @@ class AgentLoop:
                 if self._persist_subagent_followup(ctx.session, ctx.msg):
                     logger.debug("Subagent result persisted for session {}", ctx.session_key)
                     self.sessions.save(ctx.session)
+                if ctx.audit is not None:
+                    await ctx.audit.input_injected(
+                        run=ctx.audit_run,
+                        injection_source="subagent_result",
+                        subagent_task_id=task_id,
+                    )
                 if isinstance(task_id, str) and task_id and task_claim is not None:
                     await self.subagents.mark_result_delivered(task_id)
                     if goal_claim is not None:

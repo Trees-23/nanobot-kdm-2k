@@ -446,9 +446,16 @@ def test_trace_full_projects_recorded_task_between_spawn_child_and_continuation(
             task_phase="finished",
             delivery_phase="delivered",
         ),
-        _event(10, "run_finished", status="succeeded", stop_reason="done"),
         _event(
-            11,
+            10,
+            "input_injected",
+            injection_source="subagent_result",
+            target_run_id="run-1",
+            subagent_task_id="task-a",
+        ),
+        _event(11, "run_finished", status="succeeded", stop_reason="done"),
+        _event(
+            12,
             "run_started",
             run_id="continuation-a",
             source_type="continuation",
@@ -458,7 +465,7 @@ def test_trace_full_projects_recorded_task_between_spawn_child_and_continuation(
             },
         ),
         _event(
-            12,
+            13,
             "run_finished",
             run_id="continuation-a",
             source_type="continuation",
@@ -498,6 +505,12 @@ def test_trace_full_projects_recorded_task_between_spawn_child_and_continuation(
         and edge.source == task.id
         and edge.target == continuation.id
         and edge.evidence_kind == "recorded_delivery_event"
+        for edge in graph.edges
+    )
+    assert any(
+        edge.type == "result_return"
+        and edge.source == task.id
+        and edge.evidence_kind == "recorded_injection_task_id"
         for edge in graph.edges
     )
     assert not any(

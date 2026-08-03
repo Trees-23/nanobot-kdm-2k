@@ -123,6 +123,7 @@ _EVENT_SPECS: dict[EventType, tuple[str, dict[str, tuple[Any, Any]]]] = {
     EventType.TURN_STARTED: ("TU", {}),
     EventType.INPUT_INJECTED: ("TUR", {
         "injection_source": _required(str), "target_run_id": _required(str),
+        "subagent_task_id": _optional(str),
     }),
     EventType.CANCEL_REQUESTED: ("TU", {
         "requested_by": _required(str), "target_run_ids": _required(list[str]),
