@@ -1,0 +1,548 @@
+"""Durable contract for unified subagent task state.
+
+This module intentionally does not schedule children or own Goal barriers.  It freezes the
+business-state contract that later integration work can use without turning either
+``SubagentManager`` or Audit projections into a second writable source of truth.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import base64
+import errno
+import json
+import os
+from contextlib import suppress
+from datetime import datetime, timezone
+from enum import StrEnum
+from pathlib import Path
+from typing import Any, Literal
+
+from pydantic import BaseModel, ConfigDict, Field, field_validator
+
+SUBAGENT_TASK_SCHEMA_VERSION = 2
+SUBAGENT_LIFECYCLE_SCHEMA_VERSION = 1
+MAX_TASK_LABEL_CHARS = 120
+MAX_TASK_ERROR_CHARS = 1000
+
+
+def _utc_now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _require_utc(value: datetime | None) -> datetime | None:
+    if value is None:
+        return None
+    if value.tzinfo is None or value.utcoffset() is None:
+        raise ValueError("subagent task timestamps must be timezone-aware")
+    if value.utcoffset().total_seconds() != 0:
+        raise ValueError("subagent task timestamps must use UTC")
+    return value
+
+
+class SubagentTaskStatus(StrEnum):
+    CREATED = "created"
+    QUEUED = "queued"
+    RUNNING = "running"
+    SUCCEEDED = "succeeded"
+    FAILED = "failed"
+    CANCELLED = "cancelled"
+    TIMED_OUT = "timed_out"
+    LOST = "lost"
+
+
+TERMINAL_TASK_STATUSES = frozenset({
+    SubagentTaskStatus.SUCCEEDED,
+    SubagentTaskStatus.FAILED,
+    SubagentTaskStatus.CANCELLED,
+    SubagentTaskStatus.TIMED_OUT,
+    SubagentTaskStatus.LOST,
+})
+
+_STATUS_TRANSITIONS: dict[SubagentTaskStatus, frozenset[SubagentTaskStatus]] = {
+    SubagentTaskStatus.CREATED: frozenset({
+        SubagentTaskStatus.QUEUED,
+        SubagentTaskStatus.FAILED,
+        SubagentTaskStatus.CANCELLED,
+    }),
+    SubagentTaskStatus.QUEUED: frozenset({
+        SubagentTaskStatus.RUNNING,
+        SubagentTaskStatus.FAILED,
+        SubagentTaskStatus.CANCELLED,
+        SubagentTaskStatus.TIMED_OUT,
+        SubagentTaskStatus.LOST,
+    }),
+    SubagentTaskStatus.RUNNING: TERMINAL_TASK_STATUSES,
+}
+
+
+class SubagentExecutionPhase(StrEnum):
+    INITIALIZING = "initializing"
+    RUNNING_MODEL = "running_model"
+    AWAITING_TOOLS = "awaiting_tools"
+    TOOLS_COMPLETED = "tools_completed"
+    FINAL_RESPONSE = "final_response"
+    RESULT_PREPARING = "result_preparing"
+
+
+class SubagentTerminationState(StrEnum):
+    NONE = "none"
+    CANCEL_REQUESTED = "cancel_requested"
+    GRACE_WAITING = "grace_waiting"
+    COOPERATIVELY_EXITED = "cooperatively_exited"
+    FORCE_KILL_REQUESTED = "force_kill_requested"
+    FORCE_KILLED = "force_killed"
+    TERMINATION_FAILED = "termination_failed"
+
+
+class SubagentDeliveryPhase(StrEnum):
+    NOT_READY = "not_ready"
+    READY = "ready"
+    CLAIMED_PENDING_DELIVERY = "claimed_pending_delivery"
+    DELIVERED = "delivered"
+    DELIVERY_FAILED = "delivery_failed"
+
+
+class TerminationState(BaseModel):
+    model_config = ConfigDict(extra="forbid", use_enum_values=True)
+
+    state: SubagentTerminationState = SubagentTerminationState.NONE
+    evidence: dict[str, Any] | None = None
+
+
+class DeliveryState(BaseModel):
+    model_config = ConfigDict(extra="forbid", use_enum_values=True)
+
+    phase: SubagentDeliveryPhase = SubagentDeliveryPhase.NOT_READY
+    claim_owner_run_id: str | None = None
+    claimed_at: datetime | None = None
+    delivered_at: datetime | None = None
+
+    @field_validator("claimed_at", "delivered_at")
+    @classmethod
+    def _utc_timestamp(cls, value: datetime | None) -> datetime | None:
+        return _require_utc(value)
+
+
+class SubagentLifecycleOutboxEvent(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: Literal[1] = SUBAGENT_LIFECYCLE_SCHEMA_VERSION
+    idempotency_key: str
+    event_type: str
+    task_id: str
+    revision: int = Field(ge=1)
+    occurred_at: datetime
+    published_at: datetime | None = None
+    summary: dict[str, Any] = Field(default_factory=dict)
+
+    @field_validator("occurred_at", "published_at")
+    @classmethod
+    def _utc_timestamp(cls, value: datetime | None) -> datetime | None:
+        return _require_utc(value)
+
+
+class SubagentTask(BaseModel):
+    model_config = ConfigDict(extra="forbid", use_enum_values=True)
+
+    schema_version: Literal[2] = SUBAGENT_TASK_SCHEMA_VERSION
+    revision: int = Field(ge=1)
+    task_id: str = Field(min_length=1, max_length=128)
+    owner_session_key: str = Field(min_length=1, max_length=512)
+    owner_run_id: str | None = None
+    child_run_id: str | None = None
+    spawn_tool_call_id: str | None = None
+    label: str = Field(default="", max_length=MAX_TASK_LABEL_CHARS)
+    required: bool = False
+    task_group: str = Field(default="default", min_length=1, max_length=64)
+    attempt: int = Field(default=1, ge=1)
+    replaces_task_id: str | None = None
+    status: SubagentTaskStatus = SubagentTaskStatus.CREATED
+    phase: SubagentExecutionPhase = SubagentExecutionPhase.INITIALIZING
+    termination: TerminationState = Field(default_factory=TerminationState)
+    delivery: DeliveryState = Field(default_factory=DeliveryState)
+    executor: dict[str, Any] | None = None
+    progress: dict[str, Any] = Field(default_factory=dict)
+    usage: dict[str, Any] = Field(default_factory=dict)
+    budget: dict[str, Any] = Field(default_factory=dict)
+    created_at: datetime
+    started_at: datetime | None = None
+    finished_at: datetime | None = None
+    error: str | None = Field(default=None, max_length=MAX_TASK_ERROR_CHARS)
+    legacy_inferred: bool = False
+    lifecycle_outbox: list[SubagentLifecycleOutboxEvent] = Field(default_factory=list)
+
+    @field_validator("created_at", "started_at", "finished_at")
+    @classmethod
+    def _utc_timestamp(cls, value: datetime | None) -> datetime | None:
+        return _require_utc(value)
+
+
+class SubagentUsageDTO(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    prompt_tokens: int = Field(default=0, ge=0)
+    completion_tokens: int = Field(default=0, ge=0)
+    total_tokens: int = Field(default=0, ge=0)
+    cost_usd: float | None = Field(default=None, ge=0)
+
+
+class SubagentBudgetDTO(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    max_tokens: int | None = Field(default=None, ge=0)
+    max_cost_usd: float | None = Field(default=None, ge=0)
+    deadline_at: datetime | None = None
+
+    @field_validator("deadline_at")
+    @classmethod
+    def _utc_timestamp(cls, value: datetime | None) -> datetime | None:
+        return _require_utc(value)
+
+
+class SubagentTaskDTO(BaseModel):
+    """Versioned, bounded public projection; never serialize runtime status directly."""
+
+    model_config = ConfigDict(extra="forbid", use_enum_values=True)
+
+    schema_version: Literal[1] = 1
+    revision: int
+    task_id: str
+    owner_run_id: str | None
+    child_run_id: str | None
+    label: str
+    required: bool
+    task_group: str
+    status: SubagentTaskStatus
+    phase: SubagentExecutionPhase
+    termination_state: SubagentTerminationState
+    delivery_phase: SubagentDeliveryPhase
+    usage: SubagentUsageDTO
+    budget: SubagentBudgetDTO
+    created_at: datetime
+    started_at: datetime | None
+    finished_at: datetime | None
+    error: str | None
+    legacy_inferred: bool
+
+    @classmethod
+    def from_task(cls, task: SubagentTask) -> SubagentTaskDTO:
+        return cls(
+            revision=task.revision,
+            task_id=task.task_id,
+            owner_run_id=task.owner_run_id,
+            child_run_id=task.child_run_id,
+            label=task.label,
+            required=task.required,
+            task_group=task.task_group,
+            status=task.status,
+            phase=task.phase,
+            termination_state=task.termination.state,
+            delivery_phase=task.delivery.phase,
+            usage=SubagentUsageDTO.model_validate({
+                key: task.usage.get(key)
+                for key in ("prompt_tokens", "completion_tokens", "total_tokens", "cost_usd")
+                if task.usage.get(key) is not None
+            }),
+            budget=SubagentBudgetDTO.model_validate({
+                key: task.budget.get(key)
+                for key in ("max_tokens", "max_cost_usd", "deadline_at")
+                if task.budget.get(key) is not None
+            }),
+            created_at=task.created_at,
+            started_at=task.started_at,
+            finished_at=task.finished_at,
+            error=task.error,
+            legacy_inferred=task.legacy_inferred,
+        )
+
+
+class InvalidSubagentTaskTransitionError(ValueError):
+    """Raised when a caller attempts a non-idempotent illegal transition."""
+
+
+class SubagentTaskConflictError(ValueError):
+    """Raised when an idempotent create key is reused for another logical task."""
+
+
+class SubagentTaskStore:
+    """Atomic per-task JSON store with lifecycle events committed in the same rename."""
+
+    def __init__(self, workspace: Path) -> None:
+        self.root = workspace / "subagent_tasks"
+        self.root.mkdir(parents=True, exist_ok=True)
+        self._locks: dict[str, asyncio.Lock] = {}
+
+    def _lock(self, task_id: str) -> asyncio.Lock:
+        return self._locks.setdefault(task_id, asyncio.Lock())
+
+    @staticmethod
+    def _storage_key(task_id: str) -> str:
+        return base64.urlsafe_b64encode(task_id.encode()).decode().rstrip("=")
+
+    def _path(self, task_id: str) -> Path:
+        return self.root / f"{self._storage_key(task_id)}.json"
+
+    @staticmethod
+    def _event(
+        task: SubagentTask,
+        event_type: str,
+        occurred_at: datetime,
+        summary: dict[str, Any] | None = None,
+    ) -> SubagentLifecycleOutboxEvent:
+        return SubagentLifecycleOutboxEvent(
+            idempotency_key=f"{task.task_id}:{task.revision}:{event_type}",
+            event_type=event_type,
+            task_id=task.task_id,
+            revision=task.revision,
+            occurred_at=occurred_at,
+            summary=summary or {},
+        )
+
+    async def create(
+        self,
+        *,
+        task_id: str,
+        owner_session_key: str,
+        label: str = "",
+        owner_run_id: str | None = None,
+        child_run_id: str | None = None,
+        spawn_tool_call_id: str | None = None,
+        required: bool = False,
+        task_group: str = "default",
+        attempt: int = 1,
+        replaces_task_id: str | None = None,
+        now: datetime | None = None,
+    ) -> SubagentTask:
+        async with self._lock(task_id):
+            existing = self.load(task_id)
+            if existing is not None:
+                identity = (existing.owner_session_key, existing.owner_run_id, existing.required)
+                requested = (owner_session_key, owner_run_id, required)
+                if identity != requested:
+                    raise SubagentTaskConflictError(
+                        f"subagent task {task_id} already exists with another owner"
+                    )
+                return existing
+            occurred_at = now or _utc_now()
+            task = SubagentTask(
+                revision=1,
+                task_id=task_id,
+                owner_session_key=owner_session_key,
+                owner_run_id=owner_run_id,
+                child_run_id=child_run_id,
+                spawn_tool_call_id=spawn_tool_call_id,
+                label=label[:MAX_TASK_LABEL_CHARS],
+                required=required,
+                task_group=task_group,
+                attempt=attempt,
+                replaces_task_id=replaces_task_id,
+                created_at=occurred_at,
+            )
+            task.lifecycle_outbox.append(self._event(task, "subagent_created", occurred_at))
+            self._write(task)
+            return task.model_copy(deep=True)
+
+    def load(self, task_id: str) -> SubagentTask | None:
+        path = self._path(task_id)
+        if not path.exists():
+            return None
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(raw, dict):
+            raise ValueError("subagent task record must be a JSON object")
+        normalized = self._normalize_legacy(raw)
+        task = SubagentTask.model_validate(normalized)
+        if task.task_id != task_id:
+            raise ValueError("subagent task storage identity mismatch")
+        return task
+
+    async def transition_status(
+        self,
+        task_id: str,
+        status: SubagentTaskStatus,
+        *,
+        error: str | None = None,
+        now: datetime | None = None,
+    ) -> SubagentTask:
+        async with self._lock(task_id):
+            task = self._required(task_id)
+            current = SubagentTaskStatus(task.status)
+            target = SubagentTaskStatus(status)
+            if current == target:
+                return task
+            if current in TERMINAL_TASK_STATUSES:
+                # Late or duplicate terminal results are rejected without rewriting evidence.
+                return task
+            if target not in _STATUS_TRANSITIONS.get(current, frozenset()):
+                raise InvalidSubagentTaskTransitionError(
+                    f"invalid status transition: {current} -> {target}"
+                )
+            occurred_at = now or _utc_now()
+            before = current.value
+            task.status = target
+            if target == SubagentTaskStatus.RUNNING and task.started_at is None:
+                task.started_at = occurred_at
+            if target in TERMINAL_TASK_STATUSES:
+                task.finished_at = occurred_at
+            if error is not None:
+                task.error = error[:MAX_TASK_ERROR_CHARS]
+            self._commit(
+                task,
+                "subagent_terminal" if target in TERMINAL_TASK_STATUSES else "subagent_admitted",
+                occurred_at,
+                {"from_status": before, "to_status": target.value},
+            )
+            return task.model_copy(deep=True)
+
+    async def mark_result_ready(
+        self,
+        task_id: str,
+        *,
+        now: datetime | None = None,
+    ) -> SubagentTask:
+        return await self._transition_delivery(
+            task_id,
+            expected={SubagentDeliveryPhase.NOT_READY},
+            target=SubagentDeliveryPhase.READY,
+            event_type="subagent_result_ready",
+            now=now,
+        )
+
+    async def claim_result(
+        self,
+        task_id: str,
+        owner_run_id: str,
+        *,
+        now: datetime | None = None,
+    ) -> tuple[SubagentTask, bool]:
+        async with self._lock(task_id):
+            task = self._required(task_id)
+            phase = SubagentDeliveryPhase(task.delivery.phase)
+            if phase in {
+                SubagentDeliveryPhase.CLAIMED_PENDING_DELIVERY,
+                SubagentDeliveryPhase.DELIVERED,
+            }:
+                return task, False
+            if phase not in {SubagentDeliveryPhase.READY, SubagentDeliveryPhase.DELIVERY_FAILED}:
+                raise InvalidSubagentTaskTransitionError(
+                    f"cannot claim result in delivery phase {phase}"
+                )
+            occurred_at = now or _utc_now()
+            task.delivery.phase = SubagentDeliveryPhase.CLAIMED_PENDING_DELIVERY
+            task.delivery.claim_owner_run_id = owner_run_id
+            task.delivery.claimed_at = occurred_at
+            self._commit(
+                task,
+                "subagent_result_claimed",
+                occurred_at,
+                {"claim_owner_run_id": owner_run_id},
+            )
+            return task.model_copy(deep=True), True
+
+    async def mark_delivered(
+        self,
+        task_id: str,
+        *,
+        now: datetime | None = None,
+    ) -> SubagentTask:
+        task = await self._transition_delivery(
+            task_id,
+            expected={SubagentDeliveryPhase.CLAIMED_PENDING_DELIVERY},
+            target=SubagentDeliveryPhase.DELIVERED,
+            event_type="subagent_result_delivered",
+            now=now,
+        )
+        return task
+
+    async def _transition_delivery(
+        self,
+        task_id: str,
+        *,
+        expected: set[SubagentDeliveryPhase],
+        target: SubagentDeliveryPhase,
+        event_type: str,
+        now: datetime | None,
+    ) -> SubagentTask:
+        async with self._lock(task_id):
+            task = self._required(task_id)
+            current = SubagentDeliveryPhase(task.delivery.phase)
+            if current == target:
+                return task
+            if current not in expected:
+                raise InvalidSubagentTaskTransitionError(
+                    f"invalid delivery transition: {current} -> {target}"
+                )
+            occurred_at = now or _utc_now()
+            task.delivery.phase = target
+            if target == SubagentDeliveryPhase.DELIVERED:
+                task.delivery.delivered_at = occurred_at
+            self._commit(
+                task,
+                event_type,
+                occurred_at,
+                {"from_delivery": current.value, "to_delivery": target.value},
+            )
+            return task.model_copy(deep=True)
+
+    def _required(self, task_id: str) -> SubagentTask:
+        task = self.load(task_id)
+        if task is None:
+            raise KeyError(task_id)
+        return task
+
+    def _commit(
+        self,
+        task: SubagentTask,
+        event_type: str,
+        occurred_at: datetime,
+        summary: dict[str, Any],
+    ) -> None:
+        task.revision += 1
+        task.lifecycle_outbox.append(self._event(task, event_type, occurred_at, summary))
+        self._write(task)
+
+    def _write(self, task: SubagentTask) -> None:
+        path = self._path(task.task_id)
+        tmp_path = path.with_suffix(".json.tmp")
+        try:
+            with open(tmp_path, "w", encoding="utf-8") as stream:
+                stream.write(task.model_dump_json(indent=2))
+                stream.write("\n")
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(tmp_path, path)
+            with suppress(PermissionError):
+                fd = os.open(str(path.parent), os.O_RDONLY)
+                try:
+                    os.fsync(fd)
+                except OSError as exc:
+                    if exc.errno != errno.EINVAL:
+                        raise
+                finally:
+                    os.close(fd)
+        except BaseException:
+            tmp_path.unlink(missing_ok=True)
+            raise
+
+    @staticmethod
+    def _normalize_legacy(raw: dict[str, Any]) -> dict[str, Any]:
+        if raw.get("schema_version") == SUBAGENT_TASK_SCHEMA_VERSION:
+            return raw
+        normalized = dict(raw)
+        normalized["schema_version"] = SUBAGENT_TASK_SCHEMA_VERSION
+        normalized["revision"] = max(1, int(normalized.get("revision") or 1))
+        normalized.setdefault("created_at", _utc_now().isoformat())
+        normalized.setdefault("termination", {"state": "none", "evidence": None})
+        normalized.setdefault("delivery", {"phase": "not_ready"})
+        normalized.setdefault("phase", "initializing")
+        normalized.setdefault("status", "created")
+        normalized.setdefault("required", False)
+        normalized.setdefault("task_group", "default")
+        normalized.setdefault("attempt", 1)
+        normalized.setdefault("label", "")
+        normalized.setdefault("progress", {})
+        normalized.setdefault("usage", {})
+        normalized.setdefault("budget", {})
+        normalized.setdefault("legacy_inferred", True)
+        normalized.setdefault("lifecycle_outbox", [])
+        return normalized

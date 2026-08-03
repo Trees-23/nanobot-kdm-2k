@@ -1,0 +1,172 @@
+"""Contract tests for the durable unified subagent task state machine."""
+
+from __future__ import annotations
+
+import json
+from datetime import datetime, timedelta, timezone
+
+import pytest
+from pydantic import ValidationError
+
+from nanobot.session.subagent_tasks import (
+    InvalidSubagentTaskTransitionError,
+    SubagentDeliveryPhase,
+    SubagentTaskDTO,
+    SubagentTaskStatus,
+    SubagentTaskStore,
+)
+
+
+@pytest.mark.asyncio
+async def test_create_persists_revision_and_lifecycle_outbox_atomically(tmp_path):
+    store = SubagentTaskStore(tmp_path)
+
+    task = await store.create(
+        task_id="task-a",
+        owner_session_key="websocket:chat-a",
+        owner_run_id="run-owner",
+        label="bounded label",
+    )
+
+    restored = SubagentTaskStore(tmp_path).load("task-a")
+    assert restored == task
+    assert task.revision == 1
+    assert task.lifecycle_outbox[0].idempotency_key == "task-a:1:subagent_created"
+
+
+@pytest.mark.asyncio
+async def test_status_transition_is_monotonic_and_duplicate_is_idempotent(tmp_path):
+    store = SubagentTaskStore(tmp_path)
+    await store.create(task_id="task-a", owner_session_key="test:a")
+
+    queued = await store.transition_status("task-a", SubagentTaskStatus.QUEUED)
+    duplicate = await store.transition_status("task-a", SubagentTaskStatus.QUEUED)
+    running = await store.transition_status("task-a", SubagentTaskStatus.RUNNING)
+
+    assert queued.revision == 2
+    assert duplicate.revision == 2
+    assert running.revision == 3
+    assert running.started_at is not None
+    assert [event.revision for event in running.lifecycle_outbox] == [1, 2, 3]
+
+
+@pytest.mark.asyncio
+async def test_illegal_transition_fails_without_rewriting_record(tmp_path):
+    store = SubagentTaskStore(tmp_path)
+    await store.create(task_id="task-a", owner_session_key="test:a")
+
+    with pytest.raises(InvalidSubagentTaskTransitionError, match="created -> running"):
+        await store.transition_status("task-a", SubagentTaskStatus.RUNNING)
+
+    restored = store.load("task-a")
+    assert restored is not None
+    assert restored.status == SubagentTaskStatus.CREATED
+    assert restored.revision == 1
+
+
+@pytest.mark.asyncio
+async def test_late_result_cannot_override_terminal_status(tmp_path):
+    store = SubagentTaskStore(tmp_path)
+    await store.create(task_id="task-a", owner_session_key="test:a")
+    await store.transition_status("task-a", SubagentTaskStatus.QUEUED)
+    await store.transition_status("task-a", SubagentTaskStatus.RUNNING)
+    failed = await store.transition_status("task-a", SubagentTaskStatus.FAILED, error="failed")
+
+    late = await store.transition_status("task-a", SubagentTaskStatus.SUCCEEDED)
+
+    assert late.status == SubagentTaskStatus.FAILED
+    assert late.revision == failed.revision
+    assert late.finished_at == failed.finished_at
+
+
+@pytest.mark.asyncio
+async def test_result_claim_and_delivery_have_exactly_once_effect(tmp_path):
+    store = SubagentTaskStore(tmp_path)
+    await store.create(task_id="task-a", owner_session_key="test:a")
+    await store.mark_result_ready("task-a")
+
+    claimed, changed = await store.claim_result("task-a", "run-owner")
+    duplicate, duplicate_changed = await store.claim_result("task-a", "run-owner")
+    delivered = await store.mark_delivered("task-a")
+    delivered_duplicate = await store.mark_delivered("task-a")
+
+    assert changed is True
+    assert duplicate_changed is False
+    assert duplicate.revision == claimed.revision
+    assert delivered.delivery.phase == SubagentDeliveryPhase.DELIVERED
+    assert delivered_duplicate.revision == delivered.revision
+
+
+def test_legacy_record_with_missing_fields_is_explicitly_degraded(tmp_path):
+    store = SubagentTaskStore(tmp_path)
+    path = store._path("legacy-a")
+    path.write_text(
+        json.dumps({"task_id": "legacy-a", "owner_session_key": "test:a"}),
+        encoding="utf-8",
+    )
+
+    task = store.load("legacy-a")
+
+    assert task is not None
+    assert task.schema_version == 2
+    assert task.revision == 1
+    assert task.legacy_inferred is True
+    assert task.delivery.phase == SubagentDeliveryPhase.NOT_READY
+
+
+def test_naive_timestamp_is_rejected():
+    with pytest.raises(ValidationError, match="timezone-aware"):
+        from nanobot.session.subagent_tasks import SubagentTask
+
+        SubagentTask(
+            revision=1,
+            task_id="task-a",
+            owner_session_key="test:a",
+            created_at=datetime(2026, 8, 3),
+        )
+
+
+def test_non_utc_timestamp_is_rejected():
+    with pytest.raises(ValidationError, match="must use UTC"):
+        from nanobot.session.subagent_tasks import SubagentTask
+
+        SubagentTask(
+            revision=1,
+            task_id="task-a",
+            owner_session_key="test:a",
+            created_at=datetime(2026, 8, 3, tzinfo=timezone(timedelta(hours=8))),
+        )
+
+
+@pytest.mark.asyncio
+async def test_public_dto_exposes_only_safe_usage_and_budget_fields(tmp_path):
+    store = SubagentTaskStore(tmp_path)
+    task = await store.create(
+        task_id="task-a",
+        owner_session_key="test:a",
+        label="safe label",
+    )
+    task.executor = {"pid": 123, "secret": "must-not-leak"}
+    task.usage = {"prompt_tokens": 100, "provider_secret": "must-not-leak"}
+    task.budget = {"max_cost_usd": 1, "internal_reservation": "must-not-leak"}
+
+    payload = SubagentTaskDTO.from_task(task).model_dump(mode="json")
+
+    assert payload["schema_version"] == 1
+    assert payload["label"] == "safe label"
+    assert "executor" not in payload
+    assert payload["usage"] == {
+        "prompt_tokens": 100,
+        "completion_tokens": 0,
+        "total_tokens": 0,
+        "cost_usd": None,
+    }
+    assert payload["budget"]["max_cost_usd"] == 1
+    assert "provider_secret" not in payload["usage"]
+    assert "internal_reservation" not in payload["budget"]
+    assert "lifecycle_outbox" not in payload
+    assert "owner_session_key" not in payload
+
+
+def test_test_clock_is_utc_aware():
+    assert datetime.now(timezone.utc).utcoffset() is not None
