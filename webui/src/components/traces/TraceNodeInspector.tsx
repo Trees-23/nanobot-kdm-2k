@@ -52,6 +52,19 @@ export function TraceNodeInspector({
     ["耗时", node.elapsed_ms == null ? null : `${node.elapsed_ms} ms`],
   ];
   const rowsByType: Partial<Record<AuditGraphNode["type"], Array<[string, unknown]>>> = {
+    task: [
+      ["Task ID", node.summary.task_id],
+      ["状态", node.summary.task_status ? auditValueLabel(node.summary.task_status) : null],
+      ["执行阶段", node.summary.task_phase ? auditValueLabel(node.summary.task_phase) : null],
+      ["终止状态", node.summary.termination_state ? auditValueLabel(node.summary.termination_state) : null],
+      ["交付阶段", node.summary.delivery_phase ? auditValueLabel(node.summary.delivery_phase) : null],
+      ["Required", node.summary.required_task],
+      ["Revision", node.summary.task_revision],
+      ["生命周期事件", node.summary.lifecycle_event_count],
+      ["Owner Run", node.summary.owner_run_id],
+      ["Child Run", node.summary.child_run_id],
+      ["替换 Task", node.summary.replaces_task_id],
+    ],
     tool_call: [
       ["Tool", node.summary.tool_name],
       ["安全输入", node.summary.safe_input_summary],

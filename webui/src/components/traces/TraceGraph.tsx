@@ -76,6 +76,9 @@ function AuditEdge(props: EdgeProps) {
     tool_retry: { stroke: "#ca8a04", dash: "3 3", width: 1.7 },
     tool_continuation: { stroke: "#2563eb", dash: "7 4", width: 1.7 },
     tool_recovery: { stroke: "#0891b2", dash: "2 5", width: 2 },
+    task_execution: { stroke: "#7c3aed", width: 2 },
+    task_replacement: { stroke: "#d97706", dash: "5 3", width: 1.8 },
+    task_recovery: { stroke: "#0891b2", dash: "2 5", width: 2 },
   };
   const style = styles[type ?? "sequence"];
   return (
@@ -99,6 +102,9 @@ const toolRelationLabels: Partial<Record<TraceEdgeType, string>> = {
   tool_retry: "Tool 重试关系",
   tool_continuation: "Tool 继续关系",
   tool_recovery: "Tool 恢复关系",
+  task_execution: "Task 执行关系",
+  task_replacement: "Task 替换关系",
+  task_recovery: "Task 恢复关系",
 };
 
 export function edgeHandles(edge: AuditGraphEdge, graph: AuditGraphResponse) {
@@ -137,8 +143,8 @@ function relatedIds(
   const allowed: Record<Exclude<TraceFocusMode, null>, TraceEdgeType[]> = {
     causal: ["caused_by", "retry", "retry_of"],
     context: ["sequence"],
-    branch: ["spawn_branch", "parent_run"],
-    resume: ["result_return", "resumed_from", "tool_retry", "tool_continuation", "tool_recovery"],
+    branch: ["spawn_branch", "parent_run", "task_execution", "task_replacement"],
+    resume: ["result_return", "resumed_from", "tool_retry", "tool_continuation", "tool_recovery", "task_recovery"],
   };
   const result = new Set([selectedId]);
   const edgeIds = new Set<string>();

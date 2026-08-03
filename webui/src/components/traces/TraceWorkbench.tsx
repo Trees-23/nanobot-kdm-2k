@@ -44,6 +44,9 @@ const TOOL_RELATION_LABELS: Partial<Record<TraceEdgeType, string>> = {
   tool_retry: "Tool 重试关系",
   tool_continuation: "Tool 继续关系",
   tool_recovery: "Tool 恢复关系",
+  task_execution: "Task 执行关系",
+  task_replacement: "Task 替换关系",
+  task_recovery: "Task 恢复关系",
 };
 
 export function TraceWorkbench({

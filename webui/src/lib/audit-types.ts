@@ -10,6 +10,7 @@ export type TraceDisplayStatus =
 
 export type AuditNodeType =
   | "run"
+  | "task"
   | "model_call"
   | "model_attempt"
   | "tool_call"
@@ -32,7 +33,10 @@ export type TraceEdgeType =
   | "retry_of"
   | "tool_retry"
   | "tool_continuation"
-  | "tool_recovery";
+  | "tool_recovery"
+  | "task_execution"
+  | "task_replacement"
+  | "task_recovery";
 
 export type AuditRunKind = "main" | "child_agent" | "continuation" | "unknown";
 export type AuditLaneSide = "left" | "center" | "right";
@@ -148,6 +152,17 @@ export interface AuditNodeSummary {
   fatal_failure_count?: number | null;
   recovered_failure_count?: number | null;
   continued_failure_count?: number | null;
+  task_id?: string | null;
+  task_revision?: number | null;
+  task_status?: string | null;
+  task_phase?: string | null;
+  termination_state?: string | null;
+  delivery_phase?: string | null;
+  required_task?: boolean | null;
+  lifecycle_event_count?: number | null;
+  owner_run_id?: string | null;
+  child_run_id?: string | null;
+  replaces_task_id?: string | null;
 }
 
 export interface AuditNodeEventRef {
@@ -196,6 +211,7 @@ export interface AuditGraphNode {
   spawn_tool_call_id?: string | null;
   continuation_of_run_id?: string | null;
   injection_source?: string | null;
+  task_id?: string | null;
 }
 
 export interface AuditGraphResponse {
@@ -214,7 +230,7 @@ export interface AuditGraphResponse {
   focus: { turn_id: string | null; run_id: string | null };
   regions: Array<{
     id: string;
-    type: "turn" | "iteration" | "unscoped" | "lane";
+    type: "turn" | "iteration" | "unscoped" | "lane" | "task";
     label: string;
     status: TraceDisplayStatus;
     parent_region_id: string | null;
@@ -228,6 +244,7 @@ export interface AuditGraphResponse {
     lane_side?: AuditLaneSide | null;
     terminal_status?: TraceDisplayStatus | null;
     health_status?: TraceDisplayStatus | null;
+    task_id?: string | null;
   }>;
   nodes: AuditGraphNode[];
   edges: Array<{

@@ -26,7 +26,7 @@ from nanobot.audit.graph_types import (
 from nanobot.audit.read_service import DisplayStatus, expected_delivery_suppression
 from nanobot.audit.schema import AuditEventBase
 
-GRAPH_BUILDER_VERSION = 6
+GRAPH_BUILDER_VERSION = 7
 _ABNORMAL = {"error", "failed", "timeout", "blocked", "cancelled", "interrupted", "exhausted"}
 _DECISIONS = {
     "provider_route_decision",
@@ -51,6 +51,37 @@ _PROCESS_EVENTS = {
     "input_injected",
     "reasoning_summary_received",
 }
+_SUBAGENT_EVENTS = {
+    "subagent_created",
+    "subagent_admitted",
+    "subagent_phase_changed",
+    "subagent_usage_updated",
+    "subagent_budget_updated",
+    "subagent_cancel_requested",
+    "subagent_termination_decided",
+    "subagent_result_ready",
+    "subagent_result_claimed",
+    "subagent_result_delivered",
+    "subagent_delivery_failed",
+    "subagent_terminal",
+    "subagent_recovered",
+    "subagent_lost",
+}
+
+
+def _task_status(events: Sequence[AuditEventBase]) -> DisplayStatus:
+    latest = str(getattr(events[-1], "task_status", "")) if events else ""
+    if latest == "running":
+        return "running"
+    if latest == "succeeded":
+        return "succeeded"
+    if latest == "cancelled":
+        return "cancelled"
+    if latest in {"failed", "lost"}:
+        return "failed"
+    if latest == "timed_out":
+        return "warning"
+    return "incomplete"
 
 
 def _tool_failure_summary(
@@ -672,9 +703,10 @@ class AuditGraphBuilder:
     ]:
         state = _BuildState([], {}, [])
         evidence = self._run_evidence(events)
+        task_events = [event for event in events if event.event_type in _SUBAGENT_EVENTS]
         by_run: dict[str, list[AuditEventBase]] = defaultdict(list)
         for event in events:
-            if event.run_id:
+            if event.run_id and event.event_type not in _SUBAGENT_EVENTS:
                 by_run[event.run_id].append(event)
         run_ids = sorted(by_run, key=lambda value: _order(by_run[value][0]))
         regions: list[AuditGraphRegion] = []
@@ -818,6 +850,96 @@ class AuditGraphBuilder:
                     lane_side=item.lane_side,
                     terminal_status=terminal,
                     health_status=health,
+                )
+            )
+
+        by_task: dict[str, list[AuditEventBase]] = defaultdict(list)
+        for event in task_events:
+            task_id = getattr(event, "subagent_task_id", None)
+            if isinstance(task_id, str) and task_id:
+                by_task[task_id].append(event)
+        for task_id, grouped_events in sorted(
+            by_task.items(), key=lambda item: _order(item[1][0])
+        ):
+            grouped = sorted(grouped_events, key=_order)
+            first = grouped[0]
+            latest = grouped[-1]
+            metadata = first.source_metadata if isinstance(first.source_metadata, dict) else {}
+            owner_run_id = next(
+                (event.parent_run_id for event in grouped if event.parent_run_id),
+                None,
+            )
+            child_run_id = next(
+                (
+                    event.run_id
+                    for event in reversed(grouped)
+                    if event.run_id and event.run_id != owner_run_id
+                ),
+                None,
+            )
+            node_id = f"task:{trace_id}:{task_id}"
+            region_id = f"task-region:{trace_id}:{task_id}"
+            status = _task_status(grouped)
+            state.add(
+                AuditGraphNode(
+                    id=node_id,
+                    type="task",
+                    status=status,
+                    label=f"Task {task_id[:12]}",
+                    started_at=first.occurred_at,
+                    finished_at=(
+                        latest.occurred_at
+                        if str(getattr(latest, "task_status", ""))
+                        in {"succeeded", "failed", "cancelled", "timed_out", "lost"}
+                        else None
+                    ),
+                    elapsed_ms=_elapsed(grouped),
+                    raw_event_ids=[event.event_id for event in grouped],
+                    raw_events=_event_refs(grouped),
+                    region_id=region_id,
+                    relations=[],
+                    summary=AuditNodeSummary(
+                        kind="task",
+                        identifier=task_id,
+                        task_id=task_id,
+                        task_revision=int(getattr(latest, "task_revision", 0)),
+                        task_status=str(getattr(latest, "task_status", "")),
+                        task_phase=str(getattr(latest, "task_phase", "")),
+                        termination_state=str(getattr(latest, "termination_state", "")),
+                        delivery_phase=str(getattr(latest, "delivery_phase", "")),
+                        required_task=bool(getattr(latest, "required_task", False)),
+                        lifecycle_event_count=len(grouped),
+                        owner_run_id=owner_run_id,
+                        child_run_id=child_run_id,
+                        replaces_task_id=(
+                            str(metadata["replaces_task_id"])
+                            if metadata.get("replaces_task_id")
+                            else None
+                        ),
+                        evidence_source=(
+                            "legacy_inferred"
+                            if bool(getattr(latest, "legacy_inferred", False))
+                            else "recorded"
+                        ),
+                    ),
+                    order=0,
+                    task_id=task_id,
+                    terminal_status=status,
+                    health_status=status,
+                ),
+                grouped,
+            )
+            regions.append(
+                AuditGraphRegion(
+                    id=region_id,
+                    type="task",
+                    label=f"Task {task_id[:12]}",
+                    status=status,
+                    member_node_ids=[node_id],
+                    order=len(regions),
+                    terminal_status=status,
+                    health_status=status,
+                    task_id=task_id,
                 )
             )
 
@@ -1281,6 +1403,12 @@ class AuditGraphBuilder:
         nodes_by_run: dict[str, list[AuditGraphNode]] = defaultdict(list)
         node_by_id = {node.id: node for node in state.nodes}
         event_by_id = {event.event_id: event for event in events}
+        task_nodes = {node.task_id: node for node in state.nodes if node.type == "task"}
+        task_by_child_run = {
+            node.summary.child_run_id: node
+            for node in task_nodes.values()
+            if node.summary.child_run_id
+        }
         for node in state.nodes:
             if node.run_id:
                 nodes_by_run[node.run_id].append(node)
@@ -1308,7 +1436,8 @@ class AuditGraphBuilder:
             if item.kind != "child_agent" or not item.parent_run_id or not item.spawn_tool_call_id:
                 continue
             source = f"tool:{trace_id}:{item.parent_run_id}:{item.spawn_tool_call_id}"
-            target = f"run:{trace_id}:{run_id}"
+            task_node = task_by_child_run.get(run_id)
+            target = task_node.id if task_node is not None else f"run:{trace_id}:{run_id}"
             if source not in node_by_id or target not in node_by_id:
                 continue
             start = next(
@@ -1328,9 +1457,79 @@ class AuditGraphBuilder:
                 target=target,
                 anchor=AuditEdgeAnchor(
                     source_event_id=item.spawn_event_id,
-                    target_event_id=start.event_id if start else None,
+                    target_event_id=(
+                        task_node.raw_event_ids[0]
+                        if task_node is not None and task_node.raw_event_ids
+                        else start.event_id if start else None
+                    ),
                 ),
+                evidence_kind="recorded_task_binding" if task_node is not None else None,
             )
+
+        for task_id, task_node in task_nodes.items():
+            child_run_id = task_node.summary.child_run_id
+            child_node_id = f"run:{trace_id}:{child_run_id}" if child_run_id else None
+            if child_node_id and child_node_id in node_by_id:
+                start = next(
+                    (
+                        event
+                        for event in events
+                        if event.run_id == child_run_id and event.event_type == "run_started"
+                    ),
+                    None,
+                )
+                key = ("task_execution", task_node.id, child_node_id)
+                edges[key] = AuditGraphEdge(
+                    id=f"task_execution:{task_node.id}:{child_node_id}",
+                    type="task_execution",
+                    relation="task_execution",
+                    source=task_node.id,
+                    target=child_node_id,
+                    anchor=AuditEdgeAnchor(
+                        source_event_id=task_node.raw_event_ids[0],
+                        target_event_id=start.event_id if start else None,
+                    ),
+                    evidence_kind="recorded_task_binding",
+                )
+                recovered = next(
+                    (
+                        event
+                        for event in events
+                        if getattr(event, "subagent_task_id", None) == task_id
+                        and event.event_type == "subagent_recovered"
+                    ),
+                    None,
+                )
+                if recovered is not None:
+                    recovery_key = ("task_recovery", task_node.id, child_node_id)
+                    edges[recovery_key] = AuditGraphEdge(
+                        id=f"task_recovery:{task_node.id}:{child_node_id}",
+                        type="task_recovery",
+                        relation="task_recovery",
+                        source=task_node.id,
+                        target=child_node_id,
+                        anchor=AuditEdgeAnchor(
+                            source_event_id=recovered.event_id,
+                            target_event_id=start.event_id if start else None,
+                        ),
+                        evidence_kind="recorded_lifecycle_event",
+                    )
+            replaces_task_id = task_node.summary.replaces_task_id
+            replaced = task_nodes.get(replaces_task_id or "")
+            if replaced is not None:
+                key = ("task_replacement", replaced.id, task_node.id)
+                edges[key] = AuditGraphEdge(
+                    id=f"task_replacement:{replaced.id}:{task_node.id}",
+                    type="task_replacement",
+                    relation="task_replacement",
+                    source=replaced.id,
+                    target=task_node.id,
+                    anchor=AuditEdgeAnchor(
+                        source_event_id=replaced.raw_event_ids[-1],
+                        target_event_id=task_node.raw_event_ids[0],
+                    ),
+                    evidence_kind="recorded_replacement_id",
+                )
 
         def terminal_source(run_id: str) -> tuple[str | None, str | None]:
             finish = next(
@@ -1418,6 +1617,34 @@ class AuditGraphBuilder:
                     target_event_id=start.event_id if start else None,
                 ),
             )
+            task_node = task_by_child_run.get(item.continuation_of_run_id)
+            if task_node is not None:
+                task_key = ("result_return", task_node.id, target)
+                delivered = next(
+                    (
+                        event
+                        for event in events
+                        if getattr(event, "subagent_task_id", None) == task_node.task_id
+                        and event.event_type == "subagent_result_delivered"
+                    ),
+                    None,
+                )
+                edges[task_key] = AuditGraphEdge(
+                    id=f"result_return:{task_node.id}:{target}",
+                    type="result_return",
+                    relation="result_return",
+                    source=task_node.id,
+                    target=target,
+                    anchor=AuditEdgeAnchor(
+                        source_event_id=(
+                            delivered.event_id if delivered else task_node.raw_event_ids[-1]
+                        ),
+                        target_event_id=start.event_id if start else None,
+                    ),
+                    evidence_kind=(
+                        "recorded_delivery_event" if delivered else "recorded_task_binding"
+                    ),
+                )
 
         derived = self._edges(trace_id, events, state)
         for edge in derived:

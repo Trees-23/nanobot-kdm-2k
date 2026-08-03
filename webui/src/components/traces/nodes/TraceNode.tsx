@@ -11,6 +11,7 @@ import {
   Flag,
   GitBranch,
   LoaderCircle,
+  ListTodo,
   PauseCircle,
   RefreshCcw,
   RotateCcw,
@@ -35,6 +36,7 @@ export type TraceNodeData = {
 
 const TYPE_ICONS: Record<AuditNodeType, typeof Bot> = {
   run: Bot,
+  task: ListTodo,
   model_call: BrainCircuit,
   model_attempt: RefreshCcw,
   tool_call: Wrench,
