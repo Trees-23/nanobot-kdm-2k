@@ -14,7 +14,6 @@ import { Sheet, SheetContent, SheetTitle } from "@/components/ui/sheet";
 import { useAuditGraph } from "@/hooks/useAuditGraph";
 import { useAuditSessions } from "@/hooks/useAuditSessions";
 import { useAuditTimeline } from "@/hooks/useAuditTimeline";
-import { useMediaQuery } from "@/hooks/useMediaQuery";
 import { AuditApiError, fetchAuditPayload } from "@/lib/audit-api";
 import type {
   AuditGraphEdge,
@@ -135,7 +134,6 @@ export function TraceWorkbench({
   const [timelineNotice, setTimelineNotice] = useState<string | null>(null);
   const [selectedTrace, setSelectedTrace] = useState<AuditTraceListItem | null>(null);
   const [selectedEdge, setSelectedEdge] = useState<AuditGraphEdge | null>(null);
-  const wideInspector = useMediaQuery("(min-width: 1440px)", false);
   const selected = selectedTrace?.trace_id === selection.traceId ? selectedTrace : null;
   const selectedNode = auditGraph.graph?.nodes.find((node) => node.id === selection.nodeId) ?? null;
   const edgeSource = selectedEdge
@@ -305,10 +303,7 @@ export function TraceWorkbench({
           </div>
         </div>
       ) : (
-        <div className={cn(
-          "grid min-h-0 flex-1 md:grid-cols-[280px_minmax(0,1fr)]",
-          selectedNode && wideInspector && "2xl:grid-cols-[280px_minmax(0,1fr)_380px]",
-        )}>
+        <div className="grid min-h-0 flex-1 md:grid-cols-[280px_minmax(0,1fr)]">
           <div className={cn("min-h-0", selection.traceId && "hidden md:block")}>
             <SessionTraceList
               token={token}
@@ -386,7 +381,17 @@ export function TraceWorkbench({
               </div>
             )}
           </section>
-          {selectedNode && wideInspector ? (
+        </div>
+      )}
+      <Sheet
+        open={Boolean(selectedNode)}
+        onOpenChange={(open) => {
+          if (!open) onSelectionChange({ ...selection, nodeId: null, eventId: null });
+        }}
+      >
+        <SheetContent side="right" className="w-[min(100vw,400px)] p-0" aria-describedby={undefined} showCloseButton={false} data-inspector-layout="overlay">
+          <SheetTitle className="sr-only">节点检查器</SheetTitle>
+          {selectedNode ? (
             <TraceNodeInspector
               node={selectedNode}
               onLocateEvent={(event) => void locateEvent(event.event_id)}
@@ -396,30 +401,8 @@ export function TraceWorkbench({
               onClose={() => onSelectionChange({ ...selection, nodeId: null, eventId: null })}
             />
           ) : null}
-        </div>
-      )}
-      {!wideInspector ? (
-        <Sheet
-          open={Boolean(selectedNode)}
-          onOpenChange={(open) => {
-            if (!open) onSelectionChange({ ...selection, nodeId: null, eventId: null });
-          }}
-        >
-          <SheetContent side="right" className="w-[min(100vw,400px)] p-0" aria-describedby={undefined} showCloseButton={false}>
-            <SheetTitle className="sr-only">节点检查器</SheetTitle>
-            {selectedNode ? (
-              <TraceNodeInspector
-                node={selectedNode}
-                onLocateEvent={(event) => void locateEvent(event.event_id)}
-                onLoadPayload={(nextPayloadId) => void loadPayload(nextPayloadId)}
-                focusMode={focusMode}
-                onFocusMode={setFocusMode}
-                onClose={() => onSelectionChange({ ...selection, nodeId: null, eventId: null })}
-              />
-            ) : null}
-          </SheetContent>
-        </Sheet>
-      ) : null}
+        </SheetContent>
+      </Sheet>
       <Sheet open={Boolean(payloadId)} onOpenChange={(open) => { if (!open) setPayloadId(null); }}>
         <SheetContent side="right" className="w-[min(100vw,640px)] p-0" aria-describedby={undefined} showCloseButton={false}>
           <SheetTitle className="sr-only">Payload 查看器</SheetTitle>

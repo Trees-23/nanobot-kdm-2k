@@ -262,9 +262,6 @@ export function TraceGraph({
     worker.onmessage = (event: MessageEvent<{ id: number; positions?: typeof positions }>) => {
       if (event.data.id === id && event.data.positions) {
         setPositions(event.data.positions);
-        window.requestAnimationFrame(() => {
-          void flowRef.current?.fitView({ padding: 0.2, duration: 0 });
-        });
       }
       worker.terminate();
     };
@@ -343,7 +340,7 @@ export function TraceGraph({
     });
   }, [graph.expansion_groups]);
 
-  const renderNodes = useMemo<RenderNode[]>(() => {
+  const geometryNodes = useMemo<RenderNode[]>(() => {
     const byId = new Map(positions.map((position) => [position.id, position]));
     const semantic: SemanticRenderNode[] = visibleSemantic.map((node) => ({
       id: node.id,
@@ -358,8 +355,8 @@ export function TraceGraph({
       zIndex: 2,
       data: {
         node,
-        selected: selectedNodeId === node.id,
-        dimmed: highlighted.size > 0 && !highlighted.has(node.id),
+        selected: false,
+        dimmed: false,
         expanded: graph.expansion_groups.some((group) => group.owner_node_id === node.id && expandedGroups.has(group.id)),
         onExpand: toggleExpand,
       },
@@ -412,14 +409,26 @@ export function TraceGraph({
       }];
     });
     return [...regions, ...semantic, ...presentation];
-  }, [activeCollapseGroups, expandedGroups, graph.expansion_groups, graph.regions, highlighted, positions, selectedNodeId, toggleExpand, visibleSemantic]);
+  }, [activeCollapseGroups, expandedGroups, graph.expansion_groups, graph.regions, positions, toggleExpand, visibleSemantic]);
+
+  const renderNodes = useMemo<RenderNode[]>(() => geometryNodes.map((node) => {
+    if (node.type !== "traceNode") return node;
+    return {
+      ...node,
+      data: {
+        ...node.data,
+        selected: selectedNodeId === node.id,
+        dimmed: highlighted.size > 0 && !highlighted.has(node.id),
+      },
+    };
+  }), [geometryNodes, highlighted, selectedNodeId]);
 
   const visibleGraphEdges = useMemo(() => graph.edges
     .filter((edge) => !hiddenAttemptIds.has(edge.source) && !hiddenAttemptIds.has(edge.target) && !hiddenCollapsedIds.has(edge.source) && !hiddenCollapsedIds.has(edge.target))
-    .filter((edge) => renderNodes.some((node) => node.id === edge.source) && renderNodes.some((node) => node.id === edge.target)),
-  [graph.edges, hiddenAttemptIds, hiddenCollapsedIds, renderNodes]);
+    .filter((edge) => geometryNodes.some((node) => node.id === edge.source) && geometryNodes.some((node) => node.id === edge.target)),
+  [geometryNodes, graph.edges, hiddenAttemptIds, hiddenCollapsedIds]);
 
-  const visibleNodeBounds = useMemo<RouteNodeBounds[]>(() => renderNodes.flatMap((node) => {
+  const visibleNodeBounds = useMemo<RouteNodeBounds[]>(() => geometryNodes.flatMap((node) => {
     const styleWidth = typeof node.style?.width === "number" ? node.style.width : null;
     const styleHeight = typeof node.style?.height === "number" ? node.style.height : null;
     const width = node.width ?? styleWidth;
@@ -440,11 +449,11 @@ export function TraceGraph({
       height,
       laneSide: semantic?.lane_side ?? groupMember?.lane_side,
     }];
-  }), [graph.collapse_groups, graph.nodes, renderNodes]);
+  }), [geometryNodes, graph.collapse_groups, graph.nodes]);
 
   const routeNodeBounds = useMemo(
-    () => visibleNodeBounds.filter((bounds) => renderNodes.find((node) => node.id === bounds.id)?.type !== "regionNode"),
-    [renderNodes, visibleNodeBounds],
+    () => visibleNodeBounds.filter((bounds) => geometryNodes.find((node) => node.id === bounds.id)?.type !== "regionNode"),
+    [geometryNodes, visibleNodeBounds],
   );
 
   const relationRoutes = useMemo(() => buildRelationRoutes({
@@ -535,6 +544,7 @@ export function TraceGraph({
     <div
       className="relative h-full w-full bg-background"
       data-testid="trace-graph"
+      data-geometry-key={JSON.stringify(geometryNodes.map((node) => [node.id, node.position.x, node.position.y]))}
       data-relation-routes={JSON.stringify([...relationRoutes.values()].map((route) => ({
         edgeId: route.edgeId,
         side: route.side,

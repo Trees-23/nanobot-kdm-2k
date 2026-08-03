@@ -1,4 +1,4 @@
-import { fireEvent, render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { edgeHandles, TraceGraph } from "@/components/traces/TraceGraph";
@@ -91,6 +91,29 @@ describe("TraceGraph", () => {
     fireEvent.keyDown(node.closest(".react-flow__node")!, { key: "Enter" });
     expect(onSelectNode).toHaveBeenLastCalledWith("run:1");
     expect(screen.queryByRole("button", { name: "下钻运行" })).not.toBeInTheDocument();
+  });
+
+  it("keeps geometry and viewport transform stable when selection changes", async () => {
+    const graph = graphFixture();
+    const { container, rerender } = render(
+      <div style={{ width: 900, height: 700 }}>
+        <TraceGraph graph={graph} selectedNodeId={null} focusMode={null} onSelectNode={vi.fn()} onFocusMode={vi.fn()} />
+      </div>,
+    );
+    await screen.findByLabelText(/run 失败 Main run 2\.0s/i);
+    const viewport = container.querySelector<HTMLElement>(".react-flow__viewport")!;
+    await waitFor(() => expect(viewport.style.transform).not.toBe(""));
+    const transformBefore = viewport.style.transform;
+    const geometryBefore = screen.getByTestId("trace-graph").dataset.geometryKey;
+
+    rerender(
+      <div style={{ width: 900, height: 700 }}>
+        <TraceGraph graph={graph} selectedNodeId="run:1" focusMode={null} onSelectNode={vi.fn()} onFocusMode={vi.fn()} />
+      </div>,
+    );
+
+    expect(screen.getByTestId("trace-graph").dataset.geometryKey).toBe(geometryBefore);
+    expect(container.querySelector<HTMLElement>(".react-flow__viewport")!.style.transform).toBe(transformBefore);
   });
 
   it("collapses backend-declared successful chains by default and allows expansion", async () => {
