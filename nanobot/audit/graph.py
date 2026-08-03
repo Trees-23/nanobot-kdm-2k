@@ -841,10 +841,7 @@ class AuditGraphBuilder:
                 node.injection_source = injection_source or item.injection_source
                 state.add(node, owned_events)
                 members.append(node.id)
-            expansions.extend(
-                expansion.model_copy(update={"default_expanded": True})
-                for expansion in run_expansions
-            )
+            expansions.extend(run_expansions)
             regions.append(
                 AuditGraphRegion(
                     id=lane_id,
@@ -1232,7 +1229,10 @@ class AuditGraphBuilder:
                     id=f"attempts:{owner_id}",
                     owner_node_id=owner_id,
                     member_node_ids=sorted(members),
-                    default_expanded=any(by_id[member].status != "succeeded" for member in members),
+                    default_expanded=(
+                        len(members) > 1
+                        or any(by_id[member].status != "succeeded" for member in members)
+                    ),
                 )
             )
         return state, regions, expansions
@@ -1795,7 +1795,7 @@ class AuditGraphBuilder:
         endpoints = {
             value
             for edge in edges
-            if edge.type in {"caused_by", "parent_run", "resumed_from", "retry_of"}
+            if edge.type != "sequence"
             for value in (edge.source, edge.target)
         }
         eligible = [

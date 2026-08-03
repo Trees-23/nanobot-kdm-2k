@@ -93,6 +93,45 @@ describe("TraceGraph", () => {
     expect(screen.queryByRole("button", { name: "下钻运行" })).not.toBeInTheDocument();
   });
 
+  it("collapses backend-declared successful chains by default and allows expansion", async () => {
+    const graph = graphFixture();
+    const operations = [1, 2, 3].map((order) => ({
+      ...graph.nodes[0],
+      id: `tool:${order}`,
+      type: "tool_call" as const,
+      status: "succeeded" as const,
+      label: `Operation ${order}`,
+      region_id: "turn:1",
+      raw_event_ids: [`event-${order}`],
+      summary: { kind: "tool_call" as const, tool_name: `operation_${order}` },
+      order,
+    }));
+    graph.nodes.push(...operations);
+    graph.regions[0].member_node_ids.push(...operations.map((node) => node.id));
+    graph.edges.push(
+      { id: "sequence-1", type: "sequence", source: operations[0].id, target: operations[1].id },
+      { id: "sequence-2", type: "sequence", source: operations[1].id, target: operations[2].id },
+    );
+    graph.collapse_groups.push({
+      id: "success-chain",
+      member_node_ids: operations.map((node) => node.id),
+      status: "succeeded",
+      label: "3 successful operations",
+      elapsed_ms: 30,
+    });
+
+    render(
+      <div style={{ width: 900, height: 700 }}>
+        <TraceGraph graph={graph} selectedNodeId={null} focusMode={null} onSelectNode={vi.fn()} onFocusMode={vi.fn()} />
+      </div>,
+    );
+
+    const expand = await screen.findByRole("button", { name: "展开 3 successful operations" });
+    expect(screen.queryByText("Operation 1")).not.toBeInTheDocument();
+    fireEvent.click(expand);
+    expect(await screen.findByText("Operation 1")).toBeInTheDocument();
+  });
+
   it("locates the backend-declared first anomaly", async () => {
     const onSelectNode = vi.fn();
     const onFocusMode = vi.fn();
@@ -246,8 +285,9 @@ describe("TraceGraph", () => {
       targetHandle: "right-target",
     });
     expect(edgeHandles(sequence, graph)).toEqual({ sourceHandle: "bottom-source", targetHandle: "top-target" });
-    const routeMetadata = JSON.parse(screen.getByTestId("trace-graph").dataset.toolRoutes ?? "[]") as Array<{
+    const routeMetadata = JSON.parse(screen.getByTestId("trace-graph").dataset.relationRoutes ?? "[]") as Array<{
       edgeId: string;
+      side: "left" | "right";
       slot: number;
       railX: number;
     }>;
@@ -257,6 +297,7 @@ describe("TraceGraph", () => {
       "tool_retry:failed:recovered",
     ]);
     expect(new Set(routeMetadata.map((route) => route.slot)).size).toBe(3);
+    expect(routeMetadata.every((route) => route.side === "right")).toBe(true);
     expect(routeMetadata.every((route) => Number.isFinite(route.railX))).toBe(true);
     rerender(
       <div style={{ width: 900, height: 700 }}>

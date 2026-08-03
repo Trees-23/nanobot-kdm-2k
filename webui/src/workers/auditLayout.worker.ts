@@ -24,9 +24,9 @@ type LayoutRequest = {
 type Position = { id: string; x: number; y: number };
 
 const CENTER_X = 960;
-const LANE_PITCH = 356;
-const ROW_PITCH = 116;
-const LANE_GAP = 72;
+const LANE_PITCH = 408;
+const ROW_PITCH = 136;
+const LANE_GAP = 84;
 const TOP = 84;
 
 function layout(request: LayoutRequest): Position[] {
@@ -66,9 +66,9 @@ function layout(request: LayoutRequest): Position[] {
         x: CENTER_X + node.laneOrder * LANE_PITCH,
         y,
       });
-      y += Math.max(ROW_PITCH, node.height + 40);
+      y += Math.max(ROW_PITCH, node.height + 52);
     }
-    occupiedBottom.set(column, y - Math.max(ROW_PITCH, nodes[nodes.length - 1].height + 40) + nodes[nodes.length - 1].height);
+    occupiedBottom.set(column, y - Math.max(ROW_PITCH, nodes[nodes.length - 1].height + 52) + nodes[nodes.length - 1].height);
   }
   return request.nodes.map((node) => positions.get(node.id) ?? { id: node.id, x: CENTER_X, y: TOP });
 }

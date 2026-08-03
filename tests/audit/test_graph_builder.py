@@ -315,6 +315,53 @@ def test_run_graph_is_deterministic_and_declares_attempt_expansion() -> None:
     assert any(edge.type == "retry_of" for edge in first.edges)
 
 
+def test_trace_full_collapses_single_successful_attempt_by_default() -> None:
+    events = [
+        _event(1, "run_started"),
+        _event(
+            2,
+            "model_request_started",
+            model_call_id="model-1",
+            requested_provider="openai",
+            requested_model="gpt-test",
+        ),
+        _event(
+            3,
+            "model_attempt_started",
+            model_call_id="model-1",
+            attempt_id="attempt-1",
+            provider="openai",
+            model="gpt-test",
+            attempt_ordinal=1,
+            input_variant="original",
+        ),
+        _event(
+            4,
+            "model_attempt_finished",
+            model_call_id="model-1",
+            attempt_id="attempt-1",
+            attempt_ordinal=1,
+            provider="openai",
+            model="gpt-test",
+            elapsed_ms=10,
+            status="ok",
+        ),
+        _event(
+            5,
+            "model_response_received",
+            model_call_id="model-1",
+            finish_reason="stop",
+            usage={"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
+        ),
+        _event(6, "run_finished", status="succeeded", stop_reason="done"),
+    ]
+
+    graph = AuditGraphBuilder().build(trace_id="trace-1", level="trace_full", events=events)
+
+    assert len(graph.expansion_groups) == 1
+    assert graph.expansion_groups[0].default_expanded is False
+
+
 def test_trace_full_uses_spawn_evidence_and_separates_continuation() -> None:
     events = _unified_branch_trace()
     graph = AuditGraphBuilder().build(

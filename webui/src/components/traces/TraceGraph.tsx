@@ -40,10 +40,11 @@ import { auditNodeTypeLabel, auditStatusLabel } from "@/lib/audit-display";
 import { cn } from "@/lib/utils";
 import type { TraceFocusMode } from "@/components/traces/TraceNodeInspector";
 import {
-  buildToolRelationRoutes,
+  buildRelationRoutes,
+  ROUTED_RELATION_TYPES,
   type RouteBounds,
   type RouteNodeBounds,
-  type ToolRelationRoute,
+  type RelationRoute,
 } from "@/components/traces/toolRelationRouting";
 
 const NODE_WIDTH = 248;
@@ -61,9 +62,9 @@ const nodeTypes: NodeTypes = {
 
 function AuditEdge(props: EdgeProps) {
   const type = props.data?.auditType as TraceEdgeType | undefined;
-  const toolRoute = props.data?.toolRoute as ToolRelationRoute | undefined;
+  const relationRoute = props.data?.relationRoute as RelationRoute | undefined;
   const [smoothPath] = getSmoothStepPath(props);
-  const path = toolRoute?.path ?? smoothPath;
+  const path = relationRoute?.path ?? smoothPath;
   const styles: Record<TraceEdgeType, { stroke: string; dash?: string; width: number }> = {
     sequence: { stroke: "hsl(var(--muted-foreground) / .35)", width: 1 },
     spawn_branch: { stroke: "#0f766e", width: 2 },
@@ -99,6 +100,9 @@ function AuditEdge(props: EdgeProps) {
 
 const edgeTypes = { audit: AuditEdge };
 const toolRelationLabels: Partial<Record<TraceEdgeType, string>> = {
+  spawn_branch: "子任务分支",
+  result_return: "结果回传",
+  resumed_from: "Run 恢复关系",
   tool_retry: "Tool 重试关系",
   tool_continuation: "Tool 继续关系",
   tool_recovery: "Tool 恢复关系",
@@ -106,17 +110,32 @@ const toolRelationLabels: Partial<Record<TraceEdgeType, string>> = {
   task_replacement: "Task 替换关系",
   task_recovery: "Task 恢复关系",
 };
+const relationShortLabels: Partial<Record<TraceEdgeType, string>> = {
+  spawn_branch: "分支",
+  task_execution: "执行",
+  result_return: "结果",
+  task_replacement: "替换",
+  task_recovery: "恢复",
+  resumed_from: "恢复",
+  tool_retry: "重试",
+  tool_continuation: "继续",
+  tool_recovery: "恢复",
+};
 
 export function edgeHandles(edge: AuditGraphEdge, graph: AuditGraphResponse) {
   const sourceSide = graph.nodes.find((node) => node.id === edge.source)?.lane_side;
-  const oppositeTarget = sourceSide === "left" ? "right-target" : "left-target";
+  const targetSide = graph.nodes.find((node) => node.id === edge.target)?.lane_side;
+  const laneSide = targetSide === "center" ? sourceSide : targetSide;
+  const routeSide = laneSide === "left" ? "left" : "right";
+  if (ROUTED_RELATION_TYPES.has(edge.type)) {
+    return {
+      sourceHandle: `${routeSide}-source`,
+      targetHandle: `${routeSide}-target`,
+    };
+  }
   return {
-    sourceHandle: edge.type === "spawn_branch"
-      ? (graph.nodes.find((node) => node.id === edge.target)?.lane_side === "left" ? "left-source" : "right-source")
-      : edge.type.startsWith("tool_") ? "right-source" : "bottom-source",
-    targetHandle: edge.type === "result_return"
-      ? oppositeTarget
-      : edge.type.startsWith("tool_") ? "right-target" : "top-target",
+    sourceHandle: "bottom-source",
+    targetHandle: "top-target",
   };
 }
 
@@ -177,8 +196,8 @@ function motionDuration(duration: number): number {
 function fallbackPositions(nodes: AuditGraphNode[]) {
   return nodes.map((node, index) => ({
     id: node.id,
-    x: 960 + (node.lane_order ?? 0) * 356,
-    y: index * 116 + 84,
+    x: 960 + (node.lane_order ?? 0) * 408,
+    y: index * 136 + 84,
   }));
 }
 
@@ -202,7 +221,7 @@ export function TraceGraph({
     () => new Set(graph.expansion_groups.filter((group) => group.default_expanded).map((group) => group.id)),
   );
   const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(
-    () => new Set(),
+    () => new Set(graph.collapse_groups.map((group) => group.id)),
   );
   const flowRef = useRef<ReactFlowInstance<RenderNode, Edge> | null>(null);
   const requestId = useRef(0);
@@ -406,17 +425,32 @@ export function TraceGraph({
     const width = node.width ?? styleWidth;
     const height = node.height ?? styleHeight;
     if (width == null || height == null) return [];
-    return [{ id: node.id, x: node.position.x, y: node.position.y, width, height }];
-  }), [renderNodes]);
+    const semantic = graph.nodes.find((candidate) => candidate.id === node.id);
+    const group = node.type === "collapseGroup"
+      ? graph.collapse_groups.find((candidate) => `group:${candidate.id}` === node.id)
+      : null;
+    const groupMember = group
+      ? graph.nodes.find((candidate) => group.member_node_ids.includes(candidate.id))
+      : null;
+    return [{
+      id: node.id,
+      x: node.position.x,
+      y: node.position.y,
+      width,
+      height,
+      laneSide: semantic?.lane_side ?? groupMember?.lane_side,
+    }];
+  }), [graph.collapse_groups, graph.nodes, renderNodes]);
 
   const routeNodeBounds = useMemo(
     () => visibleNodeBounds.filter((bounds) => renderNodes.find((node) => node.id === bounds.id)?.type !== "regionNode"),
     [renderNodes, visibleNodeBounds],
   );
 
-  const toolRoutes = useMemo(() => buildToolRelationRoutes({
+  const relationRoutes = useMemo(() => buildRelationRoutes({
     edges: visibleGraphEdges,
     nodeBounds: routeNodeBounds,
+    leftBoundary: Math.min(...visibleNodeBounds.map((bounds) => bounds.x)),
     rightBoundary: Math.max(0, ...visibleNodeBounds.map((bounds) => bounds.x + bounds.width)),
   }), [routeNodeBounds, visibleGraphEdges, visibleNodeBounds]);
 
@@ -425,18 +459,18 @@ export function TraceGraph({
       ...edge,
       ...edgeHandles(edge, graph),
       type: "audit",
-      data: { auditType: edge.relation ?? edge.type, toolRoute: toolRoutes.get(edge.id) },
+      data: { auditType: edge.relation ?? edge.type, relationRoute: relationRoutes.get(edge.id) },
       markerEnd: { type: MarkerType.ArrowClosed, width: 12, height: 12 },
-      zIndex: ["caused_by", "spawn_branch", "result_return", "tool_retry", "tool_continuation", "tool_recovery"].includes(edge.type) ? 3 : 1,
+      zIndex: edge.type === "caused_by" || ROUTED_RELATION_TYPES.has(edge.type) ? 3 : 1,
       style: highlighted.size > 0 && !focusResult.edgeIds.has(edge.id)
         ? { opacity: 0.16 }
         : undefined,
-    })), [focusResult.edgeIds, graph, highlighted, toolRoutes, visibleGraphEdges]);
+    })), [focusResult.edgeIds, graph, highlighted, relationRoutes, visibleGraphEdges]);
 
   const graphRouteBounds = useMemo(() => unionBounds([
     ...visibleNodeBounds,
-    ...[...toolRoutes.values()].map((route) => route.bounds),
-  ]), [toolRoutes, visibleNodeBounds]);
+    ...[...relationRoutes.values()].map((route) => route.bounds),
+  ]), [relationRoutes, visibleNodeBounds]);
 
   useEffect(() => {
     if (!graphRouteBounds || !positions.length) return;
@@ -446,14 +480,14 @@ export function TraceGraph({
     return () => window.cancelAnimationFrame(frame);
   }, [graphRouteBounds, positions.length]);
 
-  const toolRelationEdges = useMemo(
-    () => graph.edges.filter((edge) => ["tool_retry", "tool_continuation", "tool_recovery"].includes(edge.type)),
+  const relationEdges = useMemo(
+    () => graph.edges.filter((edge) => ROUTED_RELATION_TYPES.has(edge.type)),
     [graph.edges],
   );
 
   const selectEdge = useCallback((edge: AuditGraphEdge) => {
     onSelectEdge?.(edge);
-    const route = toolRoutes.get(edge.id);
+    const route = relationRoutes.get(edge.id);
     const endpointBounds = routeNodeBounds.filter((bounds) => bounds.id === edge.source || bounds.id === edge.target);
     const bounds = unionBounds(route ? [...endpointBounds, route.bounds] : endpointBounds);
     if (bounds) {
@@ -468,7 +502,7 @@ export function TraceGraph({
       duration: motionDuration(200),
       padding: 0.8,
     });
-  }, [onSelectEdge, routeNodeBounds, toolRoutes]);
+  }, [onSelectEdge, relationRoutes, routeNodeBounds]);
 
   const locateFirstAnomaly = () => {
     if (!graph.first_anomaly) return;
@@ -501,10 +535,12 @@ export function TraceGraph({
     <div
       className="relative h-full w-full bg-background"
       data-testid="trace-graph"
-      data-tool-routes={JSON.stringify([...toolRoutes.values()].map((route) => ({
+      data-relation-routes={JSON.stringify([...relationRoutes.values()].map((route) => ({
         edgeId: route.edgeId,
+        side: route.side,
         slot: route.slot,
         railX: route.railX,
+        points: route.points,
       })))}
       onKeyDown={(event) => {
         if (event.key !== "Enter" && event.key !== " ") return;
@@ -586,9 +622,9 @@ export function TraceGraph({
           ))}
           {visibleSemantic.length > 100 ? <span className="px-1 text-[10px] text-muted-foreground"><MapIcon className="mr-1 inline h-3 w-3" />{visibleSemantic.length}</span> : null}
         </div>
-        {toolRelationEdges.length ? (
+        {relationEdges.length ? (
           <div className="absolute right-3 top-3 z-10 flex max-w-[calc(100%-96px)] gap-1 overflow-x-auto rounded-md border border-border/70 bg-background/95 p-1 shadow-sm backdrop-blur md:hidden" data-testid="tool-relation-selector">
-            {toolRelationEdges.map((edge) => (
+            {relationEdges.map((edge) => (
               <Button
                 key={edge.id}
                 type="button"
@@ -600,7 +636,7 @@ export function TraceGraph({
                 data-testid={`tool-relation-${edge.type}`}
                 onClick={() => selectEdge(edge)}
               >
-                {edge.type === "tool_retry" ? "重试" : edge.type === "tool_continuation" ? "继续" : "恢复"}
+                {relationShortLabels[edge.type] ?? "关系"}
               </Button>
             ))}
           </div>
