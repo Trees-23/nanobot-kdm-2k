@@ -1,18 +1,22 @@
-export const RELATION_RAIL_GAP = 56;
-export const RELATION_SLOT_GAP = 14;
-export const RELATION_CLEARANCE = 10;
-export const RELATION_INTERVAL_GAP = 10;
-
-export const ROUTED_RELATION_TYPES = new Set([
+export const RELATION_CLEARANCE = 12;
+export const STRUCTURAL_RELATION_TYPES = new Set([
+  "sequence",
   "spawn_branch",
   "task_execution",
+]);
+
+export const SECONDARY_RELATION_TYPES = new Set([
   "result_return",
-  "task_replacement",
-  "task_recovery",
-  "resumed_from",
+  "retry",
+  "retry_of",
   "tool_retry",
-  "tool_continuation",
+  "resumed_from",
   "tool_recovery",
+  "task_recovery",
+  "task_replacement",
+  "tool_continuation",
+  "parent_run",
+  "caused_by",
 ]);
 
 export interface RoutePoint {
@@ -43,40 +47,33 @@ export interface RouteBounds {
   height: number;
 }
 
+export type RelationPortKind = "sequence" | "structure" | "result" | "recovery";
+export type RelationPortSide = "top" | "bottom" | "left" | "right";
+
+export interface RelationPort {
+  id: string;
+  side: RelationPortSide;
+  point: RoutePoint;
+}
+
 export interface RelationRoute {
   edgeId: string;
-  side: "left" | "right";
-  slot: number;
-  railX: number;
   points: readonly RoutePoint[];
   path: string;
   bounds: RouteBounds;
+  sourcePort: RelationPort;
+  targetPort: RelationPort;
+  bendCount: number;
+  routeLength: number;
+  manhattanDistance: number;
+  detourRatio: number;
+  fallbackReason?: string;
 }
 
 export interface RelationRouteInput {
   edges: readonly RelationEdgeInput[];
   nodeBounds: readonly RouteNodeBounds[];
-  leftBoundary?: number;
-  rightBoundary?: number;
-  railGap?: number;
-  slotGap?: number;
   clearance?: number;
-  intervalGap?: number;
-}
-
-interface Segment {
-  start: RoutePoint;
-  end: RoutePoint;
-}
-
-interface RoutedEdge extends RelationEdgeInput {
-  side: "left" | "right";
-  sourceBounds: RouteNodeBounds;
-  targetBounds: RouteNodeBounds;
-  sourcePoint: RoutePoint;
-  targetPoint: RoutePoint;
-  startY: number;
-  endY: number;
 }
 
 function right(bounds: RouteNodeBounds): number {
@@ -87,13 +84,58 @@ function bottom(bounds: RouteNodeBounds): number {
   return bounds.y + bounds.height;
 }
 
-function overlapsInterval(
-  first: readonly [number, number],
-  second: readonly [number, number],
-  gap: number,
-): boolean {
-  return first[0] < second[1] + gap && second[0] < first[1] + gap;
+function pointOnSide(
+  bounds: RouteNodeBounds,
+  side: RelationPortSide,
+  offset: number,
+): RoutePoint {
+  if (side === "left") return { x: bounds.x, y: bounds.y + bounds.height * offset };
+  if (side === "right") return { x: right(bounds), y: bounds.y + bounds.height * offset };
+  if (side === "top") return { x: bounds.x + bounds.width * offset, y: bounds.y };
+  return { x: bounds.x + bounds.width * offset, y: bottom(bounds) };
 }
+
+function isRecovery(type: string): boolean {
+  return ["retry", "retry_of", "tool_retry", "resumed_from", "tool_recovery", "task_recovery"].includes(type);
+}
+
+export function relationPortKind(type: string): RelationPortKind {
+  if (type === "sequence") return "sequence";
+  if (type === "result_return") return "result";
+  return isRecovery(type) ? "recovery" : "structure";
+}
+
+function portName(kind: RelationPortKind, side: RelationPortSide, direction: "source" | "target"): string {
+  return `${side}-${kind}-${direction}`;
+}
+
+export function relationPorts(
+  edge: RelationEdgeInput,
+  source: RouteNodeBounds,
+  target: RouteNodeBounds,
+): { sourcePort: RelationPort; targetPort: RelationPort } {
+  const kind = relationPortKind(edge.type);
+  if (kind === "sequence" || (kind === "structure" && source.laneSide === target.laneSide)) {
+    return {
+      sourcePort: { id: portName(kind, "bottom", "source"), side: "bottom", point: pointOnSide(source, "bottom", 0.34) },
+      targetPort: { id: portName(kind, "top", "target"), side: "top", point: pointOnSide(target, "top", 0.66) },
+    };
+  }
+  const toRight = target.x + target.width / 2 >= source.x + source.width / 2;
+  const sourceSide: RelationPortSide = toRight ? "right" : "left";
+  const targetSide: RelationPortSide = toRight ? "left" : "right";
+  const offset = kind === "structure" ? 0.35 : kind === "result" ? 0.58 : 0.76;
+  return {
+    sourcePort: { id: portName(kind, sourceSide, "source"), side: sourceSide, point: pointOnSide(source, sourceSide, offset) },
+    targetPort: { id: portName(kind, targetSide, "target"), side: targetSide, point: pointOnSide(target, targetSide, offset) },
+  };
+}
+
+export function buildOrthogonalRoutePath(points: readonly RoutePoint[]): string {
+  return points.map((point, index) => `${index ? "L" : "M"} ${point.x} ${point.y}`).join(" ");
+}
+
+interface Segment { start: RoutePoint; end: RoutePoint }
 
 export function segmentIntersectsBounds(
   segment: Segment,
@@ -107,193 +149,114 @@ export function segmentIntersectsBounds(
   if (segment.start.y === segment.end.y) {
     const minX = Math.min(segment.start.x, segment.end.x);
     const maxX = Math.max(segment.start.x, segment.end.x);
-    return segment.start.y >= top
-      && segment.start.y <= boundsBottom
-      && maxX >= left
-      && minX <= boundsRight;
+    return segment.start.y >= top && segment.start.y <= boundsBottom && maxX >= left && minX <= boundsRight;
   }
   if (segment.start.x === segment.end.x) {
     const minY = Math.min(segment.start.y, segment.end.y);
     const maxY = Math.max(segment.start.y, segment.end.y);
-    return segment.start.x >= left
-      && segment.start.x <= boundsRight
-      && maxY >= top
-      && minY <= boundsBottom;
+    return segment.start.x >= left && segment.start.x <= boundsRight && maxY >= top && minY <= boundsBottom;
   }
   return false;
 }
 
-function appendPoint(points: RoutePoint[], point: RoutePoint): void {
-  const previous = points.at(-1);
-  if (!previous || previous.x !== point.x || previous.y !== point.y) points.push(point);
+function routeBounds(points: readonly RoutePoint[]): RouteBounds {
+  const xs = points.map((point) => point.x);
+  const ys = points.map((point) => point.y);
+  return { x: Math.min(...xs), y: Math.min(...ys), width: Math.max(...xs) - Math.min(...xs), height: Math.max(...ys) - Math.min(...ys) };
 }
 
-export function buildOrthogonalRoutePath(points: readonly RoutePoint[]): string {
-  if (!points.length) return "";
-  return points
-    .map((point, index) => `${index === 0 ? "M" : "L"} ${point.x} ${point.y}`)
-    .join(" ");
+function routeLength(points: readonly RoutePoint[]): number {
+  return points.slice(1).reduce((total, point, index) => total + Math.abs(point.x - points[index].x) + Math.abs(point.y - points[index].y), 0);
 }
 
-function intersectsAny(
-  start: RoutePoint,
-  end: RoutePoint,
-  obstacles: readonly RouteNodeBounds[],
+function intersectsObstacle(points: readonly RoutePoint[], obstacles: readonly RouteNodeBounds[], clearance: number): boolean {
+  return points.slice(1).some((point, index) => obstacles.some((obstacle) => segmentIntersectsBounds({ start: points[index], end: point }, obstacle, clearance)));
+}
+
+function localCandidates(
+  source: RelationPort,
+  target: RelationPort,
+  sourceBounds: RouteNodeBounds,
+  targetBounds: RouteNodeBounds,
   clearance: number,
-): boolean {
-  return obstacles.some((bounds) => segmentIntersectsBounds({ start, end }, bounds, clearance));
-}
-
-function corridorY(
-  endpointY: number,
-  obstacles: readonly RouteNodeBounds[],
-  clearance: number,
-): number {
-  const above = Math.min(...obstacles.map((bounds) => bounds.y)) - clearance - 1;
-  const below = Math.max(...obstacles.map((bounds) => bottom(bounds))) + clearance + 1;
-  return endpointY - above <= below - endpointY ? above : below;
-}
-
-function endpoint(bounds: RouteNodeBounds, side: "left" | "right"): RoutePoint {
-  return {
-    x: side === "left" ? bounds.x : right(bounds),
-    y: bounds.y + bounds.height / 2,
+): RoutePoint[][] {
+  if (["top", "bottom"].includes(source.side) && ["top", "bottom"].includes(target.side)) {
+    const corridorY = (source.point.y + target.point.y) / 2;
+    return [[source.point, { x: source.point.x, y: corridorY }, { x: target.point.x, y: corridorY }, target.point]];
+  }
+  const outward = (port: RelationPort, bounds: RouteNodeBounds): RoutePoint => {
+    const distance = clearance + 16;
+    if (port.side === "left") return { x: bounds.x - distance, y: port.point.y };
+    if (port.side === "right") return { x: right(bounds) + distance, y: port.point.y };
+    if (port.side === "top") return { x: port.point.x, y: bounds.y - distance };
+    return { x: port.point.x, y: bottom(bounds) + distance };
   };
+  const sourceEscape = outward(source, sourceBounds);
+  const targetEscape = outward(target, targetBounds);
+  const middleX = (sourceEscape.x + targetEscape.x) / 2;
+  return [[
+    source.point,
+    sourceEscape,
+    { x: middleX, y: sourceEscape.y },
+    { x: middleX, y: targetEscape.y },
+    targetEscape,
+    target.point,
+  ]];
 }
 
-function routePoints(
-  edge: RoutedEdge,
-  railX: number,
-  nodeBounds: readonly RouteNodeBounds[],
+function obstacleDetour(
+  source: RelationPort,
+  target: RelationPort,
+  sourceBounds: RouteNodeBounds,
+  targetBounds: RouteNodeBounds,
+  obstacles: readonly RouteNodeBounds[],
   clearance: number,
 ): RoutePoint[] {
-  const obstacles = nodeBounds.filter(
-    (bounds) => bounds.id !== edge.source && bounds.id !== edge.target,
-  );
-  const escapeX = (bounds: RouteNodeBounds) => edge.side === "left"
-    ? bounds.x - clearance - 1
-    : right(bounds) + clearance + 1;
-  const points: RoutePoint[] = [edge.sourcePoint];
-  if (intersectsAny(edge.sourcePoint, { x: railX, y: edge.sourcePoint.y }, obstacles, clearance)) {
-    const sourceEscape = { x: escapeX(edge.sourceBounds), y: edge.sourcePoint.y };
-    const sourceCorridorY = corridorY(edge.sourcePoint.y, obstacles, clearance);
-    const verticalAtEndpoint = { x: edge.sourcePoint.x, y: sourceCorridorY };
-    if (!intersectsAny(edge.sourcePoint, verticalAtEndpoint, obstacles, clearance)) {
-      appendPoint(points, verticalAtEndpoint);
-    } else {
-      appendPoint(points, sourceEscape);
-      appendPoint(points, { x: sourceEscape.x, y: sourceCorridorY });
-    }
-    appendPoint(points, { x: railX, y: sourceCorridorY });
-  } else {
-    appendPoint(points, { x: railX, y: edge.sourcePoint.y });
-  }
-
-  if (intersectsAny({ x: railX, y: edge.targetPoint.y }, edge.targetPoint, obstacles, clearance)) {
-    const targetEscape = { x: escapeX(edge.targetBounds), y: edge.targetPoint.y };
-    const targetCorridorY = corridorY(edge.targetPoint.y, obstacles, clearance);
-    const verticalAtEndpoint = { x: edge.targetPoint.x, y: targetCorridorY };
-    appendPoint(points, { x: railX, y: targetCorridorY });
-    if (!intersectsAny(verticalAtEndpoint, edge.targetPoint, obstacles, clearance)) {
-      appendPoint(points, verticalAtEndpoint);
-    } else {
-      appendPoint(points, { x: targetEscape.x, y: targetCorridorY });
-      appendPoint(points, targetEscape);
-    }
-  } else {
-    appendPoint(points, { x: railX, y: edge.targetPoint.y });
-  }
-  appendPoint(points, edge.targetPoint);
-  return points;
+  const local = obstacles.filter((obstacle) => obstacle.x <= Math.max(right(sourceBounds), right(targetBounds)) + 48
+    && right(obstacle) >= Math.min(sourceBounds.x, targetBounds.x) - 48);
+  const above = Math.min(sourceBounds.y, targetBounds.y, ...local.map((obstacle) => obstacle.y)) - clearance - 20;
+  const below = Math.max(bottom(sourceBounds), bottom(targetBounds), ...local.map(bottom)) + clearance + 20;
+  const corridorY = Math.abs(above - source.point.y) + Math.abs(above - target.point.y)
+    <= Math.abs(below - source.point.y) + Math.abs(below - target.point.y) ? above : below;
+  const sourceX = source.side === "left" ? sourceBounds.x - clearance - 16 : right(sourceBounds) + clearance + 16;
+  const targetX = target.side === "left" ? targetBounds.x - clearance - 16 : right(targetBounds) + clearance + 16;
+  return [source.point, { x: sourceX, y: source.point.y }, { x: sourceX, y: corridorY }, { x: targetX, y: corridorY }, { x: targetX, y: target.point.y }, target.point];
 }
 
-function routeBounds(points: readonly RoutePoint[]): RouteBounds {
-  const minX = Math.min(...points.map((point) => point.x));
-  const minY = Math.min(...points.map((point) => point.y));
-  const maxX = Math.max(...points.map((point) => point.x));
-  const maxY = Math.max(...points.map((point) => point.y));
-  return { x: minX, y: minY, width: maxX - minX, height: maxY - minY };
-}
-
-function routeSide(source: RouteNodeBounds, target: RouteNodeBounds): "left" | "right" {
-  const laneSide = target.laneSide === "center" ? source.laneSide : target.laneSide;
-  return laneSide === "left" ? "left" : "right";
-}
-
-export function buildRelationRoutes(input: RelationRouteInput): Map<string, RelationRoute> {
+export function buildLocalRelationRoutes(input: RelationRouteInput): Map<string, RelationRoute> {
   const byId = new Map(input.nodeBounds.map((bounds) => [bounds.id, bounds]));
-  const routedEdges = input.edges.flatMap<RoutedEdge>((edge) => {
-    if (!ROUTED_RELATION_TYPES.has(edge.type)) return [];
+  const clearance = input.clearance ?? RELATION_CLEARANCE;
+  const routes = new Map<string, RelationRoute>();
+  for (const edge of [...input.edges].sort((a, b) => a.id.localeCompare(b.id))) {
     const sourceBounds = byId.get(edge.source);
     const targetBounds = byId.get(edge.target);
-    if (!sourceBounds || !targetBounds) return [];
-    const side = routeSide(sourceBounds, targetBounds);
-    const sourcePoint = endpoint(sourceBounds, side);
-    const targetPoint = endpoint(targetBounds, side);
-    return [{
-      ...edge,
-      side,
-      sourceBounds,
-      targetBounds,
-      sourcePoint,
-      targetPoint,
-      startY: Math.min(sourcePoint.y, targetPoint.y),
-      endY: Math.max(sourcePoint.y, targetPoint.y),
-    }];
-  }).sort((a, b) => a.side.localeCompare(b.side)
-    || a.startY - b.startY
-    || a.endY - b.endY
-    || a.type.localeCompare(b.type)
-    || a.id.localeCompare(b.id));
-
-  const intervalGap = input.intervalGap ?? RELATION_INTERVAL_GAP;
-  const slots = new Map<"left" | "right", Array<Array<readonly [number, number]>>>([
-    ["left", []],
-    ["right", []],
-  ]);
-  const assignments = new Map<string, number>();
-  for (const edge of routedEdges) {
-    const sideSlots = slots.get(edge.side)!;
-    const interval = [edge.startY, edge.endY] as const;
-    let slot = sideSlots.findIndex((intervals) => intervals.every(
-      (occupied) => !overlapsInterval(interval, occupied, intervalGap),
-    ));
-    if (slot === -1) {
-      slot = sideSlots.length;
-      sideSlots.push([]);
+    if (!sourceBounds || !targetBounds) continue;
+    const ports = relationPorts(edge, sourceBounds, targetBounds);
+    const obstacles = input.nodeBounds.filter((bounds) => bounds.id !== edge.source && bounds.id !== edge.target);
+    let points = localCandidates(ports.sourcePort, ports.targetPort, sourceBounds, targetBounds, clearance)[0];
+    let fallbackReason: string | undefined;
+    if (intersectsObstacle(points, obstacles, clearance)) {
+      points = obstacleDetour(ports.sourcePort, ports.targetPort, sourceBounds, targetBounds, obstacles, clearance);
+      fallbackReason = "local_obstacle_detour";
     }
-    sideSlots[slot].push(interval);
-    assignments.set(edge.id, slot);
-  }
-
-  const railGap = input.railGap ?? RELATION_RAIL_GAP;
-  const slotGap = input.slotGap ?? RELATION_SLOT_GAP;
-  const clearance = input.clearance ?? RELATION_CLEARANCE;
-  const visibleLeft = Math.min(input.leftBoundary ?? Number.POSITIVE_INFINITY, ...input.nodeBounds.map((bounds) => bounds.x));
-  const visibleRight = Math.max(input.rightBoundary ?? Number.NEGATIVE_INFINITY, ...input.nodeBounds.map(right));
-  const routes = new Map<string, RelationRoute>();
-  for (const edge of routedEdges) {
-    const slot = assignments.get(edge.id)!;
-    const railX = edge.side === "left"
-      ? visibleLeft - railGap - slot * slotGap
-      : visibleRight + railGap + slot * slotGap;
-    const points = routePoints(edge, railX, input.nodeBounds, clearance);
+    const manhattanDistance = Math.abs(ports.sourcePort.point.x - ports.targetPort.point.x) + Math.abs(ports.sourcePort.point.y - ports.targetPort.point.y);
+    const length = routeLength(points);
     routes.set(edge.id, {
       edgeId: edge.id,
-      side: edge.side,
-      slot,
-      railX,
       points,
       path: buildOrthogonalRoutePath(points),
       bounds: routeBounds(points),
+      sourcePort: ports.sourcePort,
+      targetPort: ports.targetPort,
+      bendCount: Math.max(0, points.length - 2),
+      routeLength: length,
+      manhattanDistance,
+      detourRatio: length / Math.max(manhattanDistance, 1),
+      fallbackReason,
     });
   }
   return routes;
 }
 
-// Compatibility aliases for extensions importing the earlier Tool-specific names.
-export const TOOL_RELATION_RAIL_GAP = RELATION_RAIL_GAP;
-export type ToolRelationEdgeInput = RelationEdgeInput;
-export type ToolRelationRoute = RelationRoute;
-export type ToolRelationRouteInput = RelationRouteInput;
-export const buildToolRelationRoutes = buildRelationRoutes;
+// Compatibility export for extensions that used the pre-ELK router name.
+export const buildRelationRoutes = buildLocalRelationRoutes;

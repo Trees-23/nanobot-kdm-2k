@@ -1,194 +1,102 @@
 import { describe, expect, it } from "vitest";
 
 import {
-  buildRelationRoutes,
+  buildLocalRelationRoutes,
   RELATION_CLEARANCE,
-  RELATION_RAIL_GAP,
+  relationPorts,
+  SECONDARY_RELATION_TYPES,
   segmentIntersectsBounds,
-  ROUTED_RELATION_TYPES,
+  STRUCTURAL_RELATION_TYPES,
   type RelationEdgeInput,
   type RouteNodeBounds,
-  type RoutePoint,
 } from "@/components/traces/toolRelationRouting";
 
 const nodes: RouteNodeBounds[] = [
-  { id: "source", x: 100, y: 40, width: 100, height: 40 },
-  { id: "middle", x: 100, y: 120, width: 100, height: 40 },
-  { id: "target", x: 100, y: 200, width: 100, height: 40 },
+  { id: "main", x: 960, y: 84, width: 248, height: 76, laneSide: "center" },
+  { id: "task-left", x: 624, y: 176, width: 248, height: 76, laneSide: "left" },
+  { id: "child-left", x: 624, y: 308, width: 248, height: 76, laneSide: "left" },
+  { id: "task-right", x: 1296, y: 176, width: 248, height: 76, laneSide: "right" },
+  { id: "child-right", x: 1296, y: 308, width: 248, height: 76, laneSide: "right" },
 ];
 
-const edges: RelationEdgeInput[] = [
-  { id: "recovery", type: "tool_recovery", source: "source", target: "target" },
-  { id: "retry", type: "tool_retry", source: "source", target: "middle" },
-  { id: "continuation", type: "tool_continuation", source: "middle", target: "target" },
-];
-
-function segments(points: readonly RoutePoint[]) {
-  return points.slice(1).map((point, index) => ({ start: points[index], end: point }));
+function segments(points: readonly { x: number; y: number }[]) {
+  return points.slice(1).map((end, index) => ({ start: points[index], end }));
 }
 
-describe("cross-lane relation routing", () => {
-  it("routes all explicit tool relations through right-side rails outside visible bounds", () => {
-    const routes = buildRelationRoutes({ edges, nodeBounds: nodes, rightBoundary: 200 });
-    expect([...routes.keys()].sort()).toEqual(["continuation", "recovery", "retry"]);
+describe("local relation routing", () => {
+  it("freezes the default relationship hierarchy", () => {
+    expect([...STRUCTURAL_RELATION_TYPES].sort()).toEqual(["sequence", "spawn_branch", "task_execution"]);
+    expect(SECONDARY_RELATION_TYPES.has("result_return")).toBe(true);
+    expect(SECONDARY_RELATION_TYPES.has("tool_recovery")).toBe(true);
+    expect(SECONDARY_RELATION_TYPES.has("sequence")).toBe(false);
+  });
+
+  it("uses distinct fixed ports for execution, result, and recovery", () => {
+    const source = nodes[0];
+    const target = nodes[3];
+    const structure = relationPorts({ id: "spawn", type: "spawn_branch", source: source.id, target: target.id }, source, target);
+    const result = relationPorts({ id: "result", type: "result_return", source: source.id, target: target.id }, source, target);
+    const recovery = relationPorts({ id: "recovery", type: "tool_recovery", source: source.id, target: target.id }, source, target);
+    expect(structure.sourcePort.id).toBe("right-structure-source");
+    expect(result.sourcePort.id).toBe("right-result-source");
+    expect(recovery.sourcePort.id).toBe("right-recovery-source");
+    expect(new Set([structure.sourcePort.point.y, result.sourcePort.point.y, recovery.sourcePort.point.y]).size).toBe(3);
+  });
+
+  it("keeps default structural branches local without global rails", () => {
+    const edges: RelationEdgeInput[] = [
+      { id: "left-spawn", type: "spawn_branch", source: "main", target: "task-left" },
+      { id: "right-spawn", type: "spawn_branch", source: "main", target: "task-right" },
+      { id: "left-execution", type: "task_execution", source: "task-left", target: "child-left" },
+      { id: "right-execution", type: "task_execution", source: "task-right", target: "child-right" },
+    ];
+    const routes = buildLocalRelationRoutes({ edges, nodeBounds: nodes });
     for (const edge of edges) {
       const route = routes.get(edge.id)!;
-      expect(route.railX).toBeGreaterThanOrEqual(200 + RELATION_RAIL_GAP);
-      expect(route.points[0].x).toBe(200);
-      expect(route.points.at(-1)!.x).toBe(200);
-      expect(route.points.some((point) => point.x === route.railX)).toBe(true);
-      expect(route.path).toMatch(/^M /);
+      const source = nodes.find((node) => node.id === edge.source)!;
+      const target = nodes.find((node) => node.id === edge.target)!;
+      const localLeft = Math.min(source.x, target.x) - 48;
+      const localRight = Math.max(source.x + source.width, target.x + target.width) + 48;
+      expect(route.points.every((point) => point.x >= localLeft && point.x <= localRight)).toBe(true);
+      expect(route.bendCount).toBeLessThanOrEqual(4);
+      expect(route.detourRatio).toBeLessThanOrEqual(1.6);
+      expect(route.fallbackReason).toBeUndefined();
     }
   });
 
-  it("assigns overlapping intervals deterministic adjacent slots regardless of edge order", () => {
-    const forward = buildRelationRoutes({ edges, nodeBounds: nodes, rightBoundary: 200 });
-    const reversed = buildRelationRoutes({ edges: [...edges].reverse(), nodeBounds: nodes, rightBoundary: 200 });
-    expect(new Set([...forward.values()].map((route) => route.slot)).size).toBeGreaterThan(1);
-    for (const edge of edges) {
-      expect(reversed.get(edge.id)).toEqual(forward.get(edge.id));
-    }
-  });
-
-  it("reuses a slot for vertically separated intervals", () => {
-    const separatedNodes = [
-      ...nodes,
-      { id: "lower-source", x: 100, y: 320, width: 100, height: 40 },
-      { id: "lower-target", x: 100, y: 400, width: 100, height: 40 },
+  it("is deterministic when the backend returns graph edges in a different order", () => {
+    const edges: RelationEdgeInput[] = [
+      { id: "left", type: "spawn_branch", source: "main", target: "task-left" },
+      { id: "right", type: "spawn_branch", source: "main", target: "task-right" },
+      { id: "result", type: "result_return", source: "child-left", target: "main" },
     ];
-    const routes = buildRelationRoutes({
-      edges: [edges[1], { id: "lower", type: "tool_retry", source: "lower-source", target: "lower-target" }],
-      nodeBounds: separatedNodes,
-      rightBoundary: 200,
-    });
-    expect(routes.get("retry")!.slot).toBe(routes.get("lower")!.slot);
+    const first = buildLocalRelationRoutes({ edges, nodeBounds: nodes });
+    const second = buildLocalRelationRoutes({ edges: [...edges].reverse(), nodeBounds: nodes });
+    expect([...second]).toEqual([...first]);
   });
 
-  it("keeps reversed and same-Y endpoints on valid right-side orthogonal routes", () => {
-    const routes = buildRelationRoutes({
-      edges: [
-        { id: "reversed", type: "tool_recovery", source: "target", target: "source" },
-        { id: "same-y", type: "tool_continuation", source: "source", target: "peer" },
-      ],
-      nodeBounds: [...nodes, { id: "peer", x: 300, y: 40, width: 100, height: 40 }],
-      rightBoundary: 400,
-    });
-    expect(routes.get("reversed")!.points[0].y).toBeGreaterThan(routes.get("reversed")!.points.at(-1)!.y);
-    expect(routes.get("same-y")!.points[0].y).toBe(routes.get("same-y")!.points.at(-1)!.y);
-    expect(routes.get("same-y")!.railX).toBeGreaterThan(400);
-  });
-
-  it("does not create routes for sequence or missing endpoints", () => {
-    const routes = buildRelationRoutes({
-      edges: [
-        { id: "sequence", type: "sequence", source: "source", target: "target" },
-        { id: "dangling", type: "tool_retry", source: "source", target: "hidden" },
-      ],
+  it("keeps sequence vertical and exposes route metrics for audit assertions", () => {
+    const route = buildLocalRelationRoutes({
+      edges: [{ id: "sequence", type: "sequence", source: "task-left", target: "child-left" }],
       nodeBounds: nodes,
-      rightBoundary: 200,
-    });
-    expect(routes.size).toBe(0);
+    }).get("sequence")!;
+    expect(route.sourcePort.id).toBe("bottom-sequence-source");
+    expect(route.targetPort.id).toBe("top-sequence-target");
+    expect(route.manhattanDistance).toBeGreaterThan(0);
+    expect(route.routeLength).toBeGreaterThan(0);
+    expect(route.detourRatio).toBeGreaterThanOrEqual(1);
   });
 
-  it("routes a cross-lane edge around non-endpoint obstacles", () => {
-    const crossLaneNodes = [
-      { id: "source", x: 100, y: 100, width: 100, height: 40 },
-      { id: "blocker", x: 240, y: 80, width: 100, height: 80 },
-      { id: "target", x: 100, y: 260, width: 100, height: 40 },
-    ];
-    const route = buildRelationRoutes({
-      edges: [{ id: "cross", type: "tool_recovery", source: "source", target: "target" }],
-      nodeBounds: crossLaneNodes,
-      rightBoundary: 340,
-    }).get("cross")!;
+  it("records a local obstacle fallback without expanding to graph-wide bounds", () => {
+    const obstacle: RouteNodeBounds = { id: "obstacle", x: 1078, y: 135, width: 120, height: 80, laneSide: "center" };
+    const route = buildLocalRelationRoutes({
+      edges: [{ id: "blocked", type: "spawn_branch", source: "task-left", target: "task-right" }],
+      nodeBounds: [...nodes, obstacle],
+    }).get("blocked")!;
+    expect(route.fallbackReason).toBe("local_obstacle_detour");
+    expect(route.bendCount).toBeLessThanOrEqual(5);
     for (const segment of segments(route.points)) {
-      expect(segmentIntersectsBounds(segment, crossLaneNodes[1], 8)).toBe(false);
-    }
-  });
-
-  it("leaves no horizontal stub inside a close cross-lane obstacle", () => {
-    const closeNodes = [
-      { id: "source", x: 100, y: 100, width: 100, height: 40 },
-      { id: "close-blocker", x: 215, y: 80, width: 100, height: 80 },
-      { id: "target", x: 100, y: 260, width: 100, height: 40 },
-    ];
-    const route = buildRelationRoutes({
-      edges: [{ id: "close-cross", type: "tool_recovery", source: "source", target: "target" }],
-      nodeBounds: closeNodes,
-      rightBoundary: 315,
-    }).get("close-cross")!;
-    for (const segment of segments(route.points)) {
-      expect(segmentIntersectsBounds(segment, closeNodes[1], 8)).toBe(false);
-    }
-  });
-
-  it("recomputes the rail from the current visible bounding box", () => {
-    const expanded = buildRelationRoutes({ edges: [edges[0]], nodeBounds: nodes, rightBoundary: 200 }).get("recovery")!;
-    const collapsed = buildRelationRoutes({
-      edges: [edges[0]],
-      nodeBounds: nodes.filter((node) => node.id !== "middle"),
-      rightBoundary: 500,
-    }).get("recovery")!;
-    expect(collapsed.railX).toBeGreaterThan(expanded.railX);
-  });
-
-  it("routes every declared cross-lane relation type and leaves sequence simple", () => {
-    const relationEdges = [...ROUTED_RELATION_TYPES].map((type, index) => ({
-      id: `${type}-${index}`,
-      type,
-      source: "source",
-      target: "target",
-    }));
-    const routes = buildRelationRoutes({
-      edges: [...relationEdges, { id: "sequence", type: "sequence", source: "source", target: "target" }],
-      nodeBounds: nodes,
-      leftBoundary: 100,
-      rightBoundary: 200,
-    });
-
-    expect([...routes.keys()].sort()).toEqual(relationEdges.map((edge) => edge.id).sort());
-    expect(routes.has("sequence")).toBe(false);
-  });
-
-  it("uses the target child lane side and independent deterministic slots", () => {
-    const sidedNodes: RouteNodeBounds[] = [
-      { id: "main", x: 500, y: 40, width: 100, height: 40, laneSide: "center" },
-      { id: "left-child", x: 100, y: 180, width: 100, height: 40, laneSide: "left" },
-      { id: "right-child", x: 900, y: 180, width: 100, height: 40, laneSide: "right" },
-    ];
-    const relationEdges: RelationEdgeInput[] = [
-      { id: "left-spawn", type: "spawn_branch", source: "main", target: "left-child" },
-      { id: "right-spawn", type: "spawn_branch", source: "main", target: "right-child" },
-      { id: "left-result", type: "result_return", source: "left-child", target: "main" },
-      { id: "right-result", type: "result_return", source: "right-child", target: "main" },
-    ];
-    const forward = buildRelationRoutes({ edges: relationEdges, nodeBounds: sidedNodes });
-    const reversed = buildRelationRoutes({ edges: [...relationEdges].reverse(), nodeBounds: sidedNodes });
-
-    expect(forward.get("left-spawn")!.side).toBe("left");
-    expect(forward.get("left-result")!.side).toBe("left");
-    expect(forward.get("right-spawn")!.side).toBe("right");
-    expect(forward.get("right-result")!.side).toBe("right");
-    for (const edge of relationEdges) expect(reversed.get(edge.id)).toEqual(forward.get(edge.id));
-  });
-
-  it("keeps every orthogonal segment clear of all non-endpoint nodes", () => {
-    const obstacleNodes: RouteNodeBounds[] = [
-      { id: "source", x: 500, y: 80, width: 100, height: 40, laneSide: "center" },
-      { id: "block-a", x: 260, y: 40, width: 100, height: 120, laneSide: "left" },
-      { id: "block-b", x: 100, y: 180, width: 100, height: 80, laneSide: "left" },
-      { id: "target", x: 500, y: 300, width: 100, height: 40, laneSide: "center" },
-    ];
-    const route = buildRelationRoutes({
-      edges: [{ id: "return", type: "result_return", source: "block-b", target: "target" }],
-      nodeBounds: obstacleNodes,
-    }).get("return")!;
-    const obstacles = obstacleNodes.filter((node) => !["block-b", "target"].includes(node.id));
-
-    for (const segment of segments(route.points)) {
-      for (const obstacle of obstacles) {
-        expect(segmentIntersectsBounds(segment, obstacle, RELATION_CLEARANCE)).toBe(false);
-      }
+      expect(segmentIntersectsBounds(segment, obstacle, RELATION_CLEARANCE)).toBe(false);
     }
   });
 });

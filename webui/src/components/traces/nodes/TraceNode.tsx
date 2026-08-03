@@ -153,12 +153,18 @@ function TraceNodeComponent({ data }: NodeProps) {
           </button>
         ) : null}
       </div>
-      <Handle id="top-target" type="target" position={Position.Top} className="!h-1.5 !w-1.5 !border-background !bg-muted-foreground" />
-      <Handle id="bottom-source" type="source" position={Position.Bottom} className="!h-1.5 !w-1.5 !border-background !bg-muted-foreground" />
-      <Handle id="left-source" type="source" position={Position.Left} className="!h-1.5 !w-1.5 !border-background !bg-teal-600" />
-      <Handle id="right-source" type="source" position={Position.Right} className="!h-1.5 !w-1.5 !border-background !bg-teal-600" />
-      <Handle id="left-target" type="target" position={Position.Left} className="!h-1.5 !w-1.5 !border-background !bg-blue-600" />
-      <Handle id="right-target" type="target" position={Position.Right} className="!h-1.5 !w-1.5 !border-background !bg-blue-600" />
+      <Handle id="top-sequence-target" type="target" position={Position.Top} style={{ left: "66%" }} className="!h-1.5 !w-1.5 !border-background !bg-muted-foreground" />
+      <Handle id="bottom-sequence-source" type="source" position={Position.Bottom} style={{ left: "34%" }} className="!h-1.5 !w-1.5 !border-background !bg-muted-foreground" />
+      <Handle id="top-structure-target" type="target" position={Position.Top} style={{ left: "66%" }} className="!h-1.5 !w-1.5 !border-background !bg-teal-700" />
+      <Handle id="bottom-structure-source" type="source" position={Position.Bottom} style={{ left: "34%" }} className="!h-1.5 !w-1.5 !border-background !bg-teal-700" />
+      {(["left", "right"] as const).flatMap((side) => [
+        <Handle key={`${side}-structure-source`} id={`${side}-structure-source`} type="source" position={side === "left" ? Position.Left : Position.Right} style={{ top: "35%" }} className="!h-1.5 !w-1.5 !border-background !bg-teal-700" />,
+        <Handle key={`${side}-structure-target`} id={`${side}-structure-target`} type="target" position={side === "left" ? Position.Left : Position.Right} style={{ top: "35%" }} className="!h-1.5 !w-1.5 !border-background !bg-teal-700" />,
+        <Handle key={`${side}-result-source`} id={`${side}-result-source`} type="source" position={side === "left" ? Position.Left : Position.Right} style={{ top: "58%" }} className="!h-1.5 !w-1.5 !border-background !bg-blue-600" />,
+        <Handle key={`${side}-result-target`} id={`${side}-result-target`} type="target" position={side === "left" ? Position.Left : Position.Right} style={{ top: "58%" }} className="!h-1.5 !w-1.5 !border-background !bg-blue-600" />,
+        <Handle key={`${side}-recovery-source`} id={`${side}-recovery-source`} type="source" position={side === "left" ? Position.Left : Position.Right} style={{ top: "76%" }} className="!h-1.5 !w-1.5 !border-background !bg-amber-600" />,
+        <Handle key={`${side}-recovery-target`} id={`${side}-recovery-target`} type="target" position={side === "left" ? Position.Left : Position.Right} style={{ top: "76%" }} className="!h-1.5 !w-1.5 !border-background !bg-amber-600" />,
+      ])}
     </div>
   );
 }

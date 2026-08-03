@@ -346,30 +346,31 @@ describe("TraceGraph", () => {
     expect(await screen.findByText("恢复关系：2 个节点 / 1 条边")).toBeInTheDocument();
     const recovery = graph.edges.find((edge) => edge.id === "tool_recovery:failed:recovered")!;
     const sequence = graph.edges.find((edge) => edge.id === "sequence:failed:recovered")!;
-    expect(edgeHandles(recovery, graph)).toEqual({ sourceHandle: "right-source", targetHandle: "right-target" });
+    expect(edgeHandles(recovery, graph)).toEqual({ sourceHandle: "right-recovery-source", targetHandle: "left-recovery-target" });
     expect(edgeHandles(graph.edges.find((edge) => edge.id === "tool_retry:failed:recovered")!, graph)).toEqual({
-      sourceHandle: "right-source",
-      targetHandle: "right-target",
+      sourceHandle: "right-recovery-source",
+      targetHandle: "left-recovery-target",
     });
     expect(edgeHandles(graph.edges.find((edge) => edge.id === "tool_continuation:failed:recovered")!, graph)).toEqual({
-      sourceHandle: "right-source",
-      targetHandle: "right-target",
+      sourceHandle: "bottom-structure-source",
+      targetHandle: "top-structure-target",
     });
-    expect(edgeHandles(sequence, graph)).toEqual({ sourceHandle: "bottom-source", targetHandle: "top-target" });
+    expect(edgeHandles(sequence, graph)).toEqual({ sourceHandle: "bottom-sequence-source", targetHandle: "top-sequence-target" });
     const routeMetadata = JSON.parse(screen.getByTestId("trace-graph").dataset.relationRoutes ?? "[]") as Array<{
       edgeId: string;
-      side: "left" | "right";
-      slot: number;
-      railX: number;
+      bends: number;
+      routeLength: number;
+      detourRatio: number;
     }>;
     expect(routeMetadata.map((route) => route.edgeId).sort()).toEqual([
+      "sequence:failed:recovered",
       "tool_continuation:failed:recovered",
       "tool_recovery:failed:recovered",
       "tool_retry:failed:recovered",
     ]);
-    expect(new Set(routeMetadata.map((route) => route.slot)).size).toBe(3);
-    expect(routeMetadata.every((route) => route.side === "right")).toBe(true);
-    expect(routeMetadata.every((route) => Number.isFinite(route.railX))).toBe(true);
+    expect(routeMetadata.every((route) => route.bends >= 0)).toBe(true);
+    expect(routeMetadata.every((route) => route.routeLength > 0)).toBe(true);
+    expect(routeMetadata.every((route) => route.detourRatio >= 1)).toBe(true);
     rerender(
       <div style={{ width: 900, height: 700 }}>
         <TraceGraph graph={graph} selectedNodeId="run:1" focusMode="causal" onSelectNode={vi.fn()} onFocusMode={vi.fn()} />
@@ -400,5 +401,31 @@ describe("TraceGraph", () => {
     );
 
     expect(await screen.findByText("结果回传：2 个节点 / 1 条边")).toBeInTheDocument();
+  });
+
+  it("keeps secondary relations out of the default structure and reveals one from the relation list", async () => {
+    const graph = graphFixture();
+    const onSelectEdge = vi.fn();
+    graph.nodes.push({ ...graph.nodes[0], id: "task:1", type: "task", label: "Inspect metadata", order: 1 });
+    graph.nodes.push({ ...graph.nodes[0], id: "run:child", label: "Child run", order: 2, lane_order: 1, lane_side: "right" });
+    graph.edges.push(
+      { id: "spawn", type: "spawn_branch", source: "run:1", target: "task:1" },
+      { id: "execution", type: "task_execution", source: "task:1", target: "run:child" },
+      { id: "result", type: "result_return", source: "run:child", target: "run:1" },
+    );
+    graph.regions[0].member_node_ids.push("task:1", "run:child");
+
+    render(
+      <div style={{ width: 900, height: 700 }}>
+        <TraceGraph graph={graph} selectedNodeId={null} focusMode={null} onSelectNode={vi.fn()} onFocusMode={vi.fn()} onSelectEdge={onSelectEdge} />
+      </div>,
+    );
+
+    await screen.findByText("Inspect metadata");
+    expect(screen.getByTestId("trace-graph").dataset.relationRoutes).toContain("spawn");
+    expect(screen.getByTestId("trace-graph").dataset.relationRoutes).not.toContain('"result"');
+    fireEvent.click(screen.getByRole("button", { name: "结果回传" }));
+    await waitFor(() => expect(screen.getByTestId("trace-graph").dataset.relationRoutes).toContain('"result"'));
+    expect(onSelectEdge).toHaveBeenCalledWith(expect.objectContaining({ id: "result" }));
   });
 });

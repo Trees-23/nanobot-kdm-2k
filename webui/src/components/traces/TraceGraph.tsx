@@ -3,6 +3,7 @@ import {
   Background,
   BaseEdge,
   Controls,
+  EdgeLabelRenderer,
   MarkerType,
   MiniMap,
   ReactFlow,
@@ -40,12 +41,15 @@ import { auditNodeTypeLabel, auditStatusLabel } from "@/lib/audit-display";
 import { cn } from "@/lib/utils";
 import type { TraceFocusMode } from "@/components/traces/TraceNodeInspector";
 import {
-  buildRelationRoutes,
-  ROUTED_RELATION_TYPES,
+  buildLocalRelationRoutes,
+  relationPorts,
+  SECONDARY_RELATION_TYPES,
+  STRUCTURAL_RELATION_TYPES,
   type RouteBounds,
   type RouteNodeBounds,
   type RelationRoute,
 } from "@/components/traces/toolRelationRouting";
+import type { AuditLayoutResponse } from "@/workers/auditLayout.worker";
 
 const NODE_WIDTH = 248;
 const NODE_HEIGHT = 76;
@@ -63,6 +67,8 @@ const nodeTypes: NodeTypes = {
 function AuditEdge(props: EdgeProps) {
   const type = props.data?.auditType as TraceEdgeType | undefined;
   const relationRoute = props.data?.relationRoute as RelationRoute | undefined;
+  const label = props.data?.label as string | undefined;
+  const active = Boolean(props.data?.active);
   const [smoothPath] = getSmoothStepPath(props);
   const path = relationRoute?.path ?? smoothPath;
   const styles: Record<TraceEdgeType, { stroke: string; dash?: string; width: number }> = {
@@ -83,18 +89,32 @@ function AuditEdge(props: EdgeProps) {
   };
   const style = styles[type ?? "sequence"];
   return (
-    <BaseEdge
-      path={path}
-      markerStart={props.markerStart}
-      markerEnd={props.markerEnd}
-      interactionWidth={Math.max(props.interactionWidth ?? 20, 32)}
-      style={{
-        ...props.style,
-        stroke: style.stroke,
-        strokeWidth: style.width,
-        strokeDasharray: style.dash,
-      }}
-    />
+    <>
+      <BaseEdge
+        path={path}
+        markerStart={props.markerStart}
+        markerEnd={props.markerEnd}
+        interactionWidth={Math.max(props.interactionWidth ?? 20, 32)}
+        style={{
+          ...props.style,
+          stroke: style.stroke,
+          strokeWidth: active ? style.width + 0.8 : style.width,
+          strokeDasharray: style.dash,
+        }}
+      />
+      {active && label && relationRoute?.points.length ? (
+        <EdgeLabelRenderer>
+          <span
+            className="pointer-events-none absolute rounded border border-border/80 bg-background px-1.5 py-0.5 text-[10px] font-medium text-foreground shadow-sm"
+            style={{
+              transform: `translate(-50%, -50%) translate(${relationRoute.points[Math.floor(relationRoute.points.length / 2)].x}px, ${relationRoute.points[Math.floor(relationRoute.points.length / 2)].y}px)`,
+            }}
+          >
+            {label}
+          </span>
+        </EdgeLabelRenderer>
+      ) : null}
+    </>
   );
 }
 
@@ -123,20 +143,13 @@ const relationShortLabels: Partial<Record<TraceEdgeType, string>> = {
 };
 
 export function edgeHandles(edge: AuditGraphEdge, graph: AuditGraphResponse) {
-  const sourceSide = graph.nodes.find((node) => node.id === edge.source)?.lane_side;
-  const targetSide = graph.nodes.find((node) => node.id === edge.target)?.lane_side;
-  const laneSide = targetSide === "center" ? sourceSide : targetSide;
-  const routeSide = laneSide === "left" ? "left" : "right";
-  if (ROUTED_RELATION_TYPES.has(edge.type)) {
-    return {
-      sourceHandle: `${routeSide}-source`,
-      targetHandle: `${routeSide}-target`,
-    };
-  }
-  return {
-    sourceHandle: "bottom-source",
-    targetHandle: "top-target",
-  };
+  const sourceNode = graph.nodes.find((node) => node.id === edge.source);
+  const targetNode = graph.nodes.find((node) => node.id === edge.target);
+  if (!sourceNode || !targetNode) return { sourceHandle: "bottom-sequence-source", targetHandle: "top-sequence-target" };
+  const source = { id: edge.source, x: sourceNode.lane_order ?? 0, y: 0, width: 1, height: 1, laneSide: sourceNode.lane_side };
+  const target = { id: edge.target, x: targetNode.lane_order ?? 0, y: 0, width: 1, height: 1, laneSide: targetNode.lane_side };
+  const ports = relationPorts(edge, source, target);
+  return { sourceHandle: ports.sourcePort.id, targetHandle: ports.targetPort.id };
 }
 
 function unionBounds(bounds: readonly RouteBounds[]): RouteBounds | null {
@@ -216,7 +229,11 @@ export function TraceGraph({
   onFocusMode: (mode: TraceFocusMode) => void;
   onSelectEdge?: (edge: AuditGraphEdge) => void;
 }) {
-  const [positions, setPositions] = useState<Array<{ id: string; x: number; y: number }>>([]);
+  const [layoutResult, setLayoutResult] = useState<Pick<AuditLayoutResponse, "positions" | "routes" | "layoutBounds" | "warning">>({
+    positions: [],
+    routes: [],
+    layoutBounds: null,
+  });
   const [expandedGroups, setExpandedGroups] = useState<Set<string>>(
     () => new Set(graph.expansion_groups.filter((group) => group.default_expanded).map((group) => group.id)),
   );
@@ -225,9 +242,11 @@ export function TraceGraph({
   );
   const flowRef = useRef<ReactFlowInstance<RenderNode, Edge> | null>(null);
   const requestId = useRef(0);
+  const deliveredRelationId = useRef<string | null>(null);
   const legendRef = useRef<HTMLDivElement>(null);
   const [legendOpen, setLegendOpen] = useState(false);
   const [feedback, setFeedback] = useState<string | null>(null);
+  const [activeRelationId, setActiveRelationId] = useState<string | null>(null);
 
   const hiddenAttemptIds = useMemo(() => new Set(
     graph.expansion_groups
@@ -252,21 +271,22 @@ export function TraceGraph({
     const id = ++requestId.current;
     if (typeof Worker === "undefined") {
       const fallback = fallbackPositions(visibleSemantic);
-      setPositions([
+      const positions = [
         ...fallback,
         ...activeCollapseGroups.map((group, index) => ({ id: `group:${group.id}`, x: 80, y: (fallback.length + index) * 132 + 60 })),
-      ]);
+      ];
+      setLayoutResult({ positions, routes: [], layoutBounds: null, warning: "worker_unavailable" });
       return;
     }
     const worker = new Worker(new URL("../../workers/auditLayout.worker.ts", import.meta.url), { type: "module" });
-    worker.onmessage = (event: MessageEvent<{ id: number; positions?: typeof positions }>) => {
+    worker.onmessage = (event: MessageEvent<AuditLayoutResponse>) => {
       if (event.data.id === id && event.data.positions) {
-        setPositions(event.data.positions);
+        setLayoutResult(event.data);
       }
       worker.terminate();
     };
     worker.onerror = () => {
-      setPositions(fallbackPositions(visibleSemantic));
+      setLayoutResult({ positions: fallbackPositions(visibleSemantic), routes: [], layoutBounds: null, warning: "worker_error" });
       worker.terminate();
     };
     worker.postMessage({
@@ -305,6 +325,18 @@ export function TraceGraph({
   const highlighted = focusResult.nodeIds;
 
   useEffect(() => {
+    if (!activeRelationId) {
+      deliveredRelationId.current = null;
+      return;
+    }
+    if (deliveredRelationId.current === activeRelationId) return;
+    const edge = graph.edges.find((candidate) => candidate.id === activeRelationId);
+    if (!edge) return;
+    deliveredRelationId.current = activeRelationId;
+    onSelectEdge?.(edge);
+  }, [activeRelationId, graph.edges, onSelectEdge]);
+
+  useEffect(() => {
     if (!focusMode || !focusResult.nodeIds.size) return;
     void flowRef.current?.fitView({
       nodes: [...focusResult.nodeIds].map((id) => ({ id })),
@@ -341,7 +373,7 @@ export function TraceGraph({
   }, [graph.expansion_groups]);
 
   const geometryNodes = useMemo<RenderNode[]>(() => {
-    const byId = new Map(positions.map((position) => [position.id, position]));
+    const byId = new Map(layoutResult.positions.map((position) => [position.id, position]));
     const semantic: SemanticRenderNode[] = visibleSemantic.map((node) => ({
       id: node.id,
       type: "traceNode",
@@ -409,24 +441,36 @@ export function TraceGraph({
       }];
     });
     return [...regions, ...semantic, ...presentation];
-  }, [activeCollapseGroups, expandedGroups, graph.expansion_groups, graph.regions, positions, toggleExpand, visibleSemantic]);
+  }, [activeCollapseGroups, expandedGroups, graph.expansion_groups, graph.regions, layoutResult.positions, toggleExpand, visibleSemantic]);
 
-  const renderNodes = useMemo<RenderNode[]>(() => geometryNodes.map((node) => {
+  const renderNodes = useMemo<RenderNode[]>(() => {
+    const activeRelation = activeRelationId ? graph.edges.find((edge) => edge.id === activeRelationId) : null;
+    const activeEndpoints = new Set(activeRelation ? [activeRelation.source, activeRelation.target] : []);
+    return geometryNodes.map((node) => {
     if (node.type !== "traceNode") return node;
     return {
       ...node,
       data: {
         ...node.data,
         selected: selectedNodeId === node.id,
-        dimmed: highlighted.size > 0 && !highlighted.has(node.id),
+        dimmed: (highlighted.size > 0 && !highlighted.has(node.id))
+          || (activeEndpoints.size > 0 && !activeEndpoints.has(node.id)),
       },
     };
-  }), [geometryNodes, highlighted, selectedNodeId]);
+    });
+  }, [activeRelationId, geometryNodes, graph.edges, highlighted, selectedNodeId]);
 
-  const visibleGraphEdges = useMemo(() => graph.edges
+  const availableGraphEdges = useMemo(() => graph.edges
     .filter((edge) => !hiddenAttemptIds.has(edge.source) && !hiddenAttemptIds.has(edge.target) && !hiddenCollapsedIds.has(edge.source) && !hiddenCollapsedIds.has(edge.target))
     .filter((edge) => geometryNodes.some((node) => node.id === edge.source) && geometryNodes.some((node) => node.id === edge.target)),
   [geometryNodes, graph.edges, hiddenAttemptIds, hiddenCollapsedIds]);
+
+  const visibleGraphEdges = useMemo(() => availableGraphEdges.filter((edge) => STRUCTURAL_RELATION_TYPES.has(edge.type)
+    || focusResult.edgeIds.has(edge.id)
+    || activeRelationId === edge.id
+    || (Boolean(selectedNodeId) && SECONDARY_RELATION_TYPES.has(edge.type)
+      && (edge.source === selectedNodeId || edge.target === selectedNodeId))),
+  [activeRelationId, availableGraphEdges, focusResult.edgeIds, selectedNodeId]);
 
   const visibleNodeBounds = useMemo<RouteNodeBounds[]>(() => geometryNodes.flatMap((node) => {
     const styleWidth = typeof node.style?.width === "number" ? node.style.width : null;
@@ -451,54 +495,59 @@ export function TraceGraph({
     }];
   }), [geometryNodes, graph.collapse_groups, graph.nodes]);
 
-  const routeNodeBounds = useMemo(
-    () => visibleNodeBounds.filter((bounds) => geometryNodes.find((node) => node.id === bounds.id)?.type !== "regionNode"),
-    [geometryNodes, visibleNodeBounds],
-  );
+  const routeNodeBounds = useMemo(() => visibleNodeBounds.filter((bounds) => geometryNodes.find((node) => node.id === bounds.id)?.type !== "regionNode"), [geometryNodes, visibleNodeBounds]);
 
-  const relationRoutes = useMemo(() => buildRelationRoutes({
-    edges: visibleGraphEdges,
-    nodeBounds: routeNodeBounds,
-    leftBoundary: Math.min(...visibleNodeBounds.map((bounds) => bounds.x)),
-    rightBoundary: Math.max(0, ...visibleNodeBounds.map((bounds) => bounds.x + bounds.width)),
-  }), [routeNodeBounds, visibleGraphEdges, visibleNodeBounds]);
+  const relationRoutes = useMemo(() => {
+    const fromWorker = new Map(layoutResult.routes.map((route) => [route.edgeId, route]));
+    const localFallback = buildLocalRelationRoutes({ edges: visibleGraphEdges, nodeBounds: routeNodeBounds });
+    return new Map(visibleGraphEdges.map((edge) => [edge.id, fromWorker.get(edge.id) ?? localFallback.get(edge.id)]).filter((entry): entry is [string, RelationRoute] => Boolean(entry[1])));
+  }, [layoutResult.routes, routeNodeBounds, visibleGraphEdges]);
+
+  const activeEdgeIds = useMemo(() => new Set([
+    ...focusResult.edgeIds,
+    ...(activeRelationId ? [activeRelationId] : []),
+    ...availableGraphEdges.filter((edge) => Boolean(selectedNodeId) && SECONDARY_RELATION_TYPES.has(edge.type)
+      && (edge.source === selectedNodeId || edge.target === selectedNodeId)).map((edge) => edge.id),
+  ]), [activeRelationId, availableGraphEdges, focusResult.edgeIds, selectedNodeId]);
 
   const renderEdges = useMemo<Edge[]>(() => visibleGraphEdges
     .map((edge) => ({
       ...edge,
       ...edgeHandles(edge, graph),
       type: "audit",
-      data: { auditType: edge.relation ?? edge.type, relationRoute: relationRoutes.get(edge.id) },
+      data: {
+        auditType: edge.relation ?? edge.type,
+        relationRoute: relationRoutes.get(edge.id),
+        active: activeEdgeIds.has(edge.id),
+        label: relationShortLabels[edge.type],
+      },
       markerEnd: { type: MarkerType.ArrowClosed, width: 12, height: 12 },
-      zIndex: edge.type === "caused_by" || ROUTED_RELATION_TYPES.has(edge.type) ? 3 : 1,
-      style: highlighted.size > 0 && !focusResult.edgeIds.has(edge.id)
+      zIndex: 0,
+      style: (highlighted.size > 0 || activeEdgeIds.size > 0) && !activeEdgeIds.has(edge.id)
         ? { opacity: 0.16 }
         : undefined,
-    })), [focusResult.edgeIds, graph, highlighted, relationRoutes, visibleGraphEdges]);
+    })), [activeEdgeIds, graph, highlighted, relationRoutes, visibleGraphEdges]);
 
-  const graphRouteBounds = useMemo(() => unionBounds([
-    ...visibleNodeBounds,
-    ...[...relationRoutes.values()].map((route) => route.bounds),
-  ]), [relationRoutes, visibleNodeBounds]);
-  const graphRouteBoundsKey = graphRouteBounds
-    ? `${graphRouteBounds.x}:${graphRouteBounds.y}:${graphRouteBounds.width}:${graphRouteBounds.height}`
+  const executionBounds = useMemo(() => unionBounds(visibleNodeBounds), [visibleNodeBounds]);
+  const executionBoundsKey = executionBounds
+    ? `${executionBounds.x}:${executionBounds.y}:${executionBounds.width}:${executionBounds.height}`
     : "";
 
   useEffect(() => {
-    if (!graphRouteBounds || !positions.length) return;
+    if (!executionBounds || !layoutResult.positions.length) return;
     const frame = window.requestAnimationFrame(() => {
-      void flowRef.current?.fitBounds(graphRouteBounds, { padding: 0.2, duration: 0 });
+      void flowRef.current?.fitBounds(executionBounds, { padding: 0.24, duration: 0 });
     });
     return () => window.cancelAnimationFrame(frame);
-  }, [graphRouteBoundsKey, positions.length]);
+  }, [executionBoundsKey, layoutResult.positions.length]);
 
   const relationEdges = useMemo(
-    () => graph.edges.filter((edge) => ROUTED_RELATION_TYPES.has(edge.type)),
+    () => graph.edges.filter((edge) => SECONDARY_RELATION_TYPES.has(edge.type)),
     [graph.edges],
   );
 
   const selectEdge = useCallback((edge: AuditGraphEdge) => {
-    onSelectEdge?.(edge);
+    setActiveRelationId(edge.id);
     const route = relationRoutes.get(edge.id);
     const endpointBounds = routeNodeBounds.filter((bounds) => bounds.id === edge.source || bounds.id === edge.target);
     const bounds = unionBounds(route ? [...endpointBounds, route.bounds] : endpointBounds);
@@ -514,7 +563,7 @@ export function TraceGraph({
       duration: motionDuration(200),
       padding: 0.8,
     });
-  }, [onSelectEdge, relationRoutes, routeNodeBounds]);
+  }, [relationRoutes, routeNodeBounds]);
 
   const locateFirstAnomaly = () => {
     if (!graph.first_anomaly) return;
@@ -550,11 +599,13 @@ export function TraceGraph({
       data-geometry-key={JSON.stringify(geometryNodes.map((node) => [node.id, node.position.x, node.position.y]))}
       data-relation-routes={JSON.stringify([...relationRoutes.values()].map((route) => ({
         edgeId: route.edgeId,
-        side: route.side,
-        slot: route.slot,
-        railX: route.railX,
         points: route.points,
+        bends: route.bendCount,
+        routeLength: route.routeLength,
+        detourRatio: route.detourRatio,
+        fallbackReason: route.fallbackReason ?? null,
       })))}
+      data-layout-warning={layoutResult.warning ?? undefined}
       onKeyDown={(event) => {
         if (event.key !== "Enter" && event.key !== " ") return;
         const target = event.target;
@@ -588,7 +639,10 @@ export function TraceGraph({
           const selected = graph.edges.find((candidate) => candidate.id === edge.id);
           if (selected) selectEdge(selected);
         }}
-        onPaneClick={() => onSelectNode(null)}
+        onPaneClick={() => {
+          setActiveRelationId(null);
+          onSelectNode(null);
+        }}
         proOptions={{ hideAttribution: true }}
       >
         <Background gap={22} size={1} color="hsl(var(--border) / .45)" />
@@ -597,14 +651,14 @@ export function TraceGraph({
       </ReactFlow>
       <TooltipProvider delayDuration={180} skipDelayDuration={60}>
         <div className="absolute left-3 top-3 z-10 flex items-center gap-1 rounded-md border border-border/70 bg-background/95 p-1 shadow-sm backdrop-blur">
-          {toolbarButton("适配整张图", (
-            <Button type="button" variant="ghost" size="icon" className="h-8 w-8" aria-label="适配整张图" onClick={() => {
-              if (graphRouteBounds) {
-                void flowRef.current?.fitBounds(graphRouteBounds, { padding: 0.2, duration: motionDuration(200) });
+          {toolbarButton("适配执行结构", (
+            <Button type="button" variant="ghost" size="icon" className="h-8 w-8" aria-label="适配执行结构" onClick={() => {
+              if (executionBounds) {
+                void flowRef.current?.fitBounds(executionBounds, { padding: 0.24, duration: motionDuration(200) });
               } else {
                 void flowRef.current?.fitView({ padding: 0.2, duration: motionDuration(200) });
               }
-              setFeedback("已适配整张图");
+              setFeedback("已适配执行结构");
             }}>
               <Focus className="h-3.5 w-3.5" />
             </Button>
@@ -635,7 +689,10 @@ export function TraceGraph({
           {visibleSemantic.length > 100 ? <span className="px-1 text-[10px] text-muted-foreground"><MapIcon className="mr-1 inline h-3 w-3" />{visibleSemantic.length}</span> : null}
         </div>
         {relationEdges.length ? (
-          <div className="absolute right-3 top-3 z-10 flex max-w-[calc(100%-96px)] gap-1 overflow-x-auto rounded-md border border-border/70 bg-background/95 p-1 shadow-sm backdrop-blur md:hidden" data-testid="tool-relation-selector">
+          <div className={cn(
+            "absolute right-3 z-10 flex max-w-[calc(100%-96px)] gap-1 overflow-x-auto rounded-md border border-border/70 bg-background/95 p-1 shadow-sm backdrop-blur",
+            activeRelationId ? "bottom-3" : "top-3",
+          )} data-testid="tool-relation-selector">
             {relationEdges.map((edge) => (
               <Button
                 key={edge.id}
@@ -648,7 +705,7 @@ export function TraceGraph({
                 data-testid={`tool-relation-${edge.type}`}
                 onClick={() => selectEdge(edge)}
               >
-                {relationShortLabels[edge.type] ?? "关系"}
+                {relationShortLabels[edge.type] ?? "关系"} {graph.edges.filter((candidate) => candidate.type === edge.type).length}
               </Button>
             ))}
           </div>
