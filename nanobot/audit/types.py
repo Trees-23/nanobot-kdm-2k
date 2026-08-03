@@ -61,6 +61,7 @@ class EventType(StrEnum):
     SUBAGENT_ADMITTED = "subagent_admitted"
     SUBAGENT_PHASE_CHANGED = "subagent_phase_changed"
     SUBAGENT_USAGE_UPDATED = "subagent_usage_updated"
+    SUBAGENT_BUDGET_UPDATED = "subagent_budget_updated"
     SUBAGENT_CANCEL_REQUESTED = "subagent_cancel_requested"
     SUBAGENT_TERMINATION_DECIDED = "subagent_termination_decided"
     SUBAGENT_RESULT_READY = "subagent_result_ready"

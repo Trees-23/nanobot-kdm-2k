@@ -8,7 +8,9 @@ from typing import TYPE_CHECKING, Any
 from nanobot.agent.tools.base import Tool, ToolResult, tool_parameters
 from nanobot.agent.tools.context import current_audit_tool_call_id, current_request_context
 from nanobot.agent.tools.schema import (
+    ArraySchema,
     BooleanSchema,
+    IntegerSchema,
     NumberSchema,
     ObjectSchema,
     StringSchema,
@@ -22,7 +24,24 @@ if TYPE_CHECKING:
 @tool_parameters(
     ObjectSchema(
         properties={
-            "task": StringSchema("The task for the subagent to complete"),
+            "task": StringSchema("Legacy text task for the subagent", nullable=True),
+            "task_spec": ObjectSchema(
+                properties={
+                    "schema_version": IntegerSchema(minimum=1, maximum=1),
+                    "objective": StringSchema(min_length=1, max_length=8000),
+                    "context": StringSchema(max_length=8000),
+                    "constraints": ArraySchema(StringSchema(max_length=1000), max_items=32),
+                    "deliverables": ArraySchema(StringSchema(max_length=1000), max_items=32),
+                    "acceptance_criteria": ArraySchema(
+                        StringSchema(max_length=1000), max_items=32
+                    ),
+                    "dependencies": ArraySchema(StringSchema(max_length=256), max_items=32),
+                    "output_mode": StringSchema(enum=["text", "structured_preferred"]),
+                },
+                required=["objective"],
+                additional_properties=False,
+                nullable=True,
+            ),
             "label": StringSchema("Optional short label for the task (for display)"),
             "temperature": NumberSchema(
                 description=(
@@ -53,7 +72,7 @@ if TYPE_CHECKING:
                 nullable=True,
             ),
         },
-        required=["task"],
+        required=[],
         additional_properties=False,
     ).to_json_schema()
 )
@@ -87,7 +106,8 @@ class SpawnTool(Tool):
 
     async def execute(
         self,
-        task: str,
+        task: str | None = None,
+        task_spec: dict[str, Any] | None = None,
         label: str | None = None,
         temperature: float | None = None,
         required: bool = False,
@@ -97,8 +117,8 @@ class SpawnTool(Tool):
     ) -> str:
         """Spawn a subagent to execute the given task."""
         task = (task or "").strip()
-        if not task:
-            return ToolResult.error("Error: spawn task must not be empty")
+        if bool(task) == bool(task_spec):
+            return ToolResult.error("Error: provide exactly one of task or task_spec")
         group = (task_group or "default").strip()
         if not group or len(group) > 64:
             return ToolResult.error("Error: task_group must contain 1 to 64 characters")
@@ -121,6 +141,7 @@ class SpawnTool(Tool):
         try:
             result = await self._manager.spawn(
                 task=task,
+                task_spec=task_spec,
                 runtime=request_ctx.runtime,
                 label=label,
                 origin_channel=origin_channel,
@@ -135,11 +156,22 @@ class SpawnTool(Tool):
                 replaces_task_id=(replaces_task_id or "").strip() or None,
                 enforce_limit=True,
                 structured=True,
+                child_depth=int(request_ctx.metadata.get("subagent_depth") or 0),
             )
-        except (TypeError, ValueError, RuntimeError) as exc:
-            return ToolResult.error(f"Error: spawn rejected: {exc}")
         except Exception as exc:
-            return ToolResult.error(f"Error: failed to schedule subagent: {type(exc).__name__}: {exc}")
+            from nanobot.agent.subagent import SubagentAdmissionError
+
+            if isinstance(exc, SubagentAdmissionError):
+                return ToolResult.error(json.dumps({
+                    "error": "spawn_rejected",
+                    "reason": exc.reason,
+                    "message": str(exc),
+                }, ensure_ascii=True, sort_keys=True))
+            if not isinstance(exc, (TypeError, ValueError, RuntimeError)):
+                return ToolResult.error(
+                    f"Error: failed to schedule subagent: {type(exc).__name__}: {exc}"
+                )
+            return ToolResult.error(f"Error: spawn rejected: {exc}")
         if isinstance(result, dict):
             return json.dumps(result, ensure_ascii=True, sort_keys=True)
         return str(result)

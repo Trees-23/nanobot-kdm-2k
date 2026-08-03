@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import errno
+import hashlib
 import json
 import os
 from contextlib import suppress
@@ -18,12 +19,13 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
 SUBAGENT_TASK_SCHEMA_VERSION = 2
 SUBAGENT_LIFECYCLE_SCHEMA_VERSION = 1
 MAX_TASK_LABEL_CHARS = 120
 MAX_TASK_ERROR_CHARS = 1000
+MAX_TASK_SUMMARY_CHARS = 4000
 
 
 def _utc_now() -> datetime:
@@ -100,6 +102,71 @@ class SubagentDeliveryPhase(StrEnum):
     CLAIMED_PENDING_DELIVERY = "claimed_pending_delivery"
     DELIVERED = "delivered"
     DELIVERY_FAILED = "delivery_failed"
+
+
+class TaskSpec(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: Literal[1] = 1
+    objective: str = Field(min_length=1, max_length=8000)
+    context: str = Field(default="", max_length=8000)
+    constraints: list[str] = Field(default_factory=list, max_length=32)
+    deliverables: list[str] = Field(default_factory=list, max_length=32)
+    acceptance_criteria: list[str] = Field(default_factory=list, max_length=32)
+    dependencies: list[str] = Field(default_factory=list, max_length=32)
+    output_mode: Literal["text", "structured_preferred"] = "text"
+
+    @classmethod
+    def from_legacy(cls, task: str) -> TaskSpec:
+        return cls(objective=task.strip())
+
+    def idempotency_key(self, owner_scope: str) -> str:
+        canonical = self.model_dump_json(exclude={"schema_version"})
+        return hashlib.sha256(f"{owner_scope}\0{canonical}".encode()).hexdigest()
+
+
+class TaskResult(BaseModel):
+    model_config = ConfigDict(extra="forbid", use_enum_values=True)
+
+    schema_version: Literal[1] = 1
+    status: SubagentTaskStatus
+    summary: str = Field(default="", max_length=MAX_TASK_SUMMARY_CHARS)
+    evidence: list[str] = Field(default_factory=list, max_length=64)
+    artifacts: list[str] = Field(default_factory=list, max_length=64)
+    files_changed: list[str] = Field(default_factory=list, max_length=128)
+    tests: list[str] = Field(default_factory=list, max_length=128)
+    risks: list[str] = Field(default_factory=list, max_length=64)
+    error: str | None = Field(default=None, max_length=MAX_TASK_ERROR_CHARS)
+
+    @classmethod
+    def from_legacy(
+        cls,
+        text: str,
+        status: SubagentTaskStatus,
+        *,
+        error: str | None = None,
+    ) -> TaskResult:
+        return cls(status=status, summary=text[:MAX_TASK_SUMMARY_CHARS], error=error)
+
+    @classmethod
+    def from_output(
+        cls,
+        text: str,
+        status: SubagentTaskStatus,
+        *,
+        error: str | None = None,
+    ) -> TaskResult:
+        """Accept a versioned JSON result, otherwise preserve legacy text without invented evidence."""
+        try:
+            raw = json.loads(text)
+        except (TypeError, ValueError):
+            raw = None
+        if isinstance(raw, dict):
+            try:
+                return cls.model_validate({**raw, "status": status})
+            except ValidationError:
+                pass
+        return cls.from_legacy(text, status, error=error)
 
 
 _TERMINATION_TRANSITIONS = {
@@ -190,6 +257,10 @@ class SubagentTask(BaseModel):
     progress: dict[str, Any] = Field(default_factory=dict)
     usage: dict[str, Any] = Field(default_factory=dict)
     budget: dict[str, Any] = Field(default_factory=dict)
+    task_spec: TaskSpec | None = None
+    task_result: TaskResult | None = None
+    idempotency_key: str | None = None
+    child_depth: int = Field(default=0, ge=0)
     created_at: datetime
     started_at: datetime | None = None
     finished_at: datetime | None = None
@@ -217,7 +288,9 @@ class SubagentBudgetDTO(BaseModel):
 
     max_tokens: int | None = Field(default=None, ge=0)
     max_cost_usd: float | None = Field(default=None, ge=0)
+    wall_time_seconds: float | None = Field(default=None, ge=0)
     deadline_at: datetime | None = None
+    reservation_state: Literal["reserved", "released", "settled"] | None = None
 
     @field_validator("deadline_at")
     @classmethod
@@ -271,7 +344,13 @@ class SubagentTaskDTO(BaseModel):
             }),
             budget=SubagentBudgetDTO.model_validate({
                 key: task.budget.get(key)
-                for key in ("max_tokens", "max_cost_usd", "deadline_at")
+                for key in (
+                    "max_tokens",
+                    "max_cost_usd",
+                    "wall_time_seconds",
+                    "deadline_at",
+                    "reservation_state",
+                )
                 if task.budget.get(key) is not None
             }),
             created_at=task.created_at,
@@ -345,6 +424,10 @@ class SubagentTaskStore:
         task_group: str = "default",
         attempt: int = 1,
         replaces_task_id: str | None = None,
+        task_spec: TaskSpec | None = None,
+        idempotency_key: str | None = None,
+        child_depth: int = 0,
+        budget: dict[str, Any] | None = None,
         now: datetime | None = None,
     ) -> SubagentTask:
         async with self._lock(task_id):
@@ -372,6 +455,10 @@ class SubagentTaskStore:
                 task_group=task_group,
                 attempt=attempt,
                 replaces_task_id=replaces_task_id,
+                task_spec=task_spec,
+                idempotency_key=idempotency_key,
+                child_depth=child_depth,
+                budget=dict(budget or {}),
                 created_at=occurred_at,
             )
             task.lifecycle_outbox.append(self._event(task, "subagent_created", occurred_at))
@@ -502,6 +589,27 @@ class SubagentTaskStore:
             self._commit(task, event_type, now or _utc_now(), changed)
             return task.model_copy(deep=True)
 
+    async def update_budget(
+        self,
+        task_id: str,
+        budget: dict[str, Any],
+        *,
+        now: datetime | None = None,
+    ) -> SubagentTask:
+        """Persist reservation release/settlement even after terminal status."""
+        async with self._lock(task_id):
+            task = self._required(task_id)
+            if task.budget == budget:
+                return task
+            task.budget = dict(budget)
+            self._commit(
+                task,
+                "subagent_budget_updated",
+                now or _utc_now(),
+                {"reservation_state": task.budget.get("reservation_state")},
+            )
+            return task.model_copy(deep=True)
+
     async def record_termination(
         self,
         task_id: str,
@@ -567,15 +675,28 @@ class SubagentTaskStore:
         self,
         task_id: str,
         *,
+        result: TaskResult | None = None,
         now: datetime | None = None,
     ) -> SubagentTask:
-        return await self._transition_delivery(
-            task_id,
-            expected={SubagentDeliveryPhase.NOT_READY},
-            target=SubagentDeliveryPhase.READY,
-            event_type="subagent_result_ready",
-            now=now,
-        )
+        async with self._lock(task_id):
+            task = self._required(task_id)
+            current = SubagentDeliveryPhase(task.delivery.phase)
+            if current == SubagentDeliveryPhase.READY:
+                return task
+            if current != SubagentDeliveryPhase.NOT_READY:
+                raise InvalidSubagentTaskTransitionError(
+                    f"invalid delivery transition: {current} -> ready"
+                )
+            occurred_at = now or _utc_now()
+            task.task_result = result
+            task.delivery.phase = SubagentDeliveryPhase.READY
+            self._commit(
+                task,
+                "subagent_result_ready",
+                occurred_at,
+                {"from_delivery": current.value, "to_delivery": "ready"},
+            )
+            return task.model_copy(deep=True)
 
     async def claim_result(
         self,
@@ -726,6 +847,10 @@ class SubagentTaskStore:
         normalized.setdefault("progress", {})
         normalized.setdefault("usage", {})
         normalized.setdefault("budget", {})
+        normalized.setdefault("task_spec", None)
+        normalized.setdefault("task_result", None)
+        normalized.setdefault("idempotency_key", None)
+        normalized.setdefault("child_depth", 0)
         normalized.setdefault("legacy_inferred", True)
         normalized.setdefault("lifecycle_outbox", [])
         return normalized

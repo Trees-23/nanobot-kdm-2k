@@ -1,6 +1,7 @@
 """Tests for subagent tool registration and wiring."""
 
 import asyncio
+import json
 import time
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -198,6 +199,37 @@ async def test_spawn_tool_rejects_when_at_concurrency_limit(tmp_path):
     release.set()
     # Allow cleanup
     await asyncio.gather(*mgr._running_tasks.values(), return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_spawn_tool_returns_structured_rejection_and_forwards_depth(tmp_path):
+    from nanobot.agent.subagent import SubagentAdmissionError
+    from nanobot.agent.tools.context import RequestContext, request_context
+    from nanobot.agent.tools.spawn import SpawnTool
+
+    manager = MagicMock()
+    manager.get_running_count.return_value = 0
+    manager.max_concurrent_subagents = 1
+    manager.spawn = AsyncMock(side_effect=SubagentAdmissionError("depth_limit", "too deep"))
+    tool = SpawnTool(manager)
+    provider = MagicMock()
+
+    with request_context(RequestContext(
+        channel="test",
+        chat_id="c1",
+        session_key="test:c1",
+        runtime=_runtime(provider),
+        metadata={"subagent_depth": 2},
+    )):
+        result = await tool.execute(task_spec={"objective": "inspect"})
+
+    payload = json.loads(result.removeprefix("Error: "))
+    assert payload == {
+        "error": "spawn_rejected",
+        "message": "too deep",
+        "reason": "depth_limit",
+    }
+    assert manager.spawn.await_args.kwargs["child_depth"] == 2
 
 
 def test_subagent_default_max_concurrent_matches_agent_defaults(tmp_path):

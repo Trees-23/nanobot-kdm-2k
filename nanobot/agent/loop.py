@@ -287,6 +287,12 @@ class AgentLoop:
         model: str | None = None,
         max_iterations: int | None = None,
         max_concurrent_subagents: int | None = None,
+        max_children_per_owner_run: int | None = None,
+        max_children_per_session: int | None = None,
+        max_child_depth: int | None = None,
+        max_total_subagent_tokens: int | None = None,
+        max_total_subagent_cost_usd: float | None = None,
+        max_subagent_wall_time_seconds: float | None = None,
         child_executor_backend: str = "asyncio",
         child_runtime_config: dict[str, Any] | None = None,
         child_audit_root: str | None = None,
@@ -418,6 +424,30 @@ class AgentLoop:
             disabled_skills=disabled_skills,
             max_iterations=self.max_iterations,
             max_concurrent_subagents=max_concurrent_subagents,
+            max_children_per_owner_run=(
+                max_children_per_owner_run or defaults.max_children_per_owner_run
+            ),
+            max_children_per_session=(
+                max_children_per_session or defaults.max_children_per_session
+            ),
+            max_child_depth=(
+                defaults.max_child_depth if max_child_depth is None else max_child_depth
+            ),
+            max_total_subagent_tokens=(
+                defaults.max_total_subagent_tokens
+                if max_total_subagent_tokens is None
+                else max_total_subagent_tokens
+            ),
+            max_total_subagent_cost_usd=(
+                defaults.max_total_subagent_cost_usd
+                if max_total_subagent_cost_usd is None
+                else max_total_subagent_cost_usd
+            ),
+            max_subagent_wall_time_seconds=(
+                defaults.max_subagent_wall_time_seconds
+                if max_subagent_wall_time_seconds is None
+                else max_subagent_wall_time_seconds
+            ),
             fail_on_tool_error=fail_on_tool_error,
             llm_wall_timeout_for_session=lambda sk: runner_wall_llm_timeout_s(self.sessions, sk),
             audit_emitter=self.audit_runtime.emitter,
@@ -535,6 +565,12 @@ class AgentLoop:
             model=model,
             max_iterations=defaults.max_tool_iterations,
             max_concurrent_subagents=defaults.max_concurrent_subagents,
+            max_children_per_owner_run=defaults.max_children_per_owner_run,
+            max_children_per_session=defaults.max_children_per_session,
+            max_child_depth=defaults.max_child_depth,
+            max_total_subagent_tokens=defaults.max_total_subagent_tokens,
+            max_total_subagent_cost_usd=defaults.max_total_subagent_cost_usd,
+            max_subagent_wall_time_seconds=defaults.max_subagent_wall_time_seconds,
             child_executor_backend=defaults.subagent_executor_backend,
             child_runtime_config=child_runtime_config,
             child_audit_root=child_audit_root,

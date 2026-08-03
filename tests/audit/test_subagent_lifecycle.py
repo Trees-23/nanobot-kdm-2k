@@ -66,3 +66,29 @@ async def test_degraded_audit_keeps_outbox_for_idempotent_retry(tmp_path):
     assert first.events[0].idempotency_key == second.events[0].idempotency_key
     published = store.load("task-a")
     assert published is not None and published.lifecycle_outbox[0].published_at is not None
+
+
+@pytest.mark.asyncio
+async def test_budget_settlement_uses_versioned_lifecycle_event(tmp_path):
+    store = SubagentTaskStore(tmp_path)
+    await store.create(
+        task_id="task-a",
+        owner_session_key="test:a",
+        budget={"reserved_tokens": 100, "reservation_state": "reserved"},
+    )
+    await store.update_budget(
+        "task-a",
+        {
+            "reserved_tokens": 100,
+            "consumed_tokens": 12,
+            "reservation_state": "settled",
+        },
+    )
+    emitter = RecordingEmitter([
+        SimpleNamespace(committed=True, disabled=False),
+        SimpleNamespace(committed=True, disabled=False),
+    ])
+
+    assert await SubagentLifecyclePublisher(store, emitter).flush_task("task-a") == 2
+    assert emitter.events[-1].event_type == "subagent_budget_updated"
+    assert emitter.events[-1].idempotency_key == "task-a:2:subagent_budget_updated"

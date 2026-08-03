@@ -15,6 +15,8 @@ from nanobot.session.subagent_tasks import (
     SubagentTaskStatus,
     SubagentTaskStore,
     SubagentTerminationState,
+    TaskResult,
+    TaskSpec,
 )
 
 
@@ -171,6 +173,34 @@ async def test_public_dto_exposes_only_safe_usage_and_budget_fields(tmp_path):
 
 def test_test_clock_is_utc_aware():
     assert datetime.now(timezone.utc).utcoffset() is not None
+
+
+def test_legacy_task_and_result_adapters_do_not_invent_evidence():
+    spec = TaskSpec.from_legacy(" inspect the repository ")
+    result = TaskResult.from_output("plain result", SubagentTaskStatus.SUCCEEDED)
+
+    assert spec.objective == "inspect the repository"
+    assert result.summary == "plain result"
+    assert result.evidence == []
+    assert result.files_changed == []
+    assert result.tests == []
+
+
+def test_structured_task_result_is_bounded_and_validated():
+    result = TaskResult.from_output(
+        json.dumps({
+            "schema_version": 1,
+            "status": "failed",
+            "summary": "done",
+            "evidence": ["audit event"],
+            "tests": ["pytest focused"],
+        }),
+        SubagentTaskStatus.SUCCEEDED,
+    )
+
+    assert result.status == SubagentTaskStatus.SUCCEEDED
+    assert result.evidence == ["audit event"]
+    assert result.tests == ["pytest focused"]
 
 
 @pytest.mark.asyncio

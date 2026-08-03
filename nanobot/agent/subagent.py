@@ -7,6 +7,7 @@ import uuid
 import warnings
 from collections import OrderedDict
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable
 
@@ -42,6 +43,8 @@ from nanobot.session.subagent_tasks import (
     SubagentExecutionPhase,
     SubagentTaskStatus,
     SubagentTaskStore,
+    TaskResult,
+    TaskSpec,
 )
 from nanobot.utils.llm_runtime import LLMRuntime
 from nanobot.utils.prompt_templates import render_template
@@ -51,6 +54,12 @@ TERMINAL_STATUS_CACHE_LIMIT = 256
 
 class _SubagentTaskPersistenceError(RuntimeError):
     """Durable task truth could not be committed; result delivery must stop."""
+
+
+class SubagentAdmissionError(RuntimeError):
+    def __init__(self, reason: str, message: str) -> None:
+        super().__init__(message)
+        self.reason = reason
 
 
 @dataclass(slots=True)
@@ -78,6 +87,7 @@ class SubagentStatus:
     termination_state: str = "none"
     cancel_requested_at: float | None = None
     termination_evidence: dict[str, Any] | None = None
+    child_depth: int = 0
 
 
 class _SubagentHook(AgentHook):
@@ -129,6 +139,12 @@ class SubagentManager:
         child_runtime_config: dict[str, Any] | None = None,
         child_audit_root: str | None = None,
         task_store: SubagentTaskStore | None = None,
+        max_children_per_owner_run: int = 16,
+        max_children_per_session: int = 64,
+        max_child_depth: int = 1,
+        max_total_subagent_tokens: int = 0,
+        max_total_subagent_cost_usd: float = 0,
+        max_subagent_wall_time_seconds: float = 0,
     ):
         if workspace is None:
             raise TypeError("SubagentManager.__init__() missing required argument: 'workspace'")
@@ -187,9 +203,17 @@ class SubagentManager:
             self._task_store,
             audit_emitter,
         )
+        self.max_children_per_owner_run = max_children_per_owner_run
+        self.max_children_per_session = max_children_per_session
+        self.max_child_depth = max_child_depth
+        self.max_total_subagent_tokens = max_total_subagent_tokens
+        self.max_total_subagent_cost_usd = max_total_subagent_cost_usd
+        self.max_subagent_wall_time_seconds = max_subagent_wall_time_seconds
         self._exec_session_manager = ExecSessionManager()
         self._llm_wall_timeout_for_session = llm_wall_timeout_for_session
         self._running_tasks: dict[str, asyncio.Task[None]] = {}
+        self._watchdog_tasks: dict[str, asyncio.Task[None]] = {}
+        self._wall_timeout_in_progress: set[str] = set()
         self._executor_handles: dict[str, ChildHandle] = {}
         self._task_statuses: dict[str, SubagentStatus] = {}
         self._session_tasks: dict[str, set[str]] = {}  # session_key -> {task_id, ...}
@@ -283,12 +307,25 @@ class SubagentManager:
         replaces_task_id: str | None = None,
         enforce_limit: bool = False,
         structured: bool = False,
+        task_spec: TaskSpec | dict[str, Any] | None = None,
+        child_depth: int = 0,
     ) -> dict[str, Any] | str:
         """Spawn a subagent to execute a task in the background."""
         if runtime is None:
             runtime = self._compat_spawn_runtime()
         if temperature is not None:
             runtime = runtime.with_generation_overrides(temperature=temperature)
+        spec = (
+            TaskSpec.model_validate(task_spec)
+            if task_spec is not None
+            else TaskSpec.from_legacy(task)
+        )
+        task = spec.objective
+        execution_task = (
+            task
+            if task_spec is None
+            else "Complete this versioned TaskSpec:\n" + spec.model_dump_json(indent=2)
+        )
         task_id = str(uuid.uuid4())[:8]
         display_label = label or task[:30] + ("..." if len(task) > 30 else "")
         origin: dict[str, Any] = {
@@ -337,11 +374,66 @@ class SubagentManager:
             origin_channel=origin_channel,
             origin_chat_id=origin_chat_id,
             origin_message_id=origin_message_id,
+            child_depth=child_depth,
         )
         durable_session_key = session_key or f"{origin_channel}:{origin_chat_id}"
         async with self._spawn_lock:
             if enforce_limit and self.get_running_count() >= self.max_concurrent_subagents:
-                raise RuntimeError("subagent concurrency limit reached")
+                raise SubagentAdmissionError(
+                    "concurrency_limit", "subagent concurrency limit reached"
+                )
+            existing_tasks = self._task_store.list_tasks()
+            owner_scope = owner_run_id or durable_session_key
+            owner_count = sum(
+                item.owner_run_id == owner_run_id
+                if owner_run_id is not None
+                else item.owner_session_key == durable_session_key and item.owner_run_id is None
+                for item in existing_tasks
+            )
+            session_tasks = [
+                item for item in existing_tasks
+                if item.owner_session_key == durable_session_key
+            ]
+            if owner_count >= self.max_children_per_owner_run:
+                raise SubagentAdmissionError(
+                    "child_count_limit", "owner Run child task limit reached"
+                )
+            if len(session_tasks) >= self.max_children_per_session:
+                raise SubagentAdmissionError(
+                    "session_child_count_limit", "session child task limit reached"
+                )
+            if child_depth > self.max_child_depth:
+                raise SubagentAdmissionError("depth_limit", "subagent depth limit reached")
+            idempotency_key = spec.idempotency_key(owner_scope)
+            if any(
+                item.idempotency_key == idempotency_key
+                and item.status not in {"succeeded", "failed", "cancelled", "timed_out", "lost"}
+                for item in existing_tasks
+            ):
+                raise SubagentAdmissionError("duplicate_task", "duplicate TaskSpec rejected")
+            reserved_tokens = int(runtime.generation.max_tokens or 0)
+            if self.max_total_subagent_tokens > 0:
+                used = sum(
+                    self._effective_reserved_tokens(item.budget)
+                    for item in session_tasks
+                )
+                if used + reserved_tokens > self.max_total_subagent_tokens:
+                    raise SubagentAdmissionError(
+                        "token_budget_exhausted", "session subagent token budget exhausted"
+                    )
+            if self.max_total_subagent_cost_usd > 0:
+                observed_cost = sum(
+                    float(item.usage.get("cost_usd") or 0)
+                    for item in session_tasks
+                )
+                if observed_cost >= self.max_total_subagent_cost_usd:
+                    raise SubagentAdmissionError(
+                        "cost_budget_exhausted", "session subagent cost budget exhausted"
+                    )
+                raise SubagentAdmissionError(
+                    "cost_reservation_unavailable",
+                    "provider does not expose a reliable admission-time cost reservation",
+                )
             if required:
                 if not session_key or self._goal_orchestration is None:
                     raise ValueError("required subagents need an active goal in the current session")
@@ -357,6 +449,21 @@ class SubagentManager:
                 required=required,
                 task_group=task_group,
                 replaces_task_id=replaces_task_id,
+                task_spec=spec,
+                idempotency_key=idempotency_key,
+                child_depth=child_depth,
+                budget={
+                    "max_tokens": reserved_tokens,
+                    "reserved_tokens": reserved_tokens,
+                    "reservation_state": "reserved",
+                    "wall_time_seconds": self.max_subagent_wall_time_seconds or None,
+                    "deadline_at": (
+                        datetime.now(timezone.utc)
+                        + timedelta(seconds=self.max_subagent_wall_time_seconds)
+                    ).isoformat()
+                    if self.max_subagent_wall_time_seconds > 0
+                    else None,
+                },
             )
             await self._task_store.transition_status(task_id, SubagentTaskStatus.QUEUED)
             await self._lifecycle_publisher.flush_task(task_id)
@@ -378,13 +485,14 @@ class SubagentManager:
                         SubagentTaskStatus.FAILED,
                         error=f"required obligation registration failed: {type(exc).__name__}",
                     )
+                    await self._release_budget(task_id)
                     raise
             self._task_statuses[task_id] = status
             try:
                 bg_task = asyncio.create_task(
                     self._run_subagent(
                         task_id,
-                        task,
+                        execution_task,
                         display_label,
                         origin,
                         status,
@@ -402,15 +510,23 @@ class SubagentManager:
                     SubagentTaskStatus.FAILED,
                     error="subagent scheduling failed",
                 )
+                await self._release_budget(task_id)
                 if required and session_key:
                     await self._goal_orchestration.remove_registration(session_key, task_id)
                 raise
             self._running_tasks[task_id] = bg_task
+            if self.max_subagent_wall_time_seconds > 0:
+                self._watchdog_tasks[task_id] = asyncio.create_task(
+                    self._enforce_wall_time(task_id, self.max_subagent_wall_time_seconds)
+                )
             if session_key:
                 self._session_tasks.setdefault(session_key, set()).add(task_id)
 
         def _cleanup(_: asyncio.Task) -> None:
             self._running_tasks.pop(task_id, None)
+            watchdog = self._watchdog_tasks.pop(task_id, None)
+            if watchdog is not None and task_id not in self._wall_timeout_in_progress:
+                watchdog.cancel()
             completed = self._task_statuses.pop(task_id, None)
             if completed is not None:
                 self._cache_terminal_status(completed)
@@ -432,6 +548,52 @@ class SubagentManager:
         if structured:
             return result
         return f"Subagent [{display_label}] started (id: {task_id}). I'll notify you when it completes."
+
+    @staticmethod
+    def _effective_reserved_tokens(budget: dict[str, Any]) -> int:
+        state = budget.get("reservation_state")
+        if state == "released":
+            return 0
+        if state == "settled":
+            return int(budget.get("consumed_tokens") or 0)
+        return int(budget.get("reserved_tokens") or 0)
+
+    async def _release_budget(self, task_id: str) -> None:
+        task = self._task_store.load(task_id)
+        if task is None or task.budget.get("reservation_state") != "reserved":
+            return
+        budget = dict(task.budget)
+        budget["reservation_state"] = "released"
+        budget["released_reason"] = "startup_failed"
+        await self._task_store.update_budget(task_id, budget)
+        await self._lifecycle_publisher.flush_task(task_id)
+
+    async def _settle_budget(self, task_id: str, usage: dict[str, Any]) -> None:
+        task = self._task_store.load(task_id)
+        if task is None or task.budget.get("reservation_state") != "reserved":
+            return
+        budget = dict(task.budget)
+        total_tokens = int(
+            usage.get("total_tokens")
+            or int(usage.get("prompt_tokens") or 0) + int(usage.get("completion_tokens") or 0)
+        )
+        budget["reservation_state"] = "settled"
+        budget["consumed_tokens"] = total_tokens
+        await self._task_store.update_budget(task_id, budget)
+        await self._lifecycle_publisher.flush_task(task_id)
+
+    async def _enforce_wall_time(self, task_id: str, seconds: float) -> None:
+        try:
+            await asyncio.sleep(seconds)
+            task = self._running_tasks.get(task_id)
+            if task is not None and not task.done():
+                self._wall_timeout_in_progress.add(task_id)
+                try:
+                    await self.timeout_tasks([task_id], grace_seconds=0.1)
+                finally:
+                    self._wall_timeout_in_progress.discard(task_id)
+        except asyncio.CancelledError:
+            return
 
     def _uses_process_executor(self) -> bool:
         return self._child_executor is not None and self._child_runtime_config is not None
@@ -499,6 +661,7 @@ class SubagentManager:
             "max_tool_result_chars": self.max_tool_result_chars,
             "fail_on_tool_error": self.fail_on_tool_error,
             "llm_timeout_s": llm_timeout,
+            "child_depth": status.child_depth + 1,
         })
         self._executor_handles[task_id] = handle
         status.termination_evidence = {
@@ -626,6 +789,7 @@ class SubagentManager:
                         SubagentTaskStatus(terminal_status),
                         error=terminal_error,
                     )
+                    await self._settle_budget(task_id, runtime_usage or status.usage)
                     await self._lifecycle_publisher.flush_task(task_id)
                 except Exception as exc:
                     raise _SubagentTaskPersistenceError(
@@ -692,6 +856,7 @@ class SubagentManager:
                     else None
                 )
                 request_metadata = {}
+                request_metadata["subagent_depth"] = status.child_depth + 1
                 if audit_context is not None:
                     request_metadata[AUDIT_CONTEXT_META] = {
                         "trace_id": audit_context.trace_id,
@@ -741,14 +906,14 @@ class SubagentManager:
                 logger.info("Subagent [{}] completed successfully", task_id)
                 await _persist_terminal()
                 await self._announce_result(
-                    task_id, label, task, final_result, origin, "ok", origin_message_id
+                    task_id, label, status.task_description, final_result, origin, "ok", origin_message_id
                 )
             elif result.stop_reason == "tool_error":
                 terminal_error = self._format_partial_progress(result)
                 status.tool_events = list(result.tool_events)
                 await _persist_terminal()
                 await self._announce_result(
-                    task_id, label, task,
+                    task_id, label, status.task_description,
                     self._format_partial_progress(result),
                     origin, "error", origin_message_id,
                 )
@@ -763,7 +928,7 @@ class SubagentManager:
                     }
                 await _persist_terminal()
                 await self._announce_result(
-                    task_id, label, task,
+                    task_id, label, status.task_description,
                     result.error or "Error: subagent execution failed.",
                     origin, "error", origin_message_id,
                 )
@@ -771,13 +936,13 @@ class SubagentManager:
                 terminal_error = "Iteration budget exhausted before task completion."
                 await _persist_terminal()
                 await self._announce_result(
-                    task_id, label, task, terminal_error, origin, "error", origin_message_id
+                    task_id, label, status.task_description, terminal_error, origin, "error", origin_message_id
                 )
             elif result.stop_reason == "empty_final_response":
                 terminal_error = "Subagent returned no final response; task completion is unverified."
                 await _persist_terminal()
                 await self._announce_result(
-                    task_id, label, task, terminal_error, origin, "error", origin_message_id
+                    task_id, label, status.task_description, terminal_error, origin, "error", origin_message_id
                 )
             elif result.stop_reason == "cancelled":
                 terminal_status = (
@@ -805,7 +970,7 @@ class SubagentManager:
                 )
                 await _persist_terminal()
                 await self._announce_result(
-                    task_id, label, task, terminal_error, origin, "error", origin_message_id
+                    task_id, label, status.task_description, terminal_error, origin, "error", origin_message_id
                 )
         except asyncio.CancelledError:
             if (
@@ -839,7 +1004,15 @@ class SubagentManager:
             terminal_error = str(e)
             logger.exception("Subagent [{}] failed", task_id)
             await _persist_terminal()
-            await self._announce_result(task_id, label, task, f"Error: {e}", origin, "error", origin_message_id)
+            await self._announce_result(
+                task_id,
+                label,
+                status.task_description,
+                f"Error: {e}",
+                origin,
+                "error",
+                origin_message_id,
+            )
         finally:
             status.terminal_status = terminal_status
             if terminal_error:
@@ -866,7 +1039,18 @@ class SubagentManager:
         status_text = "completed successfully" if status == "ok" else "failed"
 
         if self._task_store.load(task_id) is not None:
-            await self._task_store.mark_result_ready(task_id)
+            terminal = self._task_store.load(task_id)
+            terminal_status = SubagentTaskStatus(
+                terminal.status if terminal is not None else "failed"
+            )
+            await self._task_store.mark_result_ready(
+                task_id,
+                result=TaskResult.from_output(
+                    result,
+                    terminal_status,
+                    error=result[:1000] if status != "ok" else None,
+                ),
+            )
             await self._lifecycle_publisher.flush_task(task_id)
 
         announce_content = render_template(
@@ -1208,6 +1392,12 @@ class SubagentManager:
 
     async def close(self) -> None:
         """Cancel running subagents and close their shared exec sessions."""
+        watchdogs = list(self._watchdog_tasks.values())
+        for watchdog in watchdogs:
+            watchdog.cancel()
+        if watchdogs:
+            await asyncio.gather(*watchdogs, return_exceptions=True)
+        self._watchdog_tasks.clear()
         process_task_ids = list(self._executor_handles)
         await self._wait_or_force_process_tasks(process_task_ids, grace_seconds=0.1)
         tasks = [
