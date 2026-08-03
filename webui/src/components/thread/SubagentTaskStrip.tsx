@@ -75,8 +75,9 @@ export function SubagentTaskStrip({ tasks }: { tasks: SubagentTaskPayload[] }) {
           aria-modal="false"
           aria-label="Subagent task details"
           className={cn(
-            "absolute bottom-[calc(100%+8px)] left-3 right-3 z-[60] max-h-[min(60vh,30rem)] overflow-hidden",
-            "rounded-2xl border border-black/[0.08] bg-card shadow-[0_12px_40px_rgba(15,23,42,0.14)]",
+            "left-3 right-3 z-[60] overflow-hidden",
+            "fixed bottom-[calc(env(safe-area-inset-bottom)+7rem)] max-h-[32dvh] sm:absolute sm:bottom-[calc(100%+8px)] sm:max-h-[min(60dvh,30rem)]",
+            "rounded-lg border border-black/[0.08] bg-card shadow-[0_12px_40px_rgba(15,23,42,0.14)]",
             "dark:border-white/[0.1] dark:shadow-[0_16px_48px_rgba(0,0,0,0.45)]",
           )}
         >
@@ -96,7 +97,7 @@ export function SubagentTaskStrip({ tasks }: { tasks: SubagentTaskPayload[] }) {
               <X className="h-4 w-4" />
             </button>
           </div>
-          <div className="max-h-[min(52vh,25rem)] divide-y divide-border/45 overflow-y-auto px-3">
+          <div className="max-h-[24dvh] divide-y divide-border/45 overflow-y-auto px-3 sm:max-h-[min(52dvh,25rem)]">
             {recent.map((task) => {
               const budget = budgetSummary(task);
               return (
