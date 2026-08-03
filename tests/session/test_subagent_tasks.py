@@ -203,6 +203,22 @@ def test_structured_task_result_is_bounded_and_validated():
     assert result.tests == ["pytest focused"]
 
 
+@pytest.mark.parametrize(
+    ("model", "payload"),
+    [
+        (TaskSpec, {"objective": "bounded", "constraints": ["x" * 1001]}),
+        (TaskSpec, {"objective": "bounded", "dependencies": ["x" * 257]}),
+        (
+            TaskResult,
+            {"status": "succeeded", "summary": "bounded", "evidence": ["x" * 2001]},
+        ),
+    ],
+)
+def test_structured_protocol_rejects_unbounded_list_items(model, payload):
+    with pytest.raises(ValidationError, match="string_too_long"):
+        model.model_validate(payload)
+
+
 @pytest.mark.asyncio
 async def test_termination_failed_atomically_marks_task_lost(tmp_path):
     store = SubagentTaskStore(tmp_path)
@@ -224,6 +240,28 @@ async def test_termination_failed_atomically_marks_task_lost(tmp_path):
         "subagent_termination_decided",
         "subagent_lost",
     ]
+
+
+@pytest.mark.asyncio
+async def test_cancel_request_has_distinct_lifecycle_evidence(tmp_path):
+    store = SubagentTaskStore(tmp_path)
+    await store.create(task_id="task-a", owner_session_key="test:a")
+    await store.transition_status("task-a", SubagentTaskStatus.QUEUED)
+    await store.transition_status("task-a", SubagentTaskStatus.RUNNING)
+
+    requested = await store.record_termination(
+        "task-a",
+        SubagentTerminationState.CANCEL_REQUESTED,
+        evidence={"request_sent": True},
+    )
+    waiting = await store.record_termination(
+        "task-a",
+        SubagentTerminationState.GRACE_WAITING,
+        evidence={"request_sent": True},
+    )
+
+    assert requested.lifecycle_outbox[-1].event_type == "subagent_cancel_requested"
+    assert waiting.lifecycle_outbox[-1].event_type == "subagent_termination_decided"
 
 
 @pytest.mark.asyncio
@@ -267,3 +305,8 @@ async def test_restart_recovery_is_idempotent_for_queued_and_running_tasks(tmp_p
             "executor_present": False,
             "exit_observed": False,
         }
+        assert [event.event_type for event in task.lifecycle_outbox[-3:]] == [
+            "subagent_recovered",
+            "subagent_termination_decided",
+            "subagent_lost",
+        ]

@@ -17,7 +17,7 @@ from contextlib import suppress
 from datetime import datetime, timezone
 from enum import StrEnum
 from pathlib import Path
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
@@ -26,6 +26,10 @@ SUBAGENT_LIFECYCLE_SCHEMA_VERSION = 1
 MAX_TASK_LABEL_CHARS = 120
 MAX_TASK_ERROR_CHARS = 1000
 MAX_TASK_SUMMARY_CHARS = 4000
+
+TaskSpecItem = Annotated[str, Field(max_length=1000)]
+TaskDependency = Annotated[str, Field(max_length=256)]
+TaskResultItem = Annotated[str, Field(max_length=2000)]
 
 
 def _utc_now() -> datetime:
@@ -110,10 +114,10 @@ class TaskSpec(BaseModel):
     schema_version: Literal[1] = 1
     objective: str = Field(min_length=1, max_length=8000)
     context: str = Field(default="", max_length=8000)
-    constraints: list[str] = Field(default_factory=list, max_length=32)
-    deliverables: list[str] = Field(default_factory=list, max_length=32)
-    acceptance_criteria: list[str] = Field(default_factory=list, max_length=32)
-    dependencies: list[str] = Field(default_factory=list, max_length=32)
+    constraints: list[TaskSpecItem] = Field(default_factory=list, max_length=32)
+    deliverables: list[TaskSpecItem] = Field(default_factory=list, max_length=32)
+    acceptance_criteria: list[TaskSpecItem] = Field(default_factory=list, max_length=32)
+    dependencies: list[TaskDependency] = Field(default_factory=list, max_length=32)
     output_mode: Literal["text", "structured_preferred"] = "text"
 
     @classmethod
@@ -131,11 +135,11 @@ class TaskResult(BaseModel):
     schema_version: Literal[1] = 1
     status: SubagentTaskStatus
     summary: str = Field(default="", max_length=MAX_TASK_SUMMARY_CHARS)
-    evidence: list[str] = Field(default_factory=list, max_length=64)
-    artifacts: list[str] = Field(default_factory=list, max_length=64)
-    files_changed: list[str] = Field(default_factory=list, max_length=128)
-    tests: list[str] = Field(default_factory=list, max_length=128)
-    risks: list[str] = Field(default_factory=list, max_length=64)
+    evidence: list[TaskResultItem] = Field(default_factory=list, max_length=64)
+    artifacts: list[TaskResultItem] = Field(default_factory=list, max_length=64)
+    files_changed: list[TaskResultItem] = Field(default_factory=list, max_length=128)
+    tests: list[TaskResultItem] = Field(default_factory=list, max_length=128)
+    risks: list[TaskResultItem] = Field(default_factory=list, max_length=64)
     error: str | None = Field(default=None, max_length=MAX_TASK_ERROR_CHARS)
 
     @classmethod
@@ -707,9 +711,12 @@ class SubagentTaskStore:
                 task.error = task.error or "child termination could not be confirmed"
             task.revision += 1
             summary = {"from_termination": current.value, "to_termination": target.value}
-            task.lifecycle_outbox.append(
-                self._event(task, "subagent_termination_decided", occurred_at, summary)
+            event_type = (
+                "subagent_cancel_requested"
+                if target == SubagentTerminationState.CANCEL_REQUESTED
+                else "subagent_termination_decided"
             )
+            task.lifecycle_outbox.append(self._event(task, event_type, occurred_at, summary))
             if target == SubagentTerminationState.TERMINATION_FAILED:
                 task.lifecycle_outbox.append(
                     self._event(
@@ -731,6 +738,10 @@ class SubagentTaskStore:
                 SubagentTaskStatus.RUNNING,
             }:
                 continue
+            await self.record_recovery(
+                task.task_id,
+                evidence={"executor_present": False, "startup_reconciliation": True},
+            )
             await self.record_termination(
                 task.task_id,
                 SubagentTerminationState.TERMINATION_FAILED,
@@ -738,6 +749,27 @@ class SubagentTaskStore:
             )
             recovered += 1
         return recovered
+
+    async def record_recovery(
+        self,
+        task_id: str,
+        *,
+        evidence: dict[str, Any] | None = None,
+        now: datetime | None = None,
+    ) -> SubagentTask:
+        """Record one durable startup-reconciliation decision before terminal arbitration."""
+        async with self._lock(task_id):
+            task = self._required(task_id)
+            if SubagentTaskStatus(task.status) in TERMINAL_TASK_STATUSES:
+                return task
+            occurred_at = now or _utc_now()
+            self._commit(
+                task,
+                "subagent_recovered",
+                occurred_at,
+                {"recovery_evidence": dict(evidence or {})},
+            )
+            return task.model_copy(deep=True)
 
     async def mark_result_ready(
         self,

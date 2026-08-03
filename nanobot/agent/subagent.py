@@ -405,11 +405,11 @@ class SubagentManager:
             if child_depth > self.max_child_depth:
                 raise SubagentAdmissionError("depth_limit", "subagent depth limit reached")
             idempotency_key = spec.idempotency_key(owner_scope)
-            if any(
-                item.idempotency_key == idempotency_key
-                and item.status not in {"succeeded", "failed", "cancelled", "timed_out", "lost"}
-                for item in existing_tasks
-            ):
+            duplicate_ids = {
+                item.task_id for item in existing_tasks
+                if item.idempotency_key == idempotency_key
+            }
+            if duplicate_ids and replaces_task_id not in duplicate_ids:
                 raise SubagentAdmissionError("duplicate_task", "duplicate TaskSpec rejected")
             reserved_tokens = int(runtime.generation.max_tokens or 0)
             if self.max_total_subagent_tokens > 0:

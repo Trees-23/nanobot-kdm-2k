@@ -320,7 +320,7 @@ class TestSpawn:
         assert task.task_spec.acceptance_criteria == ["tests pass"]
 
     @pytest.mark.asyncio
-    async def test_active_duplicate_is_rejected_but_terminal_retry_is_allowed(self, tmp_path):
+    async def test_duplicate_requires_explicit_terminal_replacement(self, tmp_path):
         sm = _manager(tmp_path, max_concurrent_subagents=3)
         release = asyncio.Event()
 
@@ -329,15 +329,33 @@ class TestSpawn:
             return AgentRunResult(final_content="done", messages=[], stop_reason="completed")
 
         sm.runner.run = slow_run
-        await sm.spawn("same task", runtime=_runtime(), session_key="test:duplicate")
+        first = await sm.spawn(
+            "same task",
+            runtime=_runtime(),
+            session_key="test:duplicate",
+            structured=True,
+        )
         with pytest.raises(SubagentAdmissionError, match="duplicate") as rejected:
             await sm.spawn("same task", runtime=_runtime(), session_key="test:duplicate")
         assert rejected.value.reason == "duplicate_task"
 
         release.set()
         await _drain_subagent_tasks(sm)
+        with pytest.raises(SubagentAdmissionError) as terminal_duplicate:
+            await sm.spawn(
+                "same task",
+                runtime=_runtime(),
+                session_key="test:duplicate",
+                structured=True,
+            )
+        assert terminal_duplicate.value.reason == "duplicate_task"
+
         retried = await sm.spawn(
-            "same task", runtime=_runtime(), session_key="test:duplicate", structured=True
+            "same task",
+            runtime=_runtime(),
+            session_key="test:duplicate",
+            replaces_task_id=first["task_id"],
+            structured=True,
         )
         await _drain_subagent_tasks(sm)
         assert retried["started"] is True
