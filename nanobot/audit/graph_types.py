@@ -93,6 +93,7 @@ class AuditNodeSummary(BaseModel):
     recovered_failure_count: int | None = None
     continued_failure_count: int | None = None
     task_id: str | None = None
+    task_label: str | None = None
     task_revision: int | None = None
     task_status: str | None = None
     task_phase: str | None = None

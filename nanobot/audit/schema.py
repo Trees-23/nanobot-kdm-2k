@@ -253,6 +253,7 @@ _EVENT_SPECS: dict[EventType, tuple[str, dict[str, tuple[Any, Any]]]] = {
 
 _SUBAGENT_EVENT_FIELDS = {
     "subagent_task_id": _required(str),
+    "task_label": _optional(str),
     "task_revision": _required(int),
     "idempotency_key": _required(str),
     "task_status": _required(str),

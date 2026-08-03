@@ -31,6 +31,7 @@ async def test_committed_lifecycle_outbox_is_acknowledged_once(tmp_path):
         owner_run_id="owner-a",
         child_run_id="child-a",
         spawn_tool_call_id="spawn-a",
+        label="检查一级目录",
     )
     await store.transition_status("task-a", SubagentTaskStatus.QUEUED)
     emitter = RecordingEmitter([
@@ -46,6 +47,7 @@ async def test_committed_lifecycle_outbox_is_acknowledged_once(tmp_path):
         "subagent_admitted",
     ]
     assert all(event.subagent_task_id == "task-a" for event in emitter.events)
+    assert all(event.task_label == "检查一级目录" for event in emitter.events)
     assert [event.task_revision for event in emitter.events] == [1, 2]
     assert all(event.trace_id == "trace-a" for event in emitter.events)
     assert all(event.tool_call_id == "spawn-a" for event in emitter.events)

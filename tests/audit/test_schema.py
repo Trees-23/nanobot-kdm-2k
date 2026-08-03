@@ -108,6 +108,25 @@ def test_materialize_event_adds_persistence_fields() -> None:
     assert event.segment_sequence == 1
 
 
+def test_subagent_lifecycle_task_label_is_optional_and_round_trips() -> None:
+    model = EVENT_DRAFT_MODELS[EventType.SUBAGENT_CREATED]
+    common = {
+        **_common_event("subagent_created"),
+        "subagent_task_id": "task-a",
+        "task_revision": 1,
+        "idempotency_key": "task-a:1:subagent_created",
+        "task_status": "created",
+        "task_phase": "initializing",
+        "termination_state": "none",
+        "delivery_phase": "not_ready",
+        "required_task": True,
+        "legacy_inferred": False,
+    }
+
+    assert model.model_validate(common).task_label is None
+    assert model.model_validate({**common, "task_label": "检查一级目录"}).task_label == "检查一级目录"
+
+
 def test_tool_finished_accepts_additive_diagnostics_and_recovery_link() -> None:
     draft = ToolFinishedDraft.model_validate(
         {

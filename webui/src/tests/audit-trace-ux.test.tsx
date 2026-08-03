@@ -190,7 +190,7 @@ describe("audit trace UX", () => {
       id: "task:trace-1:task-a",
       type: "task",
       status: "succeeded",
-      label: "Task task-a",
+      label: "检查一级目录",
       started_at: "2026-01-01T00:00:00Z",
       finished_at: "2026-01-01T00:00:30Z",
       elapsed_ms: 30_000,
@@ -211,6 +211,7 @@ describe("audit trace UX", () => {
       summary: {
         kind: "task",
         task_id: "task-a",
+        task_label: "检查一级目录",
         task_revision: 8,
         task_status: "succeeded",
         task_phase: "finished",
@@ -235,6 +236,7 @@ describe("audit trace UX", () => {
       />,
     );
 
+    expect(screen.getByRole("heading", { name: "检查一级目录" })).toBeInTheDocument();
     expect(screen.getByText("Task ID")).toBeInTheDocument();
     expect(screen.getByText("task-a")).toBeInTheDocument();
     expect(screen.getByText("执行阶段")).toBeInTheDocument();

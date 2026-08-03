@@ -895,12 +895,22 @@ class AuditGraphBuilder:
             node_id = f"task:{trace_id}:{task_id}"
             region_id = f"task-region:{trace_id}:{task_id}"
             status = _task_status(grouped)
+            task_label = next(
+                (
+                    value
+                    for event in grouped
+                    if isinstance((value := getattr(event, "task_label", None)), str)
+                    and value
+                ),
+                None,
+            )
+            display_label = task_label or f"Task {task_id[:12]}"
             state.add(
                 AuditGraphNode(
                     id=node_id,
                     type="task",
                     status=status,
-                    label=f"Task {task_id[:12]}",
+                    label=display_label,
                     started_at=first.occurred_at,
                     finished_at=(
                         latest.occurred_at
@@ -917,6 +927,7 @@ class AuditGraphBuilder:
                         kind="task",
                         identifier=task_id,
                         task_id=task_id,
+                        task_label=task_label,
                         task_revision=int(getattr(latest, "task_revision", 0)),
                         task_status=str(getattr(latest, "task_status", "")),
                         task_phase=str(getattr(latest, "task_phase", "")),
@@ -954,7 +965,7 @@ class AuditGraphBuilder:
                 AuditGraphRegion(
                     id=region_id,
                     type="task",
-                    label=f"Task {task_id[:12]}",
+                    label=display_label,
                     status=status,
                     member_node_ids=[node_id],
                     order=len(regions),

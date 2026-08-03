@@ -153,6 +153,7 @@ export interface AuditNodeSummary {
   recovered_failure_count?: number | null;
   continued_failure_count?: number | null;
   task_id?: string | null;
+  task_label?: string | null;
   task_revision?: number | null;
   task_status?: string | null;
   task_phase?: string | null;

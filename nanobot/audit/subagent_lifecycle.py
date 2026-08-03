@@ -63,6 +63,7 @@ class SubagentLifecyclePublisher:
                 },
                 "iteration": None,
                 "subagent_task_id": task.task_id,
+                "task_label": task.label or None,
                 "task_revision": pending.revision,
                 "idempotency_key": pending.idempotency_key,
                 "task_status": str(summary.get("task_status") or task.status),

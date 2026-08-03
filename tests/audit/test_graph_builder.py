@@ -411,7 +411,13 @@ def test_trace_full_projects_recorded_task_between_spawn_child_and_continuation(
             elapsed_ms=1,
             status="ok",
         ),
-        _task_event(4, "subagent_created", revision=1, task_status="created"),
+        _task_event(
+            4,
+            "subagent_created",
+            revision=1,
+            task_status="created",
+            task_label="检查一级目录",
+        ),
         _event(
             5,
             "run_started",
@@ -483,6 +489,9 @@ def test_trace_full_projects_recorded_task_between_spawn_child_and_continuation(
     spawn = next(node for node in graph.nodes if node.type == "tool_call")
 
     assert task.task_id == "task-a"
+    assert task.label == "检查一级目录"
+    assert task.summary.task_label == "检查一级目录"
+    assert next(region for region in graph.regions if region.id == task.region_id).label == "检查一级目录"
     assert task.status == "succeeded"
     assert task.summary.delivery_phase == "delivered"
     assert task.summary.evidence_source == "recorded"
@@ -521,6 +530,18 @@ def test_trace_full_projects_recorded_task_between_spawn_child_and_continuation(
         node.type == "decision" and node.summary.decision_type.startswith("subagent_")
         for node in graph.nodes
     )
+
+
+def test_trace_full_uses_task_id_fallback_for_legacy_lifecycle_events() -> None:
+    graph = AuditGraphBuilder().build(
+        trace_id="trace-1",
+        level="trace_full",
+        events=[_task_event(1, "subagent_created", revision=1, task_id="legacy-task-id")],
+    )
+
+    task = next(node for node in graph.nodes if node.type == "task")
+    assert task.label == "Task legacy-task-"
+    assert task.summary.task_label is None
 
 
 def test_trace_full_deduplicates_retried_lifecycle_outbox_events() -> None:
