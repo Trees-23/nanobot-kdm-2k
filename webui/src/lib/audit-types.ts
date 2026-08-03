@@ -40,6 +40,7 @@ export type TraceEdgeType =
 
 export type AuditRunKind = "main" | "child_agent" | "continuation" | "unknown";
 export type AuditLaneSide = "left" | "center" | "right";
+export type AuditCaptureMode = "full" | "metadata_only" | "off";
 
 export interface AuditIndexStatus {
   state: "ready" | "building" | "stale" | "disabled" | "unavailable";
@@ -48,6 +49,7 @@ export interface AuditIndexStatus {
   updated_at: string | null;
   lag_ms: number | null;
   last_error: { code: string; message: string; at: string | null } | null;
+  audit_mode?: AuditCaptureMode;
 }
 
 export interface AuditTraceListItem {
@@ -279,7 +281,7 @@ export interface AuditGraphResponse {
   }>;
   ignored_event_ids: string[];
   integrity: { status: string; error_codes: string[]; warning_codes: string[] };
-  index: { revision: number; coverage_complete: boolean; lag_ms: number | null };
+  index: { revision: number; coverage_complete: boolean; lag_ms: number | null; audit_mode?: AuditCaptureMode };
 }
 
 export interface AuditGraphEdge {
@@ -320,7 +322,7 @@ export interface AuditEventPage {
   items: AuditEventItem[];
   next_cursor: string | null;
   total: number;
-  index: { revision: number };
+  index: { revision: number; audit_mode?: AuditCaptureMode };
 }
 
 export interface AuditPayloadResponse {

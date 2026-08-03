@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { ArrowLeft, ExternalLink, LoaderCircle, RefreshCw, Workflow, X } from "lucide-react";
+import { ArrowLeft, ExternalLink, Info, LoaderCircle, RefreshCw, Workflow, X } from "lucide-react";
 
 import { TraceGraph } from "@/components/traces/TraceGraph";
 import { SessionTraceList } from "@/components/traces/SessionTraceList";
@@ -18,6 +18,7 @@ import { AuditApiError, fetchAuditPayload } from "@/lib/audit-api";
 import type {
   AuditGraphEdge,
   AuditGraphNode,
+  AuditCaptureMode,
   AuditPayloadResponse,
   AuditTraceListItem,
   TraceEdgeType,
@@ -39,6 +40,16 @@ export const EMPTY_TRACE_SELECTION: TraceSelection = {
   nodeId: null,
   eventId: null,
 };
+
+export function AuditCaptureModeNotice({ mode }: { mode?: AuditCaptureMode }) {
+  if (mode !== "metadata_only") return null;
+  return (
+    <div className="flex shrink-0 items-center gap-2 border-b border-amber-500/25 bg-amber-500/8 px-3 py-2 text-[11px] text-amber-800 dark:text-amber-300" role="status">
+      <Info className="h-3.5 w-3.5 shrink-0" />
+      <span>当前仅记录事件元数据，不保存 Payload</span>
+    </div>
+  );
+}
 
 interface EdgePresentation {
   title: string;
@@ -148,6 +159,7 @@ export function TraceWorkbench({
     timelineOpen || Boolean(selectedNode),
   );
   const unavailableCode = sessions.error?.code;
+  const auditMode = auditGraph.graph?.index.audit_mode ?? sessions.index?.audit_mode;
 
   useEffect(() => {
     if (!selection.nodeId || !auditGraph.graph || selectedNode) return;
@@ -280,6 +292,7 @@ export function TraceWorkbench({
           </Button>
         </div>
       </header>
+      <AuditCaptureModeNotice mode={auditMode} />
 
       {sessions.error && !sessions.items.length ? (
         <div className="flex min-h-0 flex-1 items-center justify-center px-6">

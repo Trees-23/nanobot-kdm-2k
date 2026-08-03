@@ -6,7 +6,7 @@ import { SessionTraceList } from "@/components/traces/SessionTraceList";
 import { PayloadViewer } from "@/components/traces/PayloadViewer";
 import { TraceNodeInspector } from "@/components/traces/TraceNodeInspector";
 import { TraceTimeline } from "@/components/traces/TraceTimeline";
-import { TraceEdgeInspector } from "@/components/traces/TraceWorkbench";
+import { AuditCaptureModeNotice, TraceEdgeInspector } from "@/components/traces/TraceWorkbench";
 import { useAuditTimeline } from "@/hooks/useAuditTimeline";
 import { AuditApiError, fetchAuditGraph } from "@/lib/audit-api";
 import type { AuditGraphNode, AuditSessionListItem } from "@/lib/audit-types";
@@ -268,6 +268,14 @@ describe("audit trace UX", () => {
       />,
     );
     expect(screen.getByRole("button", { name: "重试" })).toBeInTheDocument();
+  });
+
+  it("explains metadata-only capture without promising Payload in full mode", () => {
+    const { rerender } = render(<AuditCaptureModeNotice mode="metadata_only" />);
+    expect(screen.getByText("当前仅记录事件元数据，不保存 Payload")).toBeInTheDocument();
+
+    rerender(<AuditCaptureModeNotice mode="full" />);
+    expect(screen.queryByText("当前仅记录事件元数据，不保存 Payload")).not.toBeInTheDocument();
   });
 
   it("labels result return endpoints without failure or recovery wording", () => {
