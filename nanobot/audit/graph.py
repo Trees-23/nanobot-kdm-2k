@@ -703,7 +703,18 @@ class AuditGraphBuilder:
     ]:
         state = _BuildState([], {}, [])
         evidence = self._run_evidence(events)
-        task_events = [event for event in events if event.event_type in _SUBAGENT_EVENTS]
+        task_events: list[AuditEventBase] = []
+        lifecycle_keys: set[str] = set()
+        for event in events:
+            if event.event_type not in _SUBAGENT_EVENTS:
+                continue
+            idempotency_key = getattr(event, "idempotency_key", None)
+            if isinstance(idempotency_key, str) and idempotency_key in lifecycle_keys:
+                state.ignored.append(event.event_id)
+                continue
+            if isinstance(idempotency_key, str):
+                lifecycle_keys.add(idempotency_key)
+            task_events.append(event)
         by_run: dict[str, list[AuditEventBase]] = defaultdict(list)
         for event in events:
             if event.run_id and event.event_type not in _SUBAGENT_EVENTS:

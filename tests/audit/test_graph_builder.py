@@ -523,6 +523,27 @@ def test_trace_full_projects_recorded_task_between_spawn_child_and_continuation(
     )
 
 
+def test_trace_full_deduplicates_retried_lifecycle_outbox_events() -> None:
+    first = _task_event(2, "subagent_created", revision=1, task_status="created")
+    duplicate = _task_event(3, "subagent_created", revision=1, task_status="created")
+    graph = AuditGraphBuilder().build(
+        trace_id="trace-1",
+        level="trace_full",
+        events=[
+            _event(1, "run_started"),
+            first,
+            duplicate,
+            _event(4, "run_finished", status="succeeded", stop_reason="done"),
+        ],
+    )
+
+    task = next(node for node in graph.nodes if node.type == "task")
+    assert graph.trace.event_count == 4
+    assert task.summary.lifecycle_event_count == 1
+    assert task.raw_event_ids == [first.event_id]
+    assert duplicate.event_id in graph.ignored_event_ids
+
+
 def test_trace_full_connects_recorded_task_replacement_and_recovery() -> None:
     events = [
         _event(1, "run_started"),
