@@ -11,7 +11,7 @@ import uuid
 from collections.abc import Callable
 from contextlib import suppress
 from pathlib import Path
-from typing import Any, Self
+from typing import TYPE_CHECKING, Any, Self
 
 from pydantic import Field, field_validator, model_validator
 from websockets.asyncio.server import ServerConnection, serve, unix_serve
@@ -37,10 +37,10 @@ from nanobot.security.workspace_access import (
     WorkspaceScopeError,
 )
 from nanobot.session.goal_state import goal_state_ws_blob
+from nanobot.session.subagent_tasks import SubagentTaskDTO, SubagentTaskStore
 from nanobot.session.webui_turns import websocket_turn_wall_started_at
 from nanobot.webui.cli_apps_api import normalize_cli_app_mentions
 from nanobot.webui.forking import handle_webui_fork_chat
-from nanobot.webui.gateway_services import GatewayServices
 from nanobot.webui.http_utils import (
     normalize_config_path as _normalize_config_path,
 )
@@ -53,6 +53,9 @@ from nanobot.webui.http_utils import (
 from nanobot.webui.mcp_presets_api import normalize_mcp_preset_mentions
 from nanobot.webui.transcription_ws import webui_transcription_event
 from nanobot.webui.websocket_logging import websockets_server_logger
+
+if TYPE_CHECKING:
+    from nanobot.webui.gateway_services import GatewayServices
 
 # Plain HTTP WebUI routes also run through websockets.process_request.
 _WEBUI_HTTP_OPEN_TIMEOUT_S = 360.0
@@ -252,6 +255,7 @@ class WebSocketChannel(BaseChannel):
         self._conn_default: dict[Any, str] = {}
         self._stop_event: asyncio.Event | None = None
         self._server_task: asyncio.Task[None] | None = None
+        self._subagent_monitor_task: asyncio.Task[None] | None = None
 
         self.gateway = gateway
         self._http_router = gateway.http
@@ -260,6 +264,9 @@ class WebSocketChannel(BaseChannel):
         self._ingress = gateway.ingress
         self._transcripts = gateway.transcripts
         self._workspaces = gateway.workspaces
+        self._subagent_tasks: SubagentTaskStore = gateway.subagent_tasks
+        self._subagent_revisions: dict[tuple[str, str], int] = {}
+        self._subagent_subs: dict[str, set[Any]] = {}
 
         self._stream_text_buffers: dict[tuple[str, str], list[str]] = {}
 
@@ -284,6 +291,10 @@ class WebSocketChannel(BaseChannel):
             if not subs:
                 self._subs.pop(cid, None)
         self._conn_default.pop(connection, None)
+        for cid, subs in list(self._subagent_subs.items()):
+            subs.discard(connection)
+            if not subs:
+                self._subagent_subs.pop(cid, None)
 
     async def _maybe_push_active_goal_state(self, chat_id: str) -> None:
         """Replay an active sustained goal from session metadata after *chat_id* is subscribed.
@@ -399,6 +410,7 @@ class WebSocketChannel(BaseChannel):
         self._stop_event = asyncio.Event()
         if self.gateway.audit_index is not None:
             await self.gateway.audit_index.start()
+        self._subagent_monitor_task = asyncio.create_task(self._monitor_subagent_tasks())
 
         ssl_context = self._build_ssl_context()
         scheme = "wss" if ssl_context else "ws"
@@ -584,6 +596,15 @@ class WebSocketChannel(BaseChannel):
             await self._send_event(connection, "attached", chat_id=cid)
             await self._hydrate_after_subscribe(cid)
             return
+        if t == "subagent_rehydrate":
+            cid = envelope.get("chat_id")
+            if not _is_valid_chat_id(cid):
+                await self._send_event(connection, "error", detail="invalid chat_id")
+                return
+            self._attach(connection, cid)
+            self._subagent_subs.setdefault(cid, set()).add(connection)
+            await self.send_subagent_snapshot(cid, connection=connection)
+            return
         if t == "set_workspace_scope":
             cid = envelope.get("chat_id")
             if not _is_valid_chat_id(cid):
@@ -734,6 +755,11 @@ class WebSocketChannel(BaseChannel):
         if not self._running:
             return
         self._running = False
+        if self._subagent_monitor_task is not None:
+            self._subagent_monitor_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await self._subagent_monitor_task
+            self._subagent_monitor_task = None
         if self._stop_event:
             self._stop_event.set()
         if self._server_task:
@@ -749,9 +775,100 @@ class WebSocketChannel(BaseChannel):
         self._subs.clear()
         self._conn_chats.clear()
         self._conn_default.clear()
+        self._subagent_subs.clear()
         self._tokens.clear()
         if self.gateway.audit_index is not None:
             await self.gateway.audit_index.stop()
+
+    async def send_subagent_snapshot(
+        self,
+        chat_id: str,
+        *,
+        connection: Any | None = None,
+    ) -> None:
+        store = getattr(self, "_subagent_tasks", None)
+        if store is None:
+            return
+        snapshot = await asyncio.to_thread(
+            store.snapshot,
+            f"websocket:{chat_id}",
+        )
+        self._remember_subagent_snapshot(chat_id, snapshot.tasks)
+        body = {
+            "event": "subagent_snapshot",
+            "chat_id": chat_id,
+            "snapshot": snapshot.model_dump(mode="json"),
+        }
+        raw = json.dumps(body, ensure_ascii=False)
+        targets = (
+            [connection]
+            if connection is not None
+            else list(self._subagent_subs.get(chat_id, ()))
+        )
+        for target in targets:
+            await self._safe_send_to(target, raw, label=" subagent_snapshot ")
+
+    async def send_subagent_status_changed(
+        self,
+        chat_id: str,
+        task: SubagentTaskDTO,
+    ) -> None:
+        self._subagent_revisions[(chat_id, task.task_id)] = task.revision
+        body = {
+            "event": "subagent_status_changed",
+            "chat_id": chat_id,
+            "task": task.model_dump(mode="json"),
+        }
+        raw = json.dumps(body, ensure_ascii=False)
+        for connection in list(self._subagent_subs.get(chat_id, ())):
+            await self._safe_send_to(connection, raw, label=" subagent_status_changed ")
+
+    def _remember_subagent_snapshot(
+        self,
+        chat_id: str,
+        tasks: list[SubagentTaskDTO],
+    ) -> None:
+        stale = [key for key in self._subagent_revisions if key[0] == chat_id]
+        for key in stale:
+            self._subagent_revisions.pop(key, None)
+        for task in tasks:
+            self._subagent_revisions[(chat_id, task.task_id)] = task.revision
+
+    async def _poll_subagent_changes_once(self) -> None:
+        for chat_id in list(self._subagent_subs):
+            snapshot = await asyncio.to_thread(
+                self._subagent_tasks.snapshot,
+                f"websocket:{chat_id}",
+            )
+            changed: list[SubagentTaskDTO] = []
+            gap = False
+            for task in snapshot.tasks:
+                previous = self._subagent_revisions.get((chat_id, task.task_id))
+                if previous is None:
+                    gap = True
+                    break
+                if task.revision <= previous:
+                    continue
+                if task.revision != previous + 1:
+                    gap = True
+                    break
+                changed.append(task)
+            if gap:
+                await self.send_subagent_snapshot(chat_id)
+                continue
+            for task in changed:
+                await self.send_subagent_status_changed(chat_id, task)
+
+    async def _monitor_subagent_tasks(self) -> None:
+        try:
+            while self._running:
+                await asyncio.sleep(0.25)
+                try:
+                    await self._poll_subagent_changes_once()
+                except Exception:
+                    self.logger.exception("subagent task monitor poll failed")
+        except asyncio.CancelledError:
+            raise
 
     async def _safe_send_to(self, connection: Any, raw: str, *, label: str = "") -> None:
         """Send a raw frame to one connection, cleaning up on ConnectionClosed."""

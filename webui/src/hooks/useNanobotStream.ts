@@ -16,6 +16,7 @@ import type {
   OutboundMcpPresetMention,
   OutboundMedia,
   GoalStateWsPayload,
+  SubagentTaskPayload,
   ToolProgressEvent,
   UIMediaAttachment,
   UIFileEdit,
@@ -520,6 +521,8 @@ export function useNanobotStream(
   runStartedAt: number | null;
   /** Latest sustained goal for this ``chatId`` (``goal_state`` WS events). */
   goalState: GoalStateWsPayload | undefined;
+  /** Durable subagent task projection for the active chat. */
+  subagentTasks: SubagentTaskPayload[];
   send: (content: string, images?: SendAttachment[], options?: SendOptions) => void;
   transcribeAudio: (dataUrl: string, options?: { durationMs?: number }) => Promise<string>;
   stop: () => void;
@@ -539,6 +542,8 @@ export function useNanobotStream(
   /** Unix epoch seconds when the current user turn started; cleared on ``idle``. */
   const [runStartedAt, setRunStartedAt] = useState<number | null>(null);
   const [goalState, setGoalState] = useState<GoalStateWsPayload | undefined>(undefined);
+  const [subagentTasks, setSubagentTasks] = useState<SubagentTaskPayload[]>([]);
+  const subagentRevisionsRef = useRef<Map<string, number>>(new Map());
   const [streamError, setStreamError] = useState<StreamError | null>(null);
   const buffer = useRef<StreamBuffer | null>(null);
   const activeAssistantRef = useRef<ActiveAssistantCursor | null>(null);
@@ -799,6 +804,8 @@ export function useNanobotStream(
     setStreamError(null);
     setRunStartedAt(chatId ? client.getRunStartedAt(chatId) : null);
     setGoalState(chatId ? client.getGoalState(chatId) : undefined);
+    setSubagentTasks((current) => (current.length > 0 ? [] : current));
+    subagentRevisionsRef.current = new Map();
     buffer.current = null;
     activeAssistantRef.current = null;
     closedAssistantStreamIdsRef.current.clear();
@@ -883,6 +890,34 @@ export function useNanobotStream(
 
       if (ev.event === "goal_state") {
         setGoalState(ev.goal_state);
+        return;
+      }
+
+      if (ev.event === "subagent_snapshot") {
+        const tasks = Array.isArray(ev.snapshot?.tasks) ? ev.snapshot.tasks : [];
+        subagentRevisionsRef.current = new Map(
+          tasks.map((task) => [task.task_id, task.revision]),
+        );
+        setSubagentTasks(tasks);
+        return;
+      }
+
+      if (ev.event === "subagent_status_changed") {
+        const task = ev.task;
+        const previous = subagentRevisionsRef.current.get(task.task_id);
+        if (previous === undefined || task.revision > previous + 1) {
+          client.requestSubagentSnapshot(chatId);
+          return;
+        }
+        if (task.revision <= previous) return;
+        subagentRevisionsRef.current.set(task.task_id, task.revision);
+        setSubagentTasks((current) => {
+          const index = current.findIndex((item) => item.task_id === task.task_id);
+          if (index < 0) return [...current, task];
+          const next = current.slice();
+          next[index] = task;
+          return next;
+        });
         return;
       }
 
@@ -1213,6 +1248,7 @@ export function useNanobotStream(
     isStreaming,
     runStartedAt,
     goalState,
+    subagentTasks,
     send,
     transcribeAudio,
     stop,

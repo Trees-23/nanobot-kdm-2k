@@ -32,6 +32,7 @@ class GatewayServices:
     cron_pending_job_ids: Callable[[str], set[str]] | None
     local_trigger_pending_ids: Callable[[str], set[str]] | None
     audit_index: Any | None
+    subagent_tasks: Any
 
 
 def build_gateway_services(
@@ -78,6 +79,9 @@ def build_gateway_services(
         default_workspace=workspace_path,
         default_restrict_to_workspace=default_restrict_to_workspace,
     )
+    from nanobot.session.subagent_tasks import SubagentTaskStore
+
+    subagent_tasks = SubagentTaskStore(workspace_path)
     audit_index = None
     if audit_config is not None and audit_root is not None:
         from nanobot.audit.index_service import AuditIndexService
@@ -112,6 +116,7 @@ def build_gateway_services(
         audit_read_service=audit_index.read_service if audit_index is not None else None,
         audit_mode=audit_config.mode if audit_config is not None else "off",
         audit_root=audit_root,
+        subagent_task_store=subagent_tasks,
         log=logger,
     )
     return GatewayServices(
@@ -127,4 +132,5 @@ def build_gateway_services(
         cron_pending_job_ids=cron_pending_job_ids,
         local_trigger_pending_ids=local_trigger_pending_ids,
         audit_index=audit_index,
+        subagent_tasks=subagent_tasks,
     )

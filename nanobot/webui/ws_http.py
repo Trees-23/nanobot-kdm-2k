@@ -173,6 +173,7 @@ class GatewayHTTPHandler:
         audit_read_service: Any | None = None,
         audit_mode: str = "off",
         audit_root: Path | None = None,
+        subagent_task_store: Any | None = None,
         log: Any = logger,
     ) -> None:
         self.config = config
@@ -205,6 +206,15 @@ class GatewayHTTPHandler:
                 check_api_token=self.check_api_token,
                 logger=self._log,
                 resolve_session_title=self._resolve_audit_session_title,
+            )
+        self.subagent_routes = None
+        if subagent_task_store is not None:
+            from nanobot.webui.subagent_api import WebUISubagentRouter
+
+            self.subagent_routes = WebUISubagentRouter(
+                task_store=subagent_task_store,
+                check_api_token=self.check_api_token,
+                logger=self._log,
             )
 
         from nanobot.webui.settings_api import runtime_capabilities as _rc
@@ -286,6 +296,11 @@ class GatewayHTTPHandler:
         # Audit workbench routes (delegated, authenticated, read-only)
         if self.audit_routes is not None:
             response = await self.audit_routes.dispatch(request, got)
+            if response is not None:
+                return response
+
+        if self.subagent_routes is not None:
+            response = await self.subagent_routes.dispatch(request, got)
             if response is not None:
                 return response
 

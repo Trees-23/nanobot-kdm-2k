@@ -361,6 +361,62 @@ class SubagentTaskDTO(BaseModel):
         )
 
 
+class SubagentTimelineEventDTO(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: Literal[1] = 1
+    idempotency_key: str
+    revision: int = Field(ge=1)
+    event_type: str
+    occurred_at: datetime
+    audit_published: bool
+    summary: dict[str, Any]
+
+    @classmethod
+    def from_event(cls, event: SubagentLifecycleOutboxEvent) -> SubagentTimelineEventDTO:
+        return cls(
+            idempotency_key=event.idempotency_key,
+            revision=event.revision,
+            event_type=event.event_type,
+            occurred_at=event.occurred_at,
+            audit_published=event.published_at is not None,
+            summary=dict(event.summary),
+        )
+
+
+class SubagentSnapshotDTO(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: Literal[1] = 1
+    tasks: list[SubagentTaskDTO]
+    max_revision: int = Field(default=0, ge=0)
+
+
+class SubagentTaskDetailDTO(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: Literal[1] = 1
+    task: SubagentTaskDTO
+    trace_id: str | None
+    turn_id: str | None
+    spawn_tool_call_id: str | None
+    replaces_task_id: str | None
+    child_depth: int = Field(ge=0)
+    timeline: list[SubagentTimelineEventDTO]
+
+    @classmethod
+    def from_task(cls, task: SubagentTask) -> SubagentTaskDetailDTO:
+        return cls(
+            task=SubagentTaskDTO.from_task(task),
+            trace_id=task.trace_id,
+            turn_id=task.turn_id,
+            spawn_tool_call_id=task.spawn_tool_call_id,
+            replaces_task_id=task.replaces_task_id,
+            child_depth=task.child_depth,
+            timeline=[SubagentTimelineEventDTO.from_event(item) for item in task.lifecycle_outbox],
+        )
+
+
 class InvalidSubagentTaskTransitionError(ValueError):
     """Raised when a caller attempts a non-idempotent illegal transition."""
 
@@ -486,6 +542,18 @@ class SubagentTaskStore:
                 raise ValueError("subagent task record must be a JSON object")
             tasks.append(SubagentTask.model_validate(self._normalize_legacy(raw)))
         return tasks
+
+    def snapshot(self, owner_session_key: str) -> SubagentSnapshotDTO:
+        tasks = [
+            SubagentTaskDTO.from_task(task)
+            for task in self.list_tasks()
+            if task.owner_session_key == owner_session_key
+        ]
+        tasks.sort(key=lambda item: (item.created_at, item.task_id))
+        return SubagentSnapshotDTO(
+            tasks=tasks,
+            max_revision=max((item.revision for item in tasks), default=0),
+        )
 
     async def mark_outbox_published(
         self,
