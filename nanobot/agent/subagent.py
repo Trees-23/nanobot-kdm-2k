@@ -436,7 +436,22 @@ class SubagentManager:
                 )
             if required:
                 if not session_key or self._goal_orchestration is None:
-                    raise ValueError("required subagents need an active goal in the current session")
+                    raise SubagentAdmissionError(
+                        "no_active_goal",
+                        "required subagents need an active goal in the current session",
+                    )
+                try:
+                    await self._goal_orchestration.validate_registration(
+                        session_key,
+                        replaces_task_id=replaces_task_id,
+                    )
+                except ValueError as exc:
+                    reason = (
+                        "no_active_goal"
+                        if str(exc) == "required subagents need an active goal in the current session"
+                        else "required_registration_invalid"
+                    )
+                    raise SubagentAdmissionError(reason, str(exc)) from exc
             await self._task_store.create(
                 task_id=task_id,
                 owner_session_key=durable_session_key,

@@ -101,7 +101,8 @@ class SpawnTool(Tool):
             "returned task_id and task_group, then call await_subagents for the complete group "
             "before a final answer. A failed, cancelled, or timed-out required task must be "
             "replaced explicitly or reported by blocking the Goal. required=false remains a "
-            "background task and does not delay the owner Run."
+            "background task and does not delay the owner Run; never call await_subagents for "
+            "required=false tasks. Their results are delivered asynchronously."
         )
 
     async def execute(

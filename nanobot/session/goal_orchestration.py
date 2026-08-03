@@ -106,6 +106,36 @@ class GoalOrchestrationStore:
     def _lock(self, session_key: str) -> asyncio.Lock:
         return self._locks.setdefault(session_key, asyncio.Lock())
 
+    @staticmethod
+    def _validate_replacement(
+        orchestration: dict[str, Any], replaces_task_id: str | None
+    ) -> int:
+        if not replaces_task_id:
+            return 1
+        old = orchestration["tasks"].get(replaces_task_id)
+        if not isinstance(old, dict):
+            raise ValueError("replacement task is not owned by the current goal")
+        if old.get("status") not in TERMINAL_TASK_STATUSES - {"succeeded"}:
+            raise ValueError("only a failed, cancelled, timed-out, or lost task can be replaced")
+        if old.get("resolved_by_task_id"):
+            raise ValueError("task already has a replacement")
+        return int(old.get("attempt") or 1) + 1
+
+    async def validate_registration(
+        self,
+        session_key: str,
+        *,
+        replaces_task_id: str | None = None,
+    ) -> None:
+        """Reject invalid required-task admission before a durable Task is created."""
+        async with self._lock(session_key):
+            session = self._sessions.get_or_create(session_key)
+            goal = parse_goal_state(goal_state_raw(session.metadata))
+            if not isinstance(goal, dict) or goal.get("status") != "active":
+                raise ValueError("required subagents need an active goal in the current session")
+            orchestration = orchestration_snapshot(deepcopy(goal))
+            self._validate_replacement(orchestration, replaces_task_id)
+
     async def _mutate(
         self,
         session_key: str,
@@ -146,17 +176,10 @@ class GoalOrchestrationStore:
             tasks = orchestration["tasks"]
             if task_id in tasks:
                 raise ValueError(f"task {task_id} is already registered")
-            attempt = 1
+            attempt = self._validate_replacement(orchestration, replaces_task_id)
             if replaces_task_id:
-                old = tasks.get(replaces_task_id)
-                if not isinstance(old, dict):
-                    raise ValueError("replacement task is not owned by the current goal")
-                if old.get("status") not in TERMINAL_TASK_STATUSES - {"succeeded"}:
-                    raise ValueError("only a failed, cancelled, timed-out, or lost task can be replaced")
-                if old.get("resolved_by_task_id"):
-                    raise ValueError("task already has a replacement")
+                old = tasks[replaces_task_id]
                 old["resolved_by_task_id"] = task_id
-                attempt = int(old.get("attempt") or 1) + 1
             record = {
                 "label": label,
                 "status": "running",
