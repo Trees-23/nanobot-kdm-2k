@@ -30,6 +30,8 @@ def _make_loop():
          patch("nanobot.agent.loop.SessionManager"), \
          patch("nanobot.agent.loop.SubagentManager") as mock_sub_mgr:
         mock_sub_mgr.return_value.close = AsyncMock()
+        mock_sub_mgr.return_value.recover_runtime = AsyncMock()
+        mock_sub_mgr.return_value.running_task_ids.return_value = set()
         loop = AgentLoop(bus=bus, provider=provider, workspace=workspace)
     return loop, bus
 
