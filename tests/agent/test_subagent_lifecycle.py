@@ -411,6 +411,7 @@ class TestSpawn:
     @pytest.mark.asyncio
     async def test_failed_required_registration_releases_reserved_budget(self, tmp_path):
         goal_store = MagicMock()
+        goal_store.validate_registration = AsyncMock()
         goal_store.register = AsyncMock(side_effect=OSError("write failed"))
         sm = _manager(tmp_path, goal_orchestration=goal_store)
 

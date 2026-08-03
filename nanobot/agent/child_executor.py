@@ -68,6 +68,9 @@ class ChildHandle:
     exit_future: asyncio.Future[ChildExit]
     reader_task: asyncio.Task[None]
     lifecycle: list[dict[str, Any]] = field(default_factory=list)
+    lifecycle_queue: asyncio.Queue[dict[str, Any] | None] = field(
+        default_factory=asyncio.Queue
+    )
     result: dict[str, Any] | None = None
     write_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
@@ -266,6 +269,7 @@ class ProcessChildExecutor:
                         continue
                     if envelope.get("type") == "lifecycle":
                         handle.lifecycle.append(envelope)
+                        handle.lifecycle_queue.put_nowait(envelope)
                     elif envelope.get("type") == "result" and handle.result is None:
                         result = envelope.get("result")
                         if isinstance(result, dict):
@@ -278,6 +282,7 @@ class ProcessChildExecutor:
                 handle.exit_future.set_exception(exc)
             raise
         finally:
+            handle.lifecycle_queue.put_nowait(None)
             if handle.process.stdin is not None:
                 handle.process.stdin.close()
             self._handles.pop(handle.identity.executor_id, None)

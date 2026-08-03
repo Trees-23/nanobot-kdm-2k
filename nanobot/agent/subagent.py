@@ -9,7 +9,7 @@ from collections import OrderedDict
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Awaitable, Callable
 
 from loguru import logger
 
@@ -625,6 +625,7 @@ class SubagentManager:
         origin_message_id: str | None,
         workspace_scope: WorkspaceScope | None,
         audit_context: AuditRunContext | None,
+        checkpoint_callback: Callable[[dict[str, Any]], Awaitable[None]],
     ) -> AgentRunResult:
         executor = self._child_executor
         if executor is None or self._child_runtime_config is None:
@@ -711,8 +712,28 @@ class SubagentManager:
                     "pgid": handle.identity.pgid,
                 },
             )
+
+        async def _consume_lifecycle() -> None:
+            while True:
+                envelope = await handle.lifecycle_queue.get()
+                if envelope is None:
+                    return
+                if envelope.get("state") != "checkpoint":
+                    continue
+                await checkpoint_callback({
+                    "phase": envelope.get("phase"),
+                    "iteration": envelope.get("iteration"),
+                })
+
+        lifecycle_task = asyncio.create_task(_consume_lifecycle())
         try:
             exited = await executor.wait(handle)
+            await lifecycle_task
+        except BaseException:
+            if not lifecycle_task.done():
+                lifecycle_task.cancel()
+            await asyncio.gather(lifecycle_task, return_exceptions=True)
+            raise
         finally:
             self._executor_handles.pop(task_id, None)
         if (
@@ -850,6 +871,7 @@ class SubagentManager:
                     origin_message_id=origin_message_id,
                     workspace_scope=workspace_scope,
                     audit_context=audit_context,
+                    checkpoint_callback=_on_checkpoint,
                 )
             else:
                 root = workspace_scope.project_path if workspace_scope is not None else self.workspace
