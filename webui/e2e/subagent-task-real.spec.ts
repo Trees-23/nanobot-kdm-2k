@@ -29,7 +29,7 @@ async function freePort(): Promise<number> {
   });
 }
 
-function mutate(action: "seed" | "serial" | "reconnect"): void {
+function mutate(action: "seed" | "serial" | "reconnect" | "finish" | "after-dismiss"): void {
   const result = spawnSync("python", [
     "webui/e2e/generate-subagent-task-runtime.py",
     "--action", action,
@@ -116,6 +116,11 @@ test("real Gateway task lifecycle remains coherent on desktop, reconnect, and mo
   await toggle.click();
   const dialog = page.getByRole("dialog", { name: "Subagent task details" });
   await expect(dialog).toBeVisible();
+  await expect(dialog.locator("[data-task-id]")).toHaveCount(2);
+  await expect(dialog).toContainText("Research protocol evidence");
+  await expect(dialog).toContainText("Inspect compatibility tests");
+  await expect(dialog).not.toContainText("Result pending delivery");
+  await page.getByRole("button", { name: "All" }).click();
   for (const expected of [
     "Research protocol evidence",
     "Inspect compatibility tests",
@@ -150,6 +155,8 @@ test("real Gateway task lifecycle remains coherent on desktop, reconnect, and mo
   await page.getByRole("button", { name: "Show subagent task details" }).click();
   const refreshedDialog = page.getByRole("dialog", { name: "Subagent task details" });
   await expect(refreshedDialog).toBeVisible();
+  await expect(refreshedDialog.locator("[data-task-id]")).toHaveCount(2);
+  await page.getByRole("button", { name: "All" }).click();
   expect(await refreshedDialog.locator("[data-task-id]").allInnerTexts()).toEqual(rowsBeforeRefresh);
 
   await page.context().setOffline(true);
@@ -167,6 +174,20 @@ test("real Gateway task lifecycle remains coherent on desktop, reconnect, and mo
   expect(box!.y + box!.height).toBeLessThanOrEqual(844);
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth + 1))
     .toBe(true);
+
+  await page.getByRole("button", { name: "Hide completed" }).click();
+  await expect(page.getByText("3 active · 3 subagent tasks")).toBeVisible();
+  mutate("finish");
+  await expect(page.getByText("No active · 3 subagent tasks")).toBeVisible();
+  await page.getByRole("button", { name: "Dismiss completed subagent tasks" }).click();
+  await expect(page.locator(".composer-status-strip")).toHaveCount(0);
+
+  mutate("after-dismiss");
+  await expect(page.getByText("1 active · 1 subagent task")).toBeVisible();
+  await page.getByRole("button", { name: "Show subagent task details" }).click();
+  await expect(page.getByRole("dialog", { name: "Subagent task details" })).toContainText(
+    "Visible after terminal history is dismissed",
+  );
 
   await testInfo.attach("subagent-task-desktop-and-mobile.png", {
     body: await page.screenshot({ fullPage: true }),

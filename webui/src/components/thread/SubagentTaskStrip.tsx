@@ -173,6 +173,10 @@ export function SubagentTaskStrip({ tasks }: { tasks: SubagentTaskPayload[] }) {
           <div className="max-h-[24dvh] divide-y divide-border/45 overflow-y-auto px-3 sm:max-h-[min(52dvh,25rem)]">
             {recent.map((task) => {
               const budget = budgetSummary(task);
+              const phase =
+                !ACTIVE_STATUSES.has(task.status) && task.phase === "initializing"
+                  ? null
+                  : auditValueLabel(task.phase);
               return (
                 <section key={task.task_id} className="py-3" data-task-id={task.task_id}>
                   <div className="flex items-start gap-2">
@@ -185,7 +189,12 @@ export function SubagentTaskStrip({ tasks }: { tasks: SubagentTaskPayload[] }) {
                         </span>
                       </div>
                       <p className="mt-1 break-words text-[10.5px] text-muted-foreground">
-                        {auditValueLabel(task.status)} · {auditValueLabel(task.phase)} · {auditValueLabel(task.termination_state)} · {auditValueLabel(task.delivery_phase)}
+                        {[
+                          auditValueLabel(task.status),
+                          phase,
+                          auditValueLabel(task.termination_state),
+                          auditValueLabel(task.delivery_phase),
+                        ].filter(Boolean).join(" · ")}
                       </p>
                       <p className="mt-1 text-[10px] text-muted-foreground">
                         Usage {usageSummary(task)}{budget ? ` · Budget ${budget}` : ""}

@@ -1,10 +1,12 @@
 import asyncio
 import json
+import time
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from nanobot.agent.runner import AgentRunner
+from nanobot.agent.runner import AgentRunner, AgentRunResult
+from nanobot.agent.subagent import SubagentManager
 from nanobot.agent.tools.await_subagents import AwaitSubagentsTool
 from nanobot.agent.tools.base import ToolResult
 from nanobot.agent.tools.context import RequestContext, request_context
@@ -14,6 +16,7 @@ from nanobot.agent.tools.spawn import SpawnTool
 from nanobot.audit.context import AuditRunContext, set_run_cause
 from nanobot.audit.emitter import AuditEmitter
 from nanobot.audit.redaction import AuditRedactor
+from nanobot.bus.queue import MessageBus
 from nanobot.providers.base import LLMProvider, LLMResponse, ToolCallRequest
 from nanobot.session.goal_orchestration import GoalOrchestrationStore
 from nanobot.session.goal_state import GOAL_STATE_KEY
@@ -658,6 +661,93 @@ async def test_successful_spawn_output_binds_audit_call_task_and_child_ids() -> 
     assert manager.kwargs["spawn_tool_call_id"] == terminal.tool_call_id
     assert json.loads(output["content"])["task_id"] == "task-a"
     assert json.loads(output["content"])["child_run_id"] == "child-a"
+
+
+async def test_three_spawn_calls_from_one_model_turn_overlap_in_execution(tmp_path) -> None:
+    provider = MagicMock(spec=LLMProvider)
+    provider.chat_with_retry = AsyncMock(side_effect=[
+        LLMResponse(
+            content="",
+            tool_calls=[
+                ToolCallRequest(
+                    id=f"spawn-{index}",
+                    name="spawn",
+                    arguments={"task": f"independent task {index}"},
+                )
+                for index in range(3)
+            ],
+            finish_reason="tool_calls",
+        ),
+        LLMResponse(content="three tasks started"),
+    ])
+    manager = SubagentManager(
+        workspace=tmp_path,
+        bus=MessageBus(),
+        max_tool_result_chars=10_000,
+        max_concurrent_subagents=3,
+    )
+    all_started = asyncio.Event()
+    release = asyncio.Event()
+    started_at: dict[str, float] = {}
+    ended_at: dict[str, float] = {}
+
+    async def overlapping_child(spec):
+        objective = spec.initial_messages[-1]["content"]
+        started_at[objective] = time.monotonic()
+        if len(started_at) == 3:
+            all_started.set()
+        await release.wait()
+        ended_at[objective] = time.monotonic()
+        return AgentRunResult(
+            final_content=f"completed {objective}",
+            messages=[],
+            stop_reason="completed",
+        )
+
+    manager.runner.run = overlapping_child
+    tools = ToolRegistry()
+    tools.register(SpawnTool(manager))
+    spec = make_run_spec(
+        provider,
+        initial_messages=[{"role": "user", "content": "run three independent checks"}],
+        tools=tools,
+        model="test-model",
+        max_iterations=2,
+        max_tool_result_chars=10_000,
+        session_key="test:parallel",
+        audit_context=AuditRunContext("trace", "turn", "main-run"),
+    )
+    try:
+        with request_context(RequestContext(
+            channel="test",
+            chat_id="parallel",
+            session_key="test:parallel",
+            runtime=spec.runtime,
+            metadata={
+                "_audit_context": {
+                    "trace_id": "trace",
+                    "turn_id": "turn",
+                    "run_id": "main-run",
+                }
+            },
+        )):
+            main_run = asyncio.create_task(AgentRunner().run(spec))
+            await asyncio.wait_for(all_started.wait(), timeout=2)
+            assert manager.get_running_count() == 3
+            child_runs = list(manager._running_tasks.values())
+            result = await asyncio.wait_for(main_run, timeout=2)
+
+        release.set()
+        await asyncio.gather(*child_runs)
+        assert result.final_content == "three tasks started"
+        assert len(started_at) == len(ended_at) == 3
+        assert max(started_at.values()) < min(ended_at.values())
+        durable = manager._task_store.list_tasks()
+        assert len(durable) == 3
+        assert {str(task.status) for task in durable} == {"succeeded"}
+    finally:
+        release.set()
+        await manager.close()
 
 
 async def test_failed_await_subagents_is_nonfatal_and_structured_for_recovery(tmp_path) -> None:

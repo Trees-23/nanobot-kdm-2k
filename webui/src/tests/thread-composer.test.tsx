@@ -983,6 +983,38 @@ describe("ThreadComposer", () => {
     expect(screen.queryByRole("status")).not.toBeInTheDocument();
   });
 
+  it("does not present a stale initializing phase as terminal execution state", async () => {
+    render(
+      <ThreadComposer
+        onSend={vi.fn()}
+        placeholder="Type your message..."
+        subagentTasks={[
+          {
+            schema_version: 1,
+            revision: 10,
+            task_id: "legacy-terminal",
+            label: "Previously completed task",
+            required: false,
+            task_group: "background",
+            status: "succeeded",
+            phase: "initializing",
+            termination_state: "none",
+            delivery_phase: "delivered",
+            usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 },
+            budget: {},
+            created_at: "2026-08-03T00:00:01Z",
+            legacy_inferred: false,
+          },
+        ]}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Show subagent task details" }));
+    const dialog = await screen.findByRole("dialog", { name: "Subagent task details" });
+    expect(dialog).toHaveTextContent("Succeeded · None · Delivered");
+    expect(dialog).not.toHaveTextContent("Initializing");
+  });
+
   it("opens a slash command palette and inserts the selected command", () => {
     const onSend = vi.fn();
     render(

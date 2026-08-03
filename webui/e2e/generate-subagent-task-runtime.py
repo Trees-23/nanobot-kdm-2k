@@ -140,6 +140,26 @@ async def _reconnect(workspace: Path) -> None:
     )
 
 
+async def _finish(workspace: Path) -> None:
+    store = SubagentTaskStore(workspace)
+    for task in store.list_tasks():
+        if task.owner_session_key != SESSION_KEY or str(task.status) != "running":
+            continue
+        await store.update_runtime(task.task_id, phase=SubagentExecutionPhase.FINAL_RESPONSE)
+        await store.transition_status(task.task_id, SubagentTaskStatus.SUCCEEDED)
+        await store.mark_result_ready(task.task_id)
+        await store.claim_result(task.task_id, "run-main-finish")
+        await store.mark_delivered(task.task_id)
+
+
+async def _after_dismiss(workspace: Path) -> None:
+    await _create_running(
+        SubagentTaskStore(workspace),
+        "task-after-dismiss-e",
+        "Visible after terminal history is dismissed",
+    )
+
+
 def _write_config(
     config: Path,
     workspace: Path,
@@ -186,7 +206,7 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--action",
-        choices=("initial", "seed", "serial", "reconnect"),
+        choices=("initial", "seed", "serial", "reconnect", "finish", "after-dismiss"),
         required=True,
     )
     parser.add_argument("--workspace", type=Path, required=True)
@@ -212,8 +232,12 @@ def main() -> None:
         asyncio.run(_seed_tasks(args.workspace))
     elif args.action == "serial":
         asyncio.run(_serial(args.workspace))
-    else:
+    elif args.action == "reconnect":
         asyncio.run(_reconnect(args.workspace))
+    elif args.action == "finish":
+        asyncio.run(_finish(args.workspace))
+    else:
+        asyncio.run(_after_dismiss(args.workspace))
 
     print(json.dumps({"action": args.action, "chat_id": CHAT_ID, "session_key": SESSION_KEY}))
 
