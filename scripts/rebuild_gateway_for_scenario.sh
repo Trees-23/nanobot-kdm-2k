@@ -40,7 +40,7 @@ docker compose up --no-build --force-recreate -d nanobot-gateway
 health_url='http://127.0.0.1:18790/health'
 health_body=''
 attempt=0
-while [ "$attempt" -lt 30 ]; do
+while [ "$attempt" -lt 120 ]; do
   health_body=$(curl --fail --silent --show-error "$health_url" 2>/dev/null || true)
   if printf '%s' "$health_body" | grep -Fq "\"ref\": \"${NANOBOT_BUILD_REF}\""; then
     break
