@@ -22,7 +22,7 @@ export NANOBOT_BUILD_REF="git-$(git rev-parse --short=12 HEAD)"
 export NANOBOT_BUILD_TIME="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 scenario_id="scenario-$(date -u +%Y%m%dT%H%M%SZ)"
 
-managed_container_id=$(docker compose ps --status running -q nanobot-gateway 2>/dev/null || true)
+managed_container_id=$(docker compose ps --status running -q nanobot-gateway 2>/dev/null | cut -c1-12 || true)
 port_conflicts=$( {
   docker ps --filter publish=8765 --format '{{.ID}} {{.Names}}'
   docker ps --filter publish=18790 --format '{{.ID}} {{.Names}}'
