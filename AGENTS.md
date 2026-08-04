@@ -34,6 +34,60 @@ This file provides guidance to AI coding agents working with this repository.
 - 如果改动影响核心 Agent 流程、提示词行为、持久化、安全边界、配置兼容性或 WebUI 协议契约，
   必须在 PR 正文中明确说明。
 
+## 运行目录卫生
+
+- `runtime/workspace/` 是用户的长期默认工作区。未经用户针对该目录的明确授权，绝不删除、移动、
+  清空或覆盖该目录及其内容。
+- 长期 Gateway 仅使用 Compose 服务 `nanobot-gateway`，固定占用 `8765`（WebUI）和 `18790`（健康检查），
+  并挂载完整的 `runtime/` 运行根目录；其默认工作区必须保持为 `runtime/workspace/`。不得因切换 Git
+  分支、端口占用或日常验收自动启动另一套 Gateway、改用其他端口或改用其他运行根目录。
+- 默认场景验收在这套长期 Gateway 的全新 WebUI 会话中完成。只有用户明确要求并行或隔离实验时，才可创建
+  临时 Gateway；临时运行根目录统一创建在 `runtime/.tmp/<日期>-<任务标识>/`，并使用该目录中的
+  `workspace/`。
+- 临时实例只允许用于当前任务。验证结果已记录、相关进程已停止且不需要保留复现环境时，删除由当前
+  任务创建的整个 `runtime/.tmp/<...>/` 目录；若 `runtime/.tmp/` 为空，也一并移除该空父目录。
+- 删除前必须逐项确认目标位于 `runtime/.tmp/`、目录确由当前任务创建、且没有仍在使用该目录的进程。
+  不得使用宽泛通配符、不得删除 `runtime/` 根目录，也不得清理既有历史运行目录，除非用户明确指定。
+- 若用户要求保留验收证据或复现环境，保留对应临时目录并在交付说明中标明路径和保留原因；不得自行
+  推断可以删除用户创建或先前任务留下的目录。
+
+## Docker 构建与真实场景验收
+
+- 修改 Python、WebUI、Dockerfile、依赖或运行协议后，不得只重启既有 `nanobot-gateway` 容器。完成任务
+  提交后必须执行 `./scripts/rebuild_gateway_for_scenario.sh`；脚本只重建并替换固定的长期 Gateway，要求
+  干净工作区，并确认健康检查返回的构建标识与脚本输出一致后，才能宣称 Gateway 使用了本次代码。
+- 默认地址固定为 `http://localhost:8765`、`http://localhost:8765/#/new`、
+  `http://localhost:8765/#/traces` 和 `http://127.0.0.1:18790/health`。若这些端口被非 Compose 容器占用，
+  明确报告冲突容器并退出；不得自动换端口或接管、停止、删除该容器。
+- 涉及 Agent 流程、工具、审计、持久化、WebUI 协议或用户可见行为的改动，除聚焦测试外，默认必须完成
+  一次真实 Gateway 场景验收；该验收已获授权，可使用当前配置的模型和全新的 WebUI 会话。
+- 场景提示词必须针对本次改动、带唯一场景标识，并明确预期回答、工具行为或审计状态。优先核对实际
+  Agent 回答、工具执行、运行轨迹图、事件时间线和前端展示，不得以代码测试替代场景验收。
+- 场景需要写入时，只能使用当前任务约定的测试目标或工作区；不得改动长期记忆、配置、凭据、生产仓库
+  或无关目录。若场景本身需要外部消息、远程资源或第三方数据变更，必须在执行前说明目标和预期副作用，
+  并限制在指定测试对象。
+- 每次场景验收交付必须报告：构建标识、WebUI 新会话 URL、运行轨迹 URL、具体 trace URL、场景提示词、
+  预期结果、实际结果和未覆盖风险。不得在交付中输出 WebUI bootstrap secret、API Key 或其他凭据。
+
+## 部署一致性与场景证据
+
+- 开始真实场景前，必须记录并相互核对当前 Git 分支和 HEAD、Gateway 容器 ID、镜像 ID、构建标识、
+  Compose 服务名、`runtime/` 挂载路径以及 Agent 实际工作区。任一项与当前代码或任务预期不一致时，
+  先判定为部署错配，不得用旧实例的页面或轨迹作为验收结论。
+- 涉及 HTTP API、WebSocket、审计或轨迹协议的改动，必须验证实际接口不是 404，鉴权后的响应状态和
+  数据结构符合预期，并确认真实运行产生了对应事件。仅确认前端页面能打开或单元测试通过，不足以证明
+  协议已接通。
+- 场景提示词中的文件路径必须相对于 Agent 实际工作区编写。执行读、写、编辑或列表操作前，先确认
+  目标文件确实存在于该工作区；不得把宿主机路径、其他运行目录或历史实例路径当作场景前提。
+- 验证工具失败恢复时，必须保留真实失败、纠正动作和纠正后成功的关联证据，并在审计或轨迹中确认三者
+  属于同一场景。普通的一次成功调用不能替代恢复能力验收。
+- 验证多子 Agent 时，按提示词约定的数量逐项核对创建事件、执行终态、结果投递和父子关联；不能只
+  根据最终汇总文本推断子 Agent 已实际运行。
+- 使用 `nanobot-cli` 或其他独立 CLI 检查 schema、索引或审计数据前，先确认 CLI 与 Gateway 使用同一
+  代码版本和构建标识，避免把版本不兼容误判为功能缺失。
+- 构建缓存异常必须有具体证据（例如构建标识未变化或依赖层明显错配）后再使用 `--no-cache`；不得
+  把无证据的全量重建作为默认排障步骤。任何情况下都不得使用 `docker compose down -v` 破坏持久化数据。
+
 ## Project Overview
 
 nanobot is a lightweight, open-source AI agent framework written in Python with a React/TypeScript WebUI. It centers around a small agent loop that receives messages from chat channels, invokes an LLM provider, executes tools, and manages session memory.

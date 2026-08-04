@@ -29,11 +29,18 @@ docker compose down
 
 修改配置后，在运行日志的终端按 `Ctrl+C`，再重新执行前台启动命令。
 
-更新代码、依赖或 Dockerfile 后，在前台重新构建并启动：
+更新代码、依赖或 Dockerfile 后，先完成任务提交，再使用项目脚本重建并替换唯一的长期 Gateway：
 
 ```bash
-docker compose up --build --force-recreate nanobot-gateway
+./scripts/rebuild_gateway_for_scenario.sh
 ```
+
+脚本不会自动发送模型请求。将它输出的场景标识附在本次验收提示词中，在新会话页面发送；随后从运行轨迹
+页面找到对应 trace，核对回答、工具行为、图和事件时间线。
+
+长期 Gateway 固定使用 `8765` 与 `18790`，并一直挂载 `runtime/`，其工作区是
+`runtime/workspace/`。如果这两个端口被其他容器占用，脚本会报告容器名称后退出；它不会自动换端口、
+停止或删除其他容器。
 
 ## 配置文件
 
@@ -112,6 +119,18 @@ WebUI：
 
 ```text
 http://localhost:8765
+```
+
+场景验收新会话：
+
+```text
+http://localhost:8765/#/new
+```
+
+运行轨迹：
+
+```text
+http://localhost:8765/#/traces
 ```
 
 健康检查：

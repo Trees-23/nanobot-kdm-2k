@@ -1982,7 +1982,15 @@ def _run_gateway(
                         method, path = parts[0], parts[1]
 
                     if method == "GET" and path == "/health":
-                        body = _json.dumps({"status": "ok"})
+                        body = _json.dumps(
+                            {
+                                "status": "ok",
+                                "build": {
+                                    "ref": os.environ.get("NANOBOT_BUILD_REF", "unknown"),
+                                    "built_at": os.environ.get("NANOBOT_BUILD_TIME", "unknown"),
+                                },
+                            }
+                        )
                         status = "200 OK"
                         content_type = "application/json"
                     else:
