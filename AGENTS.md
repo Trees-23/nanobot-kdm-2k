@@ -69,6 +69,25 @@ This file provides guidance to AI coding agents working with this repository.
 - 每次场景验收交付必须报告：构建标识、WebUI 新会话 URL、运行轨迹 URL、具体 trace URL、场景提示词、
   预期结果、实际结果和未覆盖风险。不得在交付中输出 WebUI bootstrap secret、API Key 或其他凭据。
 
+## 部署一致性与场景证据
+
+- 开始真实场景前，必须记录并相互核对当前 Git 分支和 HEAD、Gateway 容器 ID、镜像 ID、构建标识、
+  Compose 服务名、`runtime/` 挂载路径以及 Agent 实际工作区。任一项与当前代码或任务预期不一致时，
+  先判定为部署错配，不得用旧实例的页面或轨迹作为验收结论。
+- 涉及 HTTP API、WebSocket、审计或轨迹协议的改动，必须验证实际接口不是 404，鉴权后的响应状态和
+  数据结构符合预期，并确认真实运行产生了对应事件。仅确认前端页面能打开或单元测试通过，不足以证明
+  协议已接通。
+- 场景提示词中的文件路径必须相对于 Agent 实际工作区编写。执行读、写、编辑或列表操作前，先确认
+  目标文件确实存在于该工作区；不得把宿主机路径、其他运行目录或历史实例路径当作场景前提。
+- 验证工具失败恢复时，必须保留真实失败、纠正动作和纠正后成功的关联证据，并在审计或轨迹中确认三者
+  属于同一场景。普通的一次成功调用不能替代恢复能力验收。
+- 验证多子 Agent 时，按提示词约定的数量逐项核对创建事件、执行终态、结果投递和父子关联；不能只
+  根据最终汇总文本推断子 Agent 已实际运行。
+- 使用 `nanobot-cli` 或其他独立 CLI 检查 schema、索引或审计数据前，先确认 CLI 与 Gateway 使用同一
+  代码版本和构建标识，避免把版本不兼容误判为功能缺失。
+- 构建缓存异常必须有具体证据（例如构建标识未变化或依赖层明显错配）后再使用 `--no-cache`；不得
+  把无证据的全量重建作为默认排障步骤。任何情况下都不得使用 `docker compose down -v` 破坏持久化数据。
+
 ## Project Overview
 
 nanobot is a lightweight, open-source AI agent framework written in Python with a React/TypeScript WebUI. It centers around a small agent loop that receives messages from chat channels, invokes an LLM provider, executes tools, and manages session memory.
