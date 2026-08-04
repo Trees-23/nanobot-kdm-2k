@@ -2958,6 +2958,8 @@ def test_gateway_health_endpoint_binds_and_serves_expected_responses(
     config.gateway.host = host
     config.gateway.port = 18791
     captured: dict[str, object] = {}
+    monkeypatch.setenv("NANOBOT_BUILD_REF", "test-build-ref")
+    monkeypatch.setenv("NANOBOT_BUILD_TIME", "2026-08-04T00:00:00Z")
 
     class _FakeSessionManager:
         def flush_all(self) -> int:
@@ -3087,7 +3089,13 @@ def test_gateway_health_endpoint_binds_and_serves_expected_responses(
     assert health_writer.closed is True
     assert "HTTP/1.0 200 OK" in health_response
     health_body = json.loads(health_response.split("\r\n\r\n", 1)[1])
-    assert health_body == {"status": "ok"}
+    assert health_body == {
+        "status": "ok",
+        "build": {
+            "ref": "test-build-ref",
+            "built_at": "2026-08-04T00:00:00Z",
+        },
+    }
 
     missing_response, missing_writer = _call_handler("/missing")
     assert missing_writer.closed is True

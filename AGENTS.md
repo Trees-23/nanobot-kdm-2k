@@ -34,6 +34,35 @@ This file provides guidance to AI coding agents working with this repository.
 - 如果改动影响核心 Agent 流程、提示词行为、持久化、安全边界、配置兼容性或 WebUI 协议契约，
   必须在 PR 正文中明确说明。
 
+## 运行目录卫生
+
+- `runtime/workspace/` 是用户的长期默认工作区。未经用户针对该目录的明确授权，绝不删除、移动、
+  清空或覆盖该目录及其内容。
+- 不得为临时验证、浏览器验收、独立 Gateway 或评测直接在 `runtime/` 根目录创建带任务名的运行根目录。
+  如确有必要，统一创建在 `runtime/.tmp/<日期>-<任务标识>/`，并使用该目录中的 `workspace/` 作为
+  临时实例工作区。
+- 临时实例只允许用于当前任务。验证结果已记录、相关进程已停止且不需要保留复现环境时，删除由当前
+  任务创建的整个 `runtime/.tmp/<...>/` 目录；若 `runtime/.tmp/` 为空，也一并移除该空父目录。
+- 删除前必须逐项确认目标位于 `runtime/.tmp/`、目录确由当前任务创建、且没有仍在使用该目录的进程。
+  不得使用宽泛通配符、不得删除 `runtime/` 根目录，也不得清理既有历史运行目录，除非用户明确指定。
+- 若用户要求保留验收证据或复现环境，保留对应临时目录并在交付说明中标明路径和保留原因；不得自行
+  推断可以删除用户创建或先前任务留下的目录。
+
+## Docker 构建与真实场景验收
+
+- 修改 Python、WebUI、Dockerfile、依赖或运行协议后，不得只重启既有 `nanobot-gateway` 容器。必须执行
+  `./scripts/rebuild_gateway_for_scenario.sh`，确认健康检查返回的构建标识与脚本输出一致后，才能宣称
+  Gateway 使用了本次代码。
+- 涉及 Agent 流程、工具、审计、持久化、WebUI 协议或用户可见行为的改动，除聚焦测试外，默认必须完成
+  一次真实 Gateway 场景验收；该验收已获授权，可使用当前配置的模型和全新的 WebUI 会话。
+- 场景提示词必须针对本次改动、带唯一场景标识，并明确预期回答、工具行为或审计状态。优先核对实际
+  Agent 回答、工具执行、运行轨迹图、事件时间线和前端展示，不得以代码测试替代场景验收。
+- 场景需要写入时，只能使用当前任务约定的测试目标或工作区；不得改动长期记忆、配置、凭据、生产仓库
+  或无关目录。若场景本身需要外部消息、远程资源或第三方数据变更，必须在执行前说明目标和预期副作用，
+  并限制在指定测试对象。
+- 每次场景验收交付必须报告：构建标识、WebUI 新会话 URL、运行轨迹 URL、具体 trace URL、场景提示词、
+  预期结果、实际结果和未覆盖风险。不得在交付中输出 WebUI bootstrap secret、API Key 或其他凭据。
+
 ## Project Overview
 
 nanobot is a lightweight, open-source AI agent framework written in Python with a React/TypeScript WebUI. It centers around a small agent loop that receives messages from chat channels, invokes an LLM provider, executes tools, and manages session memory.

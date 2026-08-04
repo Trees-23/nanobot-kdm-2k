@@ -35,6 +35,19 @@ docker compose down
 docker compose up --build --force-recreate nanobot-gateway
 ```
 
+需要对本次改动进行真实 WebUI 场景验收时，使用项目脚本。它会重新构建并替换 Gateway、核对健康检查中的
+构建标识，并输出新会话与运行轨迹页面地址：
+
+```bash
+./scripts/rebuild_gateway_for_scenario.sh
+```
+
+脚本不会自动发送模型请求。将它输出的场景标识附在本次验收提示词中，在新会话页面发送；随后从运行轨迹
+页面找到对应 trace，核对回答、工具行为、图和事件时间线。
+
+如果默认的 `8765` 或 `18790` 已被其他 Gateway 占用，脚本会自动选择空闲宿主机端口，并在输出中给出本次
+验收实际应打开的地址；旧实例不会被脚本停止或删除。
+
 ## 配置文件
 
 ```text
@@ -112,6 +125,18 @@ WebUI：
 
 ```text
 http://localhost:8765
+```
+
+场景验收新会话：
+
+```text
+http://localhost:8765/#/new
+```
+
+运行轨迹：
+
+```text
+http://localhost:8765/#/traces
 ```
 
 健康检查：
