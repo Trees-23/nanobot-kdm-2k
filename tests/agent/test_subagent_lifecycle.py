@@ -11,12 +11,21 @@ from nanobot.agent import SubagentManager
 from nanobot.agent.hook import AgentHookContext
 from nanobot.agent.runner import AgentRunResult
 from nanobot.agent.subagent import (
+    SubagentAdmissionError,
     SubagentStatus,
     _SubagentHook,
 )
 from nanobot.agent.tools.context import RequestContext, current_request_context, request_context
 from nanobot.bus.queue import MessageBus
 from nanobot.providers.base import GenerationSettings, LLMProvider
+from nanobot.session.goal_orchestration import GoalOrchestrationStore
+from nanobot.session.goal_state import GOAL_STATE_KEY
+from nanobot.session.manager import SessionManager
+from nanobot.session.subagent_tasks import (
+    SubagentDeliveryPhase,
+    SubagentTaskStatus,
+    SubagentTaskStore,
+)
 from nanobot.utils.llm_runtime import LLMRuntime
 
 # ---------------------------------------------------------------------------
@@ -283,6 +292,167 @@ class TestSpawn:
         assert "id:" in result
 
     @pytest.mark.asyncio
+    async def test_structured_task_reaches_child_without_leaking_context_in_announce(self, tmp_path):
+        sm = _manager(tmp_path)
+        sm.runner.run = AsyncMock(return_value=AgentRunResult(
+            final_content="done", messages=[], stop_reason="completed",
+        ))
+        sm._announce_result = AsyncMock()
+
+        spawned = await sm.spawn(
+            "",
+            task_spec={
+                "objective": "inspect state",
+                "context": "private bounded context",
+                "acceptance_criteria": ["tests pass"],
+            },
+            runtime=_runtime(),
+            session_key="test:structured",
+            structured=True,
+        )
+        await _drain_subagent_tasks(sm)
+
+        run_spec = sm.runner.run.await_args.args[0]
+        assert "private bounded context" in run_spec.initial_messages[-1]["content"]
+        assert sm._announce_result.await_args.args[2] == "inspect state"
+        task = SubagentTaskStore(tmp_path).load(spawned["task_id"])
+        assert task is not None and task.task_spec is not None
+        assert task.task_spec.acceptance_criteria == ["tests pass"]
+
+    @pytest.mark.asyncio
+    async def test_duplicate_requires_explicit_terminal_replacement(self, tmp_path):
+        sm = _manager(tmp_path, max_concurrent_subagents=3)
+        release = asyncio.Event()
+
+        async def slow_run(_spec):
+            await release.wait()
+            return AgentRunResult(final_content="done", messages=[], stop_reason="completed")
+
+        sm.runner.run = slow_run
+        first = await sm.spawn(
+            "same task",
+            runtime=_runtime(),
+            session_key="test:duplicate",
+            structured=True,
+        )
+        with pytest.raises(SubagentAdmissionError, match="duplicate") as rejected:
+            await sm.spawn("same task", runtime=_runtime(), session_key="test:duplicate")
+        assert rejected.value.reason == "duplicate_task"
+
+        release.set()
+        await _drain_subagent_tasks(sm)
+        with pytest.raises(SubagentAdmissionError) as terminal_duplicate:
+            await sm.spawn(
+                "same task",
+                runtime=_runtime(),
+                session_key="test:duplicate",
+                structured=True,
+            )
+        assert terminal_duplicate.value.reason == "duplicate_task"
+
+        retried = await sm.spawn(
+            "same task",
+            runtime=_runtime(),
+            session_key="test:duplicate",
+            replaces_task_id=first["task_id"],
+            structured=True,
+        )
+        await _drain_subagent_tasks(sm)
+        assert retried["started"] is True
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("manager_kwargs", "spawn_kwargs", "reason"),
+        [
+            ({"max_children_per_owner_run": 1}, {}, "child_count_limit"),
+            ({"max_children_per_session": 1}, {}, "session_child_count_limit"),
+            ({"max_child_depth": 0}, {"child_depth": 1}, "depth_limit"),
+            ({"max_total_subagent_tokens": 4095}, {}, "token_budget_exhausted"),
+            ({"max_total_subagent_cost_usd": 1}, {}, "cost_reservation_unavailable"),
+        ],
+    )
+    async def test_admission_budget_reasons(
+        self, tmp_path, manager_kwargs, spawn_kwargs, reason
+    ):
+        sm = _manager(tmp_path, **manager_kwargs)
+        sm.runner.run = AsyncMock(return_value=AgentRunResult(
+            final_content="done", messages=[], stop_reason="completed",
+        ))
+        if reason in {"child_count_limit", "session_child_count_limit"}:
+            await sm.spawn("first", runtime=_runtime(), session_key="test:budget")
+            await _drain_subagent_tasks(sm)
+
+        with pytest.raises(SubagentAdmissionError) as rejected:
+            await sm.spawn(
+                "next", runtime=_runtime(), session_key="test:budget", **spawn_kwargs
+            )
+        assert rejected.value.reason == reason
+
+    @pytest.mark.asyncio
+    async def test_terminal_budget_settles_to_observed_usage(self, tmp_path):
+        sm = _manager(tmp_path, max_total_subagent_tokens=5000)
+        sm.runner.run = AsyncMock(return_value=AgentRunResult(
+            final_content="done",
+            messages=[],
+            stop_reason="completed",
+            usage={"prompt_tokens": 12, "completion_tokens": 3, "total_tokens": 15},
+        ))
+
+        spawned = await sm.spawn(
+            "budgeted", runtime=_runtime(), session_key="test:settle", structured=True
+        )
+        await _drain_subagent_tasks(sm)
+
+        task = SubagentTaskStore(tmp_path).load(spawned["task_id"])
+        assert task is not None
+        assert task.budget["reservation_state"] == "settled"
+        assert task.budget["consumed_tokens"] == 15
+
+    @pytest.mark.asyncio
+    async def test_failed_required_registration_releases_reserved_budget(self, tmp_path):
+        goal_store = MagicMock()
+        goal_store.validate_registration = AsyncMock()
+        goal_store.register = AsyncMock(side_effect=OSError("write failed"))
+        sm = _manager(tmp_path, goal_orchestration=goal_store)
+
+        with pytest.raises(OSError, match="write failed"):
+            await sm.spawn(
+                "required",
+                runtime=_runtime(),
+                session_key="test:release",
+                required=True,
+            )
+
+        [task] = SubagentTaskStore(tmp_path).list_tasks()
+        assert task.status == SubagentTaskStatus.FAILED
+        assert task.budget["reservation_state"] == "released"
+        assert task.budget["released_reason"] == "startup_failed"
+
+    @pytest.mark.asyncio
+    async def test_wall_time_budget_uses_termination_pipeline(self, tmp_path):
+        sm = _manager(tmp_path, max_subagent_wall_time_seconds=0.01)
+
+        async def never_finishes(_spec):
+            await asyncio.Event().wait()
+
+        sm.runner.run = never_finishes
+        spawned = await sm.spawn(
+            "bounded", runtime=_runtime(), session_key="test:wall", structured=True
+        )
+        async def terminal_task():
+            while True:
+                task = SubagentTaskStore(tmp_path).load(spawned["task_id"])
+                if task is not None and task.status == SubagentTaskStatus.TIMED_OUT:
+                    return task
+                await asyncio.sleep(0.02)
+
+        task = await asyncio.wait_for(terminal_task(), timeout=2)
+        assert task.status == SubagentTaskStatus.TIMED_OUT
+        assert task.termination.evidence is not None
+        assert task.termination.evidence["exit_observed"] is True
+        await sm.close()
+
+    @pytest.mark.asyncio
     async def test_inherits_trace_and_creates_child_run(self, tmp_path):
         sm = _manager(tmp_path)
         sm.runner.run = AsyncMock(return_value=AgentRunResult(
@@ -447,6 +617,112 @@ class TestSpawn:
 
         release.set()
         await _drain_subagent_tasks(sm)
+
+    @pytest.mark.asyncio
+    async def test_background_task_is_durable_through_success(self, tmp_path):
+        sm = _manager(tmp_path)
+        sm.runner.run = AsyncMock(return_value=AgentRunResult(
+            final_content="done",
+            messages=[],
+            stop_reason="completed",
+            usage={"prompt_tokens": 12, "completion_tokens": 3},
+        ))
+
+        spawned = await sm.spawn(
+            "durable background",
+            runtime=_runtime(),
+            session_key="test:background",
+            structured=True,
+        )
+        await _drain_subagent_tasks(sm)
+
+        task = SubagentTaskStore(tmp_path).load(spawned["task_id"])
+        assert task is not None
+        assert task.required is False
+        assert task.owner_session_key == "test:background"
+        assert task.status == SubagentTaskStatus.SUCCEEDED
+        assert task.usage == {"prompt_tokens": 12, "completion_tokens": 3}
+        assert task.delivery.phase == SubagentDeliveryPhase.READY
+
+        assert await sm.claim_result(spawned["task_id"], "continuation-run") is True
+        assert await sm.claim_result(spawned["task_id"], "continuation-run") is False
+        assert await sm.mark_result_delivered(spawned["task_id"]) is True
+        delivered = SubagentTaskStore(tmp_path).load(spawned["task_id"])
+        assert delivered is not None
+        assert delivered.delivery.phase == SubagentDeliveryPhase.DELIVERED
+        assert delivered.delivery.claim_owner_run_id == "continuation-run"
+
+    @pytest.mark.asyncio
+    async def test_required_task_uses_task_store_without_replacing_goal_barrier(self, tmp_path):
+        sessions = SessionManager(tmp_path)
+        session = sessions.get_or_create("test:goal")
+        session.metadata[GOAL_STATE_KEY] = {"status": "active", "objective": "deliver"}
+        sessions.save(session)
+        goal_store = GoalOrchestrationStore(sessions)
+        sm = _manager(tmp_path, goal_orchestration=goal_store)
+        sm.runner.run = AsyncMock(return_value=AgentRunResult(
+            final_content="done", messages=[], stop_reason="completed",
+        ))
+
+        spawned = await sm.spawn(
+            "required durable",
+            runtime=_runtime(),
+            session_key="test:goal",
+            required=True,
+            task_group="research",
+            structured=True,
+        )
+        await _drain_subagent_tasks(sm)
+
+        task = SubagentTaskStore(tmp_path).load(spawned["task_id"])
+        goal = sessions.get_or_create("test:goal").metadata[GOAL_STATE_KEY]
+        obligation = goal["orchestration"]["tasks"][spawned["task_id"]]
+        assert task is not None
+        assert task.required is True
+        assert task.task_group == "research"
+        assert task.status == SubagentTaskStatus.SUCCEEDED
+        assert obligation["status"] == "succeeded"
+        assert obligation["group"] == "research"
+
+    @pytest.mark.asyncio
+    async def test_goal_mirror_retry_does_not_downgrade_durable_success(self, tmp_path):
+        sessions = SessionManager(tmp_path)
+        session = sessions.get_or_create("test:goal")
+        session.metadata[GOAL_STATE_KEY] = {"status": "active", "objective": "deliver"}
+        sessions.save(session)
+        goal_store = GoalOrchestrationStore(sessions)
+        original_finish = goal_store.finish
+        attempts = 0
+
+        async def flaky_finish(*args, **kwargs):
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                raise OSError("temporary goal persistence failure")
+            return await original_finish(*args, **kwargs)
+
+        goal_store.finish = AsyncMock(side_effect=flaky_finish)
+        sm = _manager(tmp_path, goal_orchestration=goal_store)
+        sm.runner.run = AsyncMock(return_value=AgentRunResult(
+            final_content="done", messages=[], stop_reason="completed",
+        ))
+
+        spawned = await sm.spawn(
+            "required durable",
+            runtime=_runtime(),
+            session_key="test:goal",
+            required=True,
+            structured=True,
+        )
+        await _drain_subagent_tasks(sm)
+
+        task = SubagentTaskStore(tmp_path).load(spawned["task_id"])
+        obligation = sessions.get_or_create("test:goal").metadata[GOAL_STATE_KEY][
+            "orchestration"
+        ]["tasks"][spawned["task_id"]]
+        assert attempts == 2
+        assert task is not None and task.status == SubagentTaskStatus.SUCCEEDED
+        assert obligation["status"] == "succeeded"
 
 
 # ---------------------------------------------------------------------------

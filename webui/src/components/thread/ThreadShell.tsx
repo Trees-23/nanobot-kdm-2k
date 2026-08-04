@@ -372,6 +372,7 @@ export function ThreadShell({
     isStreaming,
     runStartedAt,
     goalState,
+    subagentTasks,
     send,
     transcribeAudio,
     stop,
@@ -797,6 +798,7 @@ export function ThreadShell({
           onTranscribeAudio={transcribeAudio}
           runStartedAt={runStartedAt}
           goalState={goalState}
+          subagentTasks={subagentTasks}
           workspaceScope={workspaceScope}
           workspaceDefaultScope={workspaceDefaultScope}
           workspaceControls={workspaceControls}
@@ -830,6 +832,7 @@ export function ThreadShell({
           runStartedAt={runStartedAt}
           onTranscribeAudio={transcribeAudio}
           goalState={goalState}
+          subagentTasks={subagentTasks}
           workspaceScope={workspaceScope}
           workspaceDefaultScope={workspaceDefaultScope}
           workspaceControls={workspaceControls}

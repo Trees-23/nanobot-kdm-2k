@@ -62,6 +62,7 @@ function fakeClient() {
       newChat: vi.fn(),
       forkChat: vi.fn(),
       attach: vi.fn(),
+      requestSubagentSnapshot: vi.fn(),
       connect: vi.fn(),
       close: vi.fn(),
       updateUrl: vi.fn(),
@@ -2103,6 +2104,95 @@ describe("useNanobotStream", () => {
       });
     });
     expect(result.current.goalState).toEqual({ active: false });
+  });
+
+  it("applies subagent snapshots and contiguous revisions exactly once", () => {
+    const fake = fakeClient();
+    const { result } = renderHook(() => useNanobotStream("chat-sub", EMPTY_MESSAGES), {
+      wrapper: wrap(fake.client),
+    });
+    const task = {
+      schema_version: 1,
+      revision: 2,
+      task_id: "task-a",
+      owner_run_id: "owner-a",
+      child_run_id: "child-a",
+      label: "Research",
+      required: true,
+      task_group: "default",
+      status: "queued",
+      phase: "initializing",
+      termination_state: "none",
+      delivery_phase: "not_ready",
+      usage: { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0, cost_usd: null },
+      budget: { max_tokens: 100, reservation_state: "reserved" },
+      created_at: "2026-08-03T00:00:00Z",
+      started_at: null,
+      finished_at: null,
+      error: null,
+      legacy_inferred: false,
+    };
+
+    act(() => {
+      fake.emit("chat-sub", {
+        event: "subagent_snapshot",
+        chat_id: "chat-sub",
+        snapshot: { schema_version: 1, tasks: [task], max_revision: 2 },
+      });
+      fake.emit("chat-sub", {
+        event: "subagent_status_changed",
+        chat_id: "chat-sub",
+        task: { ...task, revision: 3, status: "running" },
+      });
+      fake.emit("chat-sub", {
+        event: "subagent_status_changed",
+        chat_id: "chat-sub",
+        task: { ...task, revision: 3, status: "running" },
+      });
+    });
+
+    expect(result.current.subagentTasks).toHaveLength(1);
+    expect(result.current.subagentTasks[0]).toMatchObject({ revision: 3, status: "running" });
+    expect(fake.client.requestSubagentSnapshot).not.toHaveBeenCalled();
+  });
+
+  it("requests authoritative rehydration on a subagent revision gap", () => {
+    const fake = fakeClient();
+    const { result } = renderHook(() => useNanobotStream("chat-gap", EMPTY_MESSAGES), {
+      wrapper: wrap(fake.client),
+    });
+    const task = {
+      schema_version: 1,
+      revision: 2,
+      task_id: "task-a",
+      label: "Research",
+      required: false,
+      task_group: "default",
+      status: "queued",
+      phase: "initializing",
+      termination_state: "none",
+      delivery_phase: "not_ready",
+      usage: { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0, cost_usd: null },
+      budget: {},
+      created_at: "2026-08-03T00:00:00Z",
+      legacy_inferred: false,
+    };
+
+    act(() => {
+      fake.emit("chat-gap", {
+        event: "subagent_snapshot",
+        chat_id: "chat-gap",
+        snapshot: { schema_version: 1, tasks: [task], max_revision: 2 },
+      });
+      fake.emit("chat-gap", {
+        event: "subagent_status_changed",
+        chat_id: "chat-gap",
+        task: { ...task, revision: 5, status: "succeeded" },
+      });
+    });
+
+    expect(fake.client.requestSubagentSnapshot).toHaveBeenCalledWith("chat-gap");
+    expect(result.current.subagentTasks[0].revision).toBe(2);
   });
 
 });

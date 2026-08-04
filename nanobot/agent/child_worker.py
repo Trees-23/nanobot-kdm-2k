@@ -151,6 +151,7 @@ async def _run_child(payload: dict[str, Any], protocol: WorkerProtocol) -> Agent
     audit_runtime = AuditRuntime.from_config(config.audit, root=audit_root)
     await audit_runtime.ensure_started()
     request_metadata: dict[str, Any] = {}
+    request_metadata["subagent_depth"] = int(payload.get("child_depth") or 0)
     if audit_context is not None:
         request_metadata[AUDIT_CONTEXT_META] = {
             "trace_id": audit_context.trace_id,

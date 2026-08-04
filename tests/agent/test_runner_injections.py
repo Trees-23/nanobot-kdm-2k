@@ -38,6 +38,10 @@ def _make_loop(tmp_path):
          patch("nanobot.agent.loop.SubagentManager") as mock_sub_mgr:
         mock_sub_mgr.return_value.cancel_by_session = AsyncMock(return_value=0)
         mock_sub_mgr.return_value.close = AsyncMock()
+        mock_sub_mgr.return_value.recover_runtime = AsyncMock(return_value=0)
+        mock_sub_mgr.return_value.claim_result = AsyncMock(return_value=None)
+        mock_sub_mgr.return_value.mark_result_delivered = AsyncMock(return_value=False)
+        mock_sub_mgr.return_value.mark_result_delivery_failed = AsyncMock(return_value=False)
         loop = AgentLoop(bus=bus, provider=provider, workspace=tmp_path)
     return loop
 

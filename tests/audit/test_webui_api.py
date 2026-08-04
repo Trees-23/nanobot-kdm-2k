@@ -111,11 +111,11 @@ def _request(path: str, *, token: bool = True, etag: str | None = None) -> Reque
     return Request(path, headers)
 
 
-def _router(tmp_path):
+def _router(tmp_path, *, audit_mode="full"):
     return WebUIAuditRouter(
         read_service=_ReadService(),
         audit_root=tmp_path,
-        audit_mode="full",
+        audit_mode=audit_mode,
         check_api_token=lambda request: request.headers.get("Authorization") == "Bearer valid",
         logger=None,
         resolve_session_title=lambda key: "真实会话标题" if key == "websocket:chat-1" else None,
@@ -145,6 +145,23 @@ async def test_session_list_uses_complete_backend_aggregate_and_title_resolver(t
     body = json.loads(response.body)
     assert body["items"][0]["title"] == "真实会话标题"
     assert body["items"][0]["trace_count"] == 1
+
+
+async def test_audit_capture_mode_is_additive_on_index_responses(tmp_path) -> None:
+    router = _router(tmp_path, audit_mode="metadata_only")
+    paths = (
+        "/api/audit/traces",
+        "/api/audit/sessions",
+        "/api/audit/traces/trace-1/graph?level=trace_full",
+        "/api/audit/traces/trace-1/events",
+    )
+
+    for path in paths:
+        response = await router.dispatch(_request(path), path.split("?")[0])
+        assert response is not None and response.status_code == 200
+        body = json.loads(response.body)
+        assert body["index"]["audit_mode"] == "metadata_only"
+        assert "content" not in body
 
 
 async def test_graph_has_strong_etag_and_no_payload_content(tmp_path) -> None:

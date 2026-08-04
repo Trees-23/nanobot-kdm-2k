@@ -198,6 +198,49 @@ export interface GoalStateWsPayload {
   objective?: string;
 }
 
+export interface SubagentUsagePayload {
+  prompt_tokens: number;
+  completion_tokens: number;
+  total_tokens: number;
+  cost_usd?: number | null;
+}
+
+export interface SubagentBudgetPayload {
+  max_tokens?: number | null;
+  max_cost_usd?: number | null;
+  wall_time_seconds?: number | null;
+  deadline_at?: string | null;
+  reservation_state?: "reserved" | "released" | "settled" | string | null;
+}
+
+export interface SubagentTaskPayload {
+  schema_version: number;
+  revision: number;
+  task_id: string;
+  owner_run_id?: string | null;
+  child_run_id?: string | null;
+  label: string;
+  required: boolean;
+  task_group: string;
+  status: string;
+  phase: string;
+  termination_state: string;
+  delivery_phase: string;
+  usage: SubagentUsagePayload;
+  budget: SubagentBudgetPayload;
+  created_at: string;
+  started_at?: string | null;
+  finished_at?: string | null;
+  error?: string | null;
+  legacy_inferred: boolean;
+}
+
+export interface SubagentSnapshotPayload {
+  schema_version: number;
+  tasks: SubagentTaskPayload[];
+  max_revision: number;
+}
+
 export interface ToolProgressEvent {
   version?: number;
   phase?: "start" | "end" | "error" | string;
@@ -1087,6 +1130,16 @@ export type InboundEvent =
       scope?: "metadata" | "thread" | string;
       workspace_scope?: WorkspaceScopePayload;
     }
+  | {
+      event: "subagent_snapshot";
+      chat_id: string;
+      snapshot: SubagentSnapshotPayload;
+    }
+  | {
+      event: "subagent_status_changed";
+      chat_id: string;
+      task: SubagentTaskPayload;
+    }
   | { event: "transcription_result"; request_id: string; text: string }
   | {
       event: "transcription_error";
@@ -1162,6 +1215,7 @@ export type Outbound =
   | { type: "new_chat"; workspace_scope?: WorkspaceScopePayload }
   | { type: "fork_chat"; source_chat_id: string; before_user_index: number; title?: string }
   | { type: "attach"; chat_id: string }
+  | { type: "subagent_rehydrate"; chat_id: string }
   | { type: "set_workspace_scope"; chat_id: string; workspace_scope: WorkspaceScopePayload }
   | { type: "transcribe_audio"; request_id: string; data_url: string; duration_ms?: number }
   | {

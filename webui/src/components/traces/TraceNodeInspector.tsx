@@ -6,6 +6,7 @@ import {
   Link2,
   LocateFixed,
   Route,
+  Send,
   Timer,
   X,
 } from "lucide-react";
@@ -14,7 +15,7 @@ import { Button } from "@/components/ui/button";
 import type { AuditGraphNode, AuditNodeEventRef, TraceEdgeType } from "@/lib/audit-types";
 import { auditStatusLabel, auditValueLabel } from "@/lib/audit-display";
 
-export type TraceFocusMode = "causal" | "context" | "branch" | "resume" | null;
+export type TraceFocusMode = "causal" | "context" | "branch" | "result" | "recovery" | null;
 
 export function TraceNodeInspector({
   node,
@@ -39,7 +40,8 @@ export function TraceNodeInspector({
     { mode: "causal", label: "因果链", icon: Link2 },
     { mode: "context", label: "执行上下文", icon: Activity },
     { mode: "branch", label: "结构分支", icon: GitBranch },
-    { mode: "resume", label: "恢复链路", icon: Route },
+    { mode: "result", label: "结果回传", icon: Send },
+    { mode: "recovery", label: "恢复关系", icon: Route },
   ];
   const suppressionReason = node.type === "delivery"
     && node.summary.delivery_result === "suppressed"
@@ -52,6 +54,19 @@ export function TraceNodeInspector({
     ["耗时", node.elapsed_ms == null ? null : `${node.elapsed_ms} ms`],
   ];
   const rowsByType: Partial<Record<AuditGraphNode["type"], Array<[string, unknown]>>> = {
+    task: [
+      ["Task ID", node.summary.task_id],
+      ["状态", node.summary.task_status ? auditValueLabel(node.summary.task_status) : null],
+      ["执行阶段", node.summary.task_phase ? auditValueLabel(node.summary.task_phase) : null],
+      ["终止状态", node.summary.termination_state ? auditValueLabel(node.summary.termination_state) : null],
+      ["交付阶段", node.summary.delivery_phase ? auditValueLabel(node.summary.delivery_phase) : null],
+      ["Required", node.summary.required_task],
+      ["Revision", node.summary.task_revision],
+      ["生命周期事件", node.summary.lifecycle_event_count],
+      ["Owner Run", node.summary.owner_run_id],
+      ["Child Run", node.summary.child_run_id],
+      ["替换 Task", node.summary.replaces_task_id],
+    ],
     tool_call: [
       ["Tool", node.summary.tool_name],
       ["安全输入", node.summary.safe_input_summary],

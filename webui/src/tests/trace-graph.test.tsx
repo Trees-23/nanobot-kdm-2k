@@ -1,4 +1,4 @@
-import { fireEvent, render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { edgeHandles, TraceGraph } from "@/components/traces/TraceGraph";
@@ -91,6 +91,116 @@ describe("TraceGraph", () => {
     fireEvent.keyDown(node.closest(".react-flow__node")!, { key: "Enter" });
     expect(onSelectNode).toHaveBeenLastCalledWith("run:1");
     expect(screen.queryByRole("button", { name: "下钻运行" })).not.toBeInTheDocument();
+  });
+
+  it("keeps geometry and viewport transform stable when selection changes", async () => {
+    const graph = graphFixture();
+    const { container, rerender } = render(
+      <div style={{ width: 900, height: 700 }}>
+        <TraceGraph graph={graph} selectedNodeId={null} focusMode={null} onSelectNode={vi.fn()} onFocusMode={vi.fn()} />
+      </div>,
+    );
+    await screen.findByLabelText(/run 失败 Main run 2\.0s/i);
+    const viewport = container.querySelector<HTMLElement>(".react-flow__viewport")!;
+    await waitFor(() => expect(viewport.style.transform).not.toBe(""));
+    const transformBefore = viewport.style.transform;
+    const geometryBefore = screen.getByTestId("trace-graph").dataset.geometryKey;
+
+    rerender(
+      <div style={{ width: 900, height: 700 }}>
+        <TraceGraph
+          graph={structuredClone(graph)}
+          selectedNodeId="run:1"
+          focusMode={null}
+          onSelectNode={vi.fn()}
+          onFocusMode={vi.fn()}
+        />
+      </div>,
+    );
+
+    expect(screen.getByTestId("trace-graph").dataset.geometryKey).toBe(geometryBefore);
+    expect(container.querySelector<HTMLElement>(".react-flow__viewport")!.style.transform).toBe(transformBefore);
+  });
+
+  it("collapses backend-declared successful chains by default and allows expansion", async () => {
+    const graph = graphFixture();
+    const operations = [1, 2, 3].map((order) => ({
+      ...graph.nodes[0],
+      id: `tool:${order}`,
+      type: "tool_call" as const,
+      status: "succeeded" as const,
+      label: `Operation ${order}`,
+      region_id: "turn:1",
+      raw_event_ids: [`event-${order}`],
+      summary: { kind: "tool_call" as const, tool_name: `operation_${order}` },
+      order,
+    }));
+    graph.nodes.push(...operations);
+    graph.regions[0].member_node_ids.push(...operations.map((node) => node.id));
+    graph.edges.push(
+      { id: "sequence-1", type: "sequence", source: operations[0].id, target: operations[1].id },
+      { id: "sequence-2", type: "sequence", source: operations[1].id, target: operations[2].id },
+    );
+    graph.collapse_groups.push({
+      id: "success-chain",
+      member_node_ids: operations.map((node) => node.id),
+      status: "succeeded",
+      label: "3 successful operations",
+      elapsed_ms: 30,
+    });
+
+    render(
+      <div style={{ width: 900, height: 700 }}>
+        <TraceGraph graph={graph} selectedNodeId={null} focusMode={null} onSelectNode={vi.fn()} onFocusMode={vi.fn()} />
+      </div>,
+    );
+
+    const expand = await screen.findByRole("button", { name: "展开 3 successful operations" });
+    expect(screen.queryByText("Operation 1")).not.toBeInTheDocument();
+    fireEvent.click(expand);
+    expect(await screen.findByText("Operation 1")).toBeInTheDocument();
+  });
+
+  it("names the model attempt control for its next action", async () => {
+    const graph = graphFixture();
+    const model = {
+      ...graph.nodes[0],
+      id: "model:1",
+      type: "model_call" as const,
+      status: "succeeded" as const,
+      label: "Model call",
+      expandable: true,
+      summary: { kind: "model_call" as const, provider: "openai", model: "gpt-test" },
+      order: 1,
+    };
+    const attempt = {
+      ...model,
+      id: "attempt:1",
+      type: "model_attempt" as const,
+      label: "Attempt 1",
+      expandable: false,
+      summary: { kind: "model_attempt" as const, provider: "openai", model: "gpt-test" },
+      order: 2,
+    };
+    graph.nodes.push(model, attempt);
+    graph.regions[0].member_node_ids.push(model.id, attempt.id);
+    graph.expansion_groups.push({
+      id: "attempts:model:1",
+      owner_node_id: model.id,
+      member_node_ids: [attempt.id],
+      default_expanded: false,
+    });
+
+    render(
+      <div style={{ width: 900, height: 700 }}>
+        <TraceGraph graph={graph} selectedNodeId={null} focusMode={null} onSelectNode={vi.fn()} onFocusMode={vi.fn()} />
+      </div>,
+    );
+
+    fireEvent.click(await screen.findByRole("button", { name: "展开模型尝试" }));
+    expect(await screen.findByRole("button", { name: "收起模型尝试" })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "收起模型尝试" }));
+    expect(await screen.findByRole("button", { name: "展开模型尝试" })).toBeInTheDocument();
   });
 
   it("locates the backend-declared first anomaly", async () => {
@@ -229,35 +339,38 @@ describe("TraceGraph", () => {
     });
     const { rerender } = render(
       <div style={{ width: 900, height: 700 }}>
-        <TraceGraph graph={graph} selectedNodeId="run:1" focusMode="resume" onSelectNode={vi.fn()} onFocusMode={vi.fn()} />
+        <TraceGraph graph={graph} selectedNodeId="run:1" focusMode="recovery" onSelectNode={vi.fn()} onFocusMode={vi.fn()} />
       </div>,
     );
 
-    expect(await screen.findByText("恢复链路：2 个节点 / 3 条边")).toBeInTheDocument();
+    expect(await screen.findByText("恢复关系：2 个节点 / 1 条边")).toBeInTheDocument();
     const recovery = graph.edges.find((edge) => edge.id === "tool_recovery:failed:recovered")!;
     const sequence = graph.edges.find((edge) => edge.id === "sequence:failed:recovered")!;
-    expect(edgeHandles(recovery, graph)).toEqual({ sourceHandle: "right-source", targetHandle: "right-target" });
+    expect(edgeHandles(recovery, graph)).toEqual({ sourceHandle: "right-recovery-source", targetHandle: "left-recovery-target" });
     expect(edgeHandles(graph.edges.find((edge) => edge.id === "tool_retry:failed:recovered")!, graph)).toEqual({
-      sourceHandle: "right-source",
-      targetHandle: "right-target",
+      sourceHandle: "right-recovery-source",
+      targetHandle: "left-recovery-target",
     });
     expect(edgeHandles(graph.edges.find((edge) => edge.id === "tool_continuation:failed:recovered")!, graph)).toEqual({
-      sourceHandle: "right-source",
-      targetHandle: "right-target",
+      sourceHandle: "bottom-structure-source",
+      targetHandle: "top-structure-target",
     });
-    expect(edgeHandles(sequence, graph)).toEqual({ sourceHandle: "bottom-source", targetHandle: "top-target" });
-    const routeMetadata = JSON.parse(screen.getByTestId("trace-graph").dataset.toolRoutes ?? "[]") as Array<{
+    expect(edgeHandles(sequence, graph)).toEqual({ sourceHandle: "bottom-sequence-source", targetHandle: "top-sequence-target" });
+    const routeMetadata = JSON.parse(screen.getByTestId("trace-graph").dataset.relationRoutes ?? "[]") as Array<{
       edgeId: string;
-      slot: number;
-      railX: number;
+      bends: number;
+      routeLength: number;
+      detourRatio: number;
     }>;
     expect(routeMetadata.map((route) => route.edgeId).sort()).toEqual([
+      "sequence:failed:recovered",
       "tool_continuation:failed:recovered",
       "tool_recovery:failed:recovered",
       "tool_retry:failed:recovered",
     ]);
-    expect(new Set(routeMetadata.map((route) => route.slot)).size).toBe(3);
-    expect(routeMetadata.every((route) => Number.isFinite(route.railX))).toBe(true);
+    expect(routeMetadata.every((route) => route.bends >= 0)).toBe(true);
+    expect(routeMetadata.every((route) => route.routeLength > 0)).toBe(true);
+    expect(routeMetadata.every((route) => route.detourRatio >= 1)).toBe(true);
     rerender(
       <div style={{ width: 900, height: 700 }}>
         <TraceGraph graph={graph} selectedNodeId="run:1" focusMode="causal" onSelectNode={vi.fn()} onFocusMode={vi.fn()} />
@@ -269,10 +382,95 @@ describe("TraceGraph", () => {
   it("shows an explicit empty state for recovery focus", async () => {
     render(
       <div style={{ width: 900, height: 700 }}>
-        <TraceGraph graph={graphFixture()} selectedNodeId="run:1" focusMode="resume" onSelectNode={vi.fn()} onFocusMode={vi.fn()} />
+        <TraceGraph graph={graphFixture()} selectedNodeId="run:1" focusMode="recovery" onSelectNode={vi.fn()} onFocusMode={vi.fn()} />
       </div>,
     );
 
-    expect(await screen.findByText("恢复链路：0 个节点 / 0 条边")).toBeInTheDocument();
+    expect(await screen.findByText("恢复关系：0 个节点 / 0 条边")).toBeInTheDocument();
+  });
+
+  it("focuses result return without classifying it as recovery", async () => {
+    const graph = graphFixture();
+    graph.nodes.push({ ...graph.nodes[0], id: "run:continuation", label: "Continuation", order: 1 });
+    graph.edges.push({ id: "result", type: "result_return", source: "run:1", target: "run:continuation" });
+
+    render(
+      <div style={{ width: 900, height: 700 }}>
+        <TraceGraph graph={graph} selectedNodeId="run:1" focusMode="result" onSelectNode={vi.fn()} onFocusMode={vi.fn()} />
+      </div>,
+    );
+
+    expect(await screen.findByText("结果回传：2 个节点 / 1 条边")).toBeInTheDocument();
+  });
+
+  it("keeps secondary relations out of the default structure and reveals one from the relation list", async () => {
+    const graph = graphFixture();
+    const onSelectEdge = vi.fn();
+    graph.nodes.push({ ...graph.nodes[0], id: "task:1", type: "task", label: "Inspect metadata", order: 1 });
+    graph.nodes.push({ ...graph.nodes[0], id: "run:child", label: "Child run", order: 2, lane_order: 1, lane_side: "right" });
+    graph.edges.push(
+      { id: "spawn", type: "spawn_branch", source: "run:1", target: "task:1" },
+      { id: "execution", type: "task_execution", source: "task:1", target: "run:child" },
+      { id: "result", type: "result_return", source: "run:child", target: "run:1" },
+    );
+    graph.regions[0].member_node_ids.push("task:1", "run:child");
+
+    render(
+      <div style={{ width: 900, height: 700 }}>
+        <TraceGraph graph={graph} selectedNodeId={null} focusMode={null} onSelectNode={vi.fn()} onFocusMode={vi.fn()} onSelectEdge={onSelectEdge} />
+      </div>,
+    );
+
+    await screen.findByText("Inspect metadata");
+    expect(screen.getByTestId("trace-graph").dataset.relationRoutes).toContain("spawn");
+    expect(screen.getByTestId("trace-graph").dataset.relationRoutes).not.toContain('"result"');
+    fireEvent.click(screen.getByRole("button", { name: "结果回传" }));
+    await waitFor(() => expect(screen.getByTestId("trace-graph").dataset.relationRoutes).toContain('"result"'));
+    expect(onSelectEdge).toHaveBeenCalledWith(expect.objectContaining({ id: "result" }));
+  });
+
+  it("shows every result return by default for a multi-agent trace", async () => {
+    const graph = graphFixture();
+    const resultSources = ["task:1", "task:2", "task:3"];
+    const resultTargets = ["decision:1", "decision:2", "decision:3"];
+    graph.nodes.push(
+      ...resultSources.map((id, index) => ({
+        ...graph.nodes[0],
+        id,
+        type: "task" as const,
+        label: `Child task ${index + 1}`,
+        order: index + 1,
+      })),
+      ...resultTargets.map((id, index) => ({
+        ...graph.nodes[0],
+        id,
+        type: "checkpoint" as const,
+        label: `Result checkpoint ${index + 1}`,
+        order: index + 4,
+      })),
+    );
+    graph.regions[0].member_node_ids.push(...resultSources, ...resultTargets);
+    graph.edges.push(
+      ...resultSources.map((source, index) => ({
+        id: `result-${index + 1}`,
+        type: "result_return" as const,
+        source,
+        target: resultTargets[index],
+      })),
+    );
+
+    render(
+      <div style={{ width: 900, height: 700 }}>
+        <TraceGraph graph={graph} selectedNodeId={null} focusMode={null} onSelectNode={vi.fn()} onFocusMode={vi.fn()} />
+      </div>,
+    );
+
+    await screen.findByText("Child task 1");
+    await waitFor(() => {
+      const routes = screen.getByTestId("trace-graph").dataset.relationRoutes ?? "";
+      expect(routes).toContain('"result-1"');
+      expect(routes).toContain('"result-2"');
+      expect(routes).toContain('"result-3"');
+    });
   });
 });

@@ -265,8 +265,49 @@ async def test_required_spawn_without_active_goal_is_error_and_starts_nothing(tm
 
     assert isinstance(result, ToolResult) and result.is_error
     assert "active goal" in result
+    payload = json.loads(str(result).removeprefix("Error: "))
+    assert payload["reason"] == "no_active_goal"
     assert manager.get_running_count() == 0
     assert manager._task_statuses == {}
+    assert manager._task_store.list_tasks() == []
+
+
+@pytest.mark.asyncio
+async def test_invalid_required_replacement_is_rejected_before_task_creation(tmp_path):
+    from nanobot.agent.subagent import SubagentManager
+
+    sm = SessionManager(tmp_path)
+    _active(sm)
+    store = GoalOrchestrationStore(sm)
+    manager = SubagentManager(
+        workspace=tmp_path,
+        bus=MessageBus(),
+        max_tool_result_chars=AgentDefaults().max_tool_result_chars,
+        goal_orchestration=store,
+    )
+    tool = SpawnTool(manager)
+    with request_context(
+        RequestContext(
+            channel="test", chat_id="c1", session_key="test:c1", runtime=_runtime()
+        )
+    ):
+        result = await tool.execute(
+            task="replacement work",
+            required=True,
+            replaces_task_id="missing",
+        )
+
+    payload = json.loads(str(result).removeprefix("Error: "))
+    assert payload["reason"] == "required_registration_invalid"
+    assert manager._task_store.list_tasks() == []
+
+
+def test_spawn_description_separates_background_delivery_from_goal_barrier():
+    manager = MagicMock()
+    tool = SpawnTool(manager)
+
+    assert "never call await_subagents for required=false" in tool.description
+    assert "results are delivered asynchronously" in tool.description
 
 
 @pytest.mark.asyncio

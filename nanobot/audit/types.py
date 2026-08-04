@@ -57,6 +57,20 @@ class EventType(StrEnum):
     GOAL_COMPLETED = "goal_completed"
     GOAL_BLOCKED = "goal_blocked"
     GOAL_CANCELLED = "goal_cancelled"
+    SUBAGENT_CREATED = "subagent_created"
+    SUBAGENT_ADMITTED = "subagent_admitted"
+    SUBAGENT_PHASE_CHANGED = "subagent_phase_changed"
+    SUBAGENT_USAGE_UPDATED = "subagent_usage_updated"
+    SUBAGENT_BUDGET_UPDATED = "subagent_budget_updated"
+    SUBAGENT_CANCEL_REQUESTED = "subagent_cancel_requested"
+    SUBAGENT_TERMINATION_DECIDED = "subagent_termination_decided"
+    SUBAGENT_RESULT_READY = "subagent_result_ready"
+    SUBAGENT_RESULT_CLAIMED = "subagent_result_claimed"
+    SUBAGENT_RESULT_DELIVERED = "subagent_result_delivered"
+    SUBAGENT_DELIVERY_FAILED = "subagent_delivery_failed"
+    SUBAGENT_TERMINAL = "subagent_terminal"
+    SUBAGENT_RECOVERED = "subagent_recovered"
+    SUBAGENT_LOST = "subagent_lost"
 
 
 class PayloadKind(StrEnum):

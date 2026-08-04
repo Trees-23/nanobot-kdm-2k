@@ -376,7 +376,12 @@ export class NanobotClient {
     this.knownChats.add(chatId);
     if (this.socket?.readyState === WS_OPEN) {
       this.queueSend({ type: "attach", chat_id: chatId });
+      this.requestSubagentSnapshot(chatId);
     }
+  }
+
+  requestSubagentSnapshot(chatId: string): void {
+    this.queueSend({ type: "subagent_rehydrate", chat_id: chatId });
   }
 
   sendMessage(
@@ -435,6 +440,7 @@ export class NanobotClient {
     // Re-attach every known chat_id so deliveries continue routing after a drop.
     for (const chatId of this.knownChats) {
       this.rawSend({ type: "attach", chat_id: chatId });
+      this.rawSend({ type: "subagent_rehydrate", chat_id: chatId });
     }
     // Flush anything queued during reconnect.
     const queued = this.sendQueue.splice(0);

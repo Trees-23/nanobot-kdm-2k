@@ -342,6 +342,13 @@ async def test_subagent_worker_rehydrates_runtime_and_returns_result(tmp_path) -
         status = manager.get_status(spawned["task_id"])
         assert status is not None
         assert status.terminal_status == "succeeded"
+        durable = manager._task_store.load(spawned["task_id"])
+        assert durable is not None
+        assert str(durable.phase) == "final_response"
+        assert any(
+            event.summary.get("task_phase") == "final_response"
+            for event in durable.lifecycle_outbox
+        )
         assert manager._executor_handles == {}
     finally:
         await manager.close()

@@ -140,6 +140,7 @@ class TurnAuditRecorder:
         *,
         run: AuditRunContext,
         injection_source: str,
+        subagent_task_id: str | None = None,
     ) -> None:
         if self.disabled:
             return
@@ -148,6 +149,7 @@ class TurnAuditRecorder:
                 **self.common("input_injected", run=run),
                 "injection_source": injection_source,
                 "target_run_id": run.run_id,
+                "subagent_task_id": subagent_task_id,
             }
         )
         await self.emitter.emit(event)

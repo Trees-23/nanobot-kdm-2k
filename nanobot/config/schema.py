@@ -132,6 +132,12 @@ class AgentDefaults(Base):
     fallback_models: list[FallbackCandidate] = Field(default_factory=list)
     max_tool_iterations: int = 200
     max_concurrent_subagents: int = Field(default=1, ge=1)
+    max_children_per_owner_run: int = Field(default=16, ge=1)
+    max_children_per_session: int = Field(default=64, ge=1)
+    max_child_depth: int = Field(default=1, ge=0)
+    max_total_subagent_tokens: int = Field(default=0, ge=0)
+    max_total_subagent_cost_usd: float = Field(default=0, ge=0)
+    max_subagent_wall_time_seconds: float = Field(default=0, ge=0)
     subagent_executor_backend: Literal["auto", "process", "asyncio"] = "auto"
     fail_on_tool_error: bool = True
     max_tool_result_chars: int = 16_000

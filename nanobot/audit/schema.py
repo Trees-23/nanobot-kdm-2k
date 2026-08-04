@@ -123,6 +123,7 @@ _EVENT_SPECS: dict[EventType, tuple[str, dict[str, tuple[Any, Any]]]] = {
     EventType.TURN_STARTED: ("TU", {}),
     EventType.INPUT_INJECTED: ("TUR", {
         "injection_source": _required(str), "target_run_id": _required(str),
+        "subagent_task_id": _optional(str),
     }),
     EventType.CANCEL_REQUESTED: ("TU", {
         "requested_by": _required(str), "target_run_ids": _required(list[str]),
@@ -249,6 +250,36 @@ _EVENT_SPECS: dict[EventType, tuple[str, dict[str, tuple[Any, Any]]]] = {
     }),
     EventType.GOAL_CANCELLED: ("TUG", {"actor_type": _required(str), "goal_version": _required(int)}),
 }
+
+_SUBAGENT_EVENT_FIELDS = {
+    "subagent_task_id": _required(str),
+    "task_label": _optional(str),
+    "task_revision": _required(int),
+    "idempotency_key": _required(str),
+    "task_status": _required(str),
+    "task_phase": _required(str),
+    "termination_state": _required(str),
+    "delivery_phase": _required(str),
+    "required_task": _required(bool),
+    "legacy_inferred": _required(bool),
+}
+for _subagent_event_type in (
+    EventType.SUBAGENT_CREATED,
+    EventType.SUBAGENT_ADMITTED,
+    EventType.SUBAGENT_PHASE_CHANGED,
+    EventType.SUBAGENT_USAGE_UPDATED,
+    EventType.SUBAGENT_BUDGET_UPDATED,
+    EventType.SUBAGENT_CANCEL_REQUESTED,
+    EventType.SUBAGENT_TERMINATION_DECIDED,
+    EventType.SUBAGENT_RESULT_READY,
+    EventType.SUBAGENT_RESULT_CLAIMED,
+    EventType.SUBAGENT_RESULT_DELIVERED,
+    EventType.SUBAGENT_DELIVERY_FAILED,
+    EventType.SUBAGENT_TERMINAL,
+    EventType.SUBAGENT_RECOVERED,
+    EventType.SUBAGENT_LOST,
+):
+    _EVENT_SPECS[_subagent_event_type] = ("", dict(_SUBAGENT_EVENT_FIELDS))
 
 
 def _stem(value: str) -> str:

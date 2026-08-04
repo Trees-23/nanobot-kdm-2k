@@ -70,6 +70,47 @@ afterEach(() => {
 });
 
 describe("NanobotClient", () => {
+  it("can request an authoritative subagent snapshot", () => {
+    const client = new NanobotClient({
+      url: "ws://test",
+      reconnect: false,
+      socketFactory: (url) => new FakeSocket(url) as unknown as WebSocket,
+    });
+    client.connect();
+    lastSocket().fakeOpen();
+
+    client.requestSubagentSnapshot("chat-a");
+
+    expect(lastSocket().sent).toContain(
+      JSON.stringify({ type: "subagent_rehydrate", chat_id: "chat-a" }),
+    );
+  });
+
+  it("opts into subagent updates when attaching and reconnecting", () => {
+    const client = new NanobotClient({
+      url: "ws://test",
+      reconnect: true,
+      socketFactory: (url) => new FakeSocket(url) as unknown as WebSocket,
+    });
+    client.onChat("chat-a", vi.fn());
+    client.connect();
+    lastSocket().fakeOpen();
+
+    expect(lastSocket().sent).toEqual([
+      JSON.stringify({ type: "attach", chat_id: "chat-a" }),
+      JSON.stringify({ type: "subagent_rehydrate", chat_id: "chat-a" }),
+    ]);
+
+    lastSocket().fakeCloseWithCode(1006);
+    vi.runOnlyPendingTimers();
+    lastSocket().fakeOpen();
+
+    expect(lastSocket().sent).toEqual([
+      JSON.stringify({ type: "attach", chat_id: "chat-a" }),
+      JSON.stringify({ type: "subagent_rehydrate", chat_id: "chat-a" }),
+    ]);
+  });
+
   it("routes events to the matching chat handler", () => {
     const client = new NanobotClient({
       url: "ws://test",

@@ -40,6 +40,42 @@ def _event(sequence: int, event_type: str, **extra):
     return audit_event_adapter.validate_python(raw)
 
 
+def _task_event(
+    sequence: int,
+    event_type: str,
+    *,
+    revision: int,
+    task_id: str = "task-a",
+    run_id: str = "child-a",
+    tool_call_id: str = "spawn-a",
+    **extra,
+):
+    source_metadata = extra.pop("source_metadata", {})
+    fields = {
+        "task_status": "running",
+        "task_phase": "running_model",
+        "termination_state": "none",
+        "delivery_phase": "not_ready",
+        "required_task": True,
+        "legacy_inferred": False,
+        **extra,
+    }
+    return _event(
+        sequence,
+        event_type,
+        run_id=run_id,
+        parent_run_id="run-1",
+        tool_call_id=tool_call_id,
+        iteration=None,
+        source_type="subagent_task",
+        source_metadata=source_metadata,
+        subagent_task_id=task_id,
+        task_revision=revision,
+        idempotency_key=f"{task_id}:{revision}:{event_type}",
+        **fields,
+    )
+
+
 def _retry_trace():
     return [
         _event(1, "run_started"),
@@ -279,6 +315,53 @@ def test_run_graph_is_deterministic_and_declares_attempt_expansion() -> None:
     assert any(edge.type == "retry_of" for edge in first.edges)
 
 
+def test_trace_full_collapses_single_successful_attempt_by_default() -> None:
+    events = [
+        _event(1, "run_started"),
+        _event(
+            2,
+            "model_request_started",
+            model_call_id="model-1",
+            requested_provider="openai",
+            requested_model="gpt-test",
+        ),
+        _event(
+            3,
+            "model_attempt_started",
+            model_call_id="model-1",
+            attempt_id="attempt-1",
+            provider="openai",
+            model="gpt-test",
+            attempt_ordinal=1,
+            input_variant="original",
+        ),
+        _event(
+            4,
+            "model_attempt_finished",
+            model_call_id="model-1",
+            attempt_id="attempt-1",
+            attempt_ordinal=1,
+            provider="openai",
+            model="gpt-test",
+            elapsed_ms=10,
+            status="ok",
+        ),
+        _event(
+            5,
+            "model_response_received",
+            model_call_id="model-1",
+            finish_reason="stop",
+            usage={"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
+        ),
+        _event(6, "run_finished", status="succeeded", stop_reason="done"),
+    ]
+
+    graph = AuditGraphBuilder().build(trace_id="trace-1", level="trace_full", events=events)
+
+    assert len(graph.expansion_groups) == 1
+    assert graph.expansion_groups[0].default_expanded is False
+
+
 def test_trace_full_uses_spawn_evidence_and_separates_continuation() -> None:
     events = _unified_branch_trace()
     graph = AuditGraphBuilder().build(
@@ -361,6 +444,246 @@ def test_trace_full_prefers_exact_spawn_task_child_metadata() -> None:
     assert runs["continuation-a"].run_kind == "continuation"
     assert runs["continuation-a"].parent_node_id is None
     assert runs["continuation-a"].continuation_of_run_id == "child-a"
+
+
+def test_trace_full_projects_recorded_task_between_spawn_child_and_continuation() -> None:
+    events = [
+        _event(1, "run_started"),
+        _event(2, "tool_started", tool_call_id="spawn-a", tool_name="spawn"),
+        _event(
+            3,
+            "tool_finished",
+            tool_call_id="spawn-a",
+            tool_name="spawn",
+            elapsed_ms=1,
+            status="ok",
+        ),
+        _task_event(
+            4,
+            "subagent_created",
+            revision=1,
+            task_status="created",
+            task_label="检查一级目录",
+        ),
+        _event(
+            5,
+            "run_started",
+            run_id="child-a",
+            parent_run_id="run-1",
+            source_type="subagent",
+            source_metadata={"spawn_tool_call_id": "spawn-a", "subagent_task_id": "task-a"},
+        ),
+        _task_event(6, "subagent_admitted", revision=2),
+        _event(
+            7,
+            "run_finished",
+            run_id="child-a",
+            parent_run_id="run-1",
+            source_type="subagent",
+            status="succeeded",
+            stop_reason="done",
+        ),
+        _task_event(
+            8,
+            "subagent_terminal",
+            revision=3,
+            task_status="succeeded",
+            task_phase="finished",
+            delivery_phase="ready",
+        ),
+        _task_event(
+            9,
+            "subagent_result_delivered",
+            revision=4,
+            task_status="succeeded",
+            task_phase="finished",
+            delivery_phase="delivered",
+        ),
+        _event(
+            10,
+            "input_injected",
+            injection_source="subagent_result",
+            target_run_id="run-1",
+            subagent_task_id="task-a",
+        ),
+        _event(11, "run_finished", status="succeeded", stop_reason="done"),
+        _event(
+            12,
+            "run_started",
+            run_id="continuation-a",
+            source_type="continuation",
+            source_metadata={
+                "continuation_of_run_id": "child-a",
+                "injection_source": "subagent_result",
+            },
+        ),
+        _event(
+            13,
+            "run_finished",
+            run_id="continuation-a",
+            source_type="continuation",
+            status="succeeded",
+            stop_reason="done",
+        ),
+    ]
+
+    graph = AuditGraphBuilder().build(trace_id="trace-1", level="trace_full", events=events)
+    task = next(node for node in graph.nodes if node.type == "task")
+    child = next(node for node in graph.nodes if node.run_id == "child-a" and node.type == "run")
+    continuation = next(
+        node for node in graph.nodes if node.run_id == "continuation-a" and node.type == "run"
+    )
+    spawn = next(node for node in graph.nodes if node.type == "tool_call")
+
+    assert task.task_id == "task-a"
+    assert task.label == "检查一级目录"
+    assert task.summary.task_label == "检查一级目录"
+    assert task.region_id == child.region_id
+    assert task.id in next(region for region in graph.regions if region.id == child.region_id).member_node_ids
+    assert not any(region.type == "task" and region.task_id == "task-a" for region in graph.regions)
+    assert task.status == "succeeded"
+    assert task.summary.delivery_phase == "delivered"
+    assert task.summary.evidence_source == "recorded"
+    assert {event.event_type for event in task.raw_events} == {
+        "subagent_created",
+        "subagent_admitted",
+        "subagent_terminal",
+        "subagent_result_delivered",
+    }
+    assert any(
+        edge.type == "spawn_branch" and edge.source == spawn.id and edge.target == task.id
+        for edge in graph.edges
+    )
+    assert any(
+        edge.type == "task_execution" and edge.source == task.id and edge.target == child.id
+        for edge in graph.edges
+    )
+    assert any(
+        edge.type == "result_return"
+        and edge.source == task.id
+        and edge.target == continuation.id
+        and edge.evidence_kind == "recorded_delivery_event"
+        for edge in graph.edges
+    )
+    assert any(
+        edge.type == "result_return"
+        and edge.source == task.id
+        and edge.evidence_kind == "recorded_injection_task_id"
+        for edge in graph.edges
+    )
+    assert not any(
+        edge.type == "spawn_branch" and edge.source == spawn.id and edge.target == child.id
+        for edge in graph.edges
+    )
+    assert not any(
+        node.type == "decision" and node.summary.decision_type.startswith("subagent_")
+        for node in graph.nodes
+    )
+
+
+def test_trace_full_uses_task_id_fallback_for_legacy_lifecycle_events() -> None:
+    graph = AuditGraphBuilder().build(
+        trace_id="trace-1",
+        level="trace_full",
+        events=[_task_event(1, "subagent_created", revision=1, task_id="legacy-task-id")],
+    )
+
+    task = next(node for node in graph.nodes if node.type == "task")
+    assert task.label == "Task legacy-task-"
+    assert task.summary.task_label is None
+
+
+def test_trace_full_deduplicates_retried_lifecycle_outbox_events() -> None:
+    first = _task_event(2, "subagent_created", revision=1, task_status="created")
+    duplicate = _task_event(3, "subagent_created", revision=1, task_status="created")
+    graph = AuditGraphBuilder().build(
+        trace_id="trace-1",
+        level="trace_full",
+        events=[
+            _event(1, "run_started"),
+            first,
+            duplicate,
+            _event(4, "run_finished", status="succeeded", stop_reason="done"),
+        ],
+    )
+
+    task = next(node for node in graph.nodes if node.type == "task")
+    assert graph.trace.event_count == 4
+    assert task.summary.lifecycle_event_count == 1
+    assert task.raw_event_ids == [first.event_id]
+    assert duplicate.event_id in graph.ignored_event_ids
+
+
+def test_trace_full_connects_recorded_task_replacement_and_recovery() -> None:
+    events = [
+        _event(1, "run_started"),
+        _event(2, "tool_started", tool_call_id="spawn-old", tool_name="spawn"),
+        _event(3, "tool_finished", tool_call_id="spawn-old", tool_name="spawn", elapsed_ms=1, status="ok"),
+        _task_event(
+            4,
+            "subagent_created",
+            revision=1,
+            task_id="task-old",
+            run_id="child-old",
+            tool_call_id="spawn-old",
+        ),
+        _event(
+            5,
+            "run_started",
+            run_id="child-old",
+            parent_run_id="run-1",
+            source_type="subagent",
+            source_metadata={"spawn_tool_call_id": "spawn-old", "subagent_task_id": "task-old"},
+        ),
+        _task_event(
+            6,
+            "subagent_recovered",
+            revision=2,
+            task_id="task-old",
+            run_id="child-old",
+            tool_call_id="spawn-old",
+        ),
+        _event(7, "run_finished", run_id="child-old", parent_run_id="run-1", source_type="subagent", status="failed", stop_reason="lost"),
+        _event(8, "tool_started", tool_call_id="spawn-new", tool_name="spawn"),
+        _event(9, "tool_finished", tool_call_id="spawn-new", tool_name="spawn", elapsed_ms=1, status="ok"),
+        _task_event(
+            10,
+            "subagent_created",
+            revision=1,
+            task_id="task-new",
+            run_id="child-new",
+            tool_call_id="spawn-new",
+            source_metadata={"replaces_task_id": "task-old"},
+        ),
+        _event(
+            11,
+            "run_started",
+            run_id="child-new",
+            parent_run_id="run-1",
+            source_type="subagent",
+            source_metadata={"spawn_tool_call_id": "spawn-new", "subagent_task_id": "task-new"},
+        ),
+        _event(12, "run_finished", run_id="child-new", parent_run_id="run-1", source_type="subagent", status="succeeded", stop_reason="done"),
+        _event(13, "run_finished", status="succeeded", stop_reason="done"),
+    ]
+
+    graph = AuditGraphBuilder().build(trace_id="trace-1", level="trace_full", events=events)
+    tasks = {node.task_id: node for node in graph.nodes if node.type == "task"}
+    old_child = next(node for node in graph.nodes if node.run_id == "child-old" and node.type == "run")
+
+    assert any(
+        edge.type == "task_recovery"
+        and edge.source == tasks["task-old"].id
+        and edge.target == old_child.id
+        for edge in graph.edges
+    )
+    assert any(
+        edge.type == "task_replacement"
+        and edge.source == tasks["task-old"].id
+        and edge.target == tasks["task-new"].id
+        and edge.evidence_kind == "recorded_replacement_id"
+        for edge in graph.edges
+    )
 
 
 def test_trace_full_exposes_terminal_and_process_health_separately() -> None:

@@ -6,6 +6,7 @@ import { SessionTraceList } from "@/components/traces/SessionTraceList";
 import { PayloadViewer } from "@/components/traces/PayloadViewer";
 import { TraceNodeInspector } from "@/components/traces/TraceNodeInspector";
 import { TraceTimeline } from "@/components/traces/TraceTimeline";
+import { AuditCaptureModeNotice, TraceEdgeInspector } from "@/components/traces/TraceWorkbench";
 import { useAuditTimeline } from "@/hooks/useAuditTimeline";
 import { AuditApiError, fetchAuditGraph } from "@/lib/audit-api";
 import type { AuditGraphNode, AuditSessionListItem } from "@/lib/audit-types";
@@ -185,6 +186,66 @@ describe("audit trace UX", () => {
     expect(onLoadPayload).toHaveBeenCalledWith("payload-1");
   });
 
+  it("shows Task lifecycle dimensions separately from child Run", () => {
+    const node: AuditGraphNode = {
+      id: "task:trace-1:task-a",
+      type: "task",
+      status: "succeeded",
+      label: "检查一级目录",
+      started_at: "2026-01-01T00:00:00Z",
+      finished_at: "2026-01-01T00:00:30Z",
+      elapsed_ms: 30_000,
+      raw_event_ids: ["task-event-1"],
+      raw_events: [{
+        event_id: "task-event-1",
+        event_type: "subagent_result_delivered",
+        occurred_at: "2026-01-01T00:00:30Z",
+        status: null,
+        payload_id: null,
+      }],
+      region_id: "task-region:trace-1:task-a",
+      parent_node_id: null,
+      child_node_ids: [],
+      expandable: false,
+      relations: [],
+      task_id: "task-a",
+      summary: {
+        kind: "task",
+        task_id: "task-a",
+        task_label: "检查一级目录",
+        task_revision: 8,
+        task_status: "succeeded",
+        task_phase: "finished",
+        termination_state: "confirmed_stopped",
+        delivery_phase: "delivered",
+        required_task: true,
+        lifecycle_event_count: 8,
+        owner_run_id: "run-main",
+        child_run_id: "run-child",
+      },
+      order: 0,
+    };
+
+    render(
+      <TraceNodeInspector
+        node={node}
+        focusMode={null}
+        onFocusMode={vi.fn()}
+        onClose={vi.fn()}
+        onLocateEvent={vi.fn()}
+        onLoadPayload={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByRole("heading", { name: "检查一级目录" })).toBeInTheDocument();
+    expect(screen.getByText("Task ID")).toBeInTheDocument();
+    expect(screen.getByText("task-a")).toBeInTheDocument();
+    expect(screen.getByText("执行阶段")).toBeInTheDocument();
+    expect(screen.getByText("终止状态")).toBeInTheDocument();
+    expect(screen.getByText("交付阶段")).toBeInTheDocument();
+    expect(screen.getByText("run-child")).toBeInTheDocument();
+  });
+
   it("renders honest Payload 404 and retryable 503 states", () => {
     const { rerender } = render(
       <PayloadViewer
@@ -207,6 +268,37 @@ describe("audit trace UX", () => {
       />,
     );
     expect(screen.getByRole("button", { name: "重试" })).toBeInTheDocument();
+  });
+
+  it("explains metadata-only capture without promising Payload in full mode", () => {
+    const { rerender } = render(<AuditCaptureModeNotice mode="metadata_only" />);
+    expect(screen.getByText("当前仅记录事件元数据，不保存 Payload")).toBeInTheDocument();
+
+    rerender(<AuditCaptureModeNotice mode="full" />);
+    expect(screen.queryByText("当前仅记录事件元数据，不保存 Payload")).not.toBeInTheDocument();
+  });
+
+  it("labels result return endpoints without failure or recovery wording", () => {
+    const source: AuditGraphNode = {
+      id: "task:1", type: "task", status: "succeeded", label: "检查一级目录",
+      started_at: null, finished_at: null, elapsed_ms: null, raw_event_ids: [], region_id: "task-region:1",
+      parent_node_id: null, child_node_ids: [], expandable: false, relations: [], summary: { kind: "task" }, order: 0,
+    };
+    const target = { ...source, id: "run:continuation", type: "run" as const, label: "Main continuation", summary: { kind: "run" as const } };
+    render(
+      <TraceEdgeInspector
+        edge={{ id: "result", type: "result_return", source: source.id, target: target.id, anchor: { source_event_id: "result-event", target_event_id: "injection-event" } }}
+        source={source}
+        target={target}
+        onClose={vi.fn()}
+        onLocateEvent={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByRole("heading", { name: "结果回传" })).toBeInTheDocument();
+    expect(screen.getByText("结果来源")).toBeInTheDocument();
+    expect(screen.getByText("注入位置")).toBeInTheDocument();
+    expect(screen.queryByText(/失败端|恢复关系/)).not.toBeInTheDocument();
   });
 
   it("loads missing Events within the bounded locator and de-duplicates pages", async () => {

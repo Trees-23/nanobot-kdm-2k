@@ -49,6 +49,7 @@ const ZH_VALUES: Record<string, string> = {
 
 const ZH_NODE_TYPES: Record<AuditNodeType, string> = {
   run: "Run",
+  task: "Task",
   model_call: "Model 调用",
   model_attempt: "Model 尝试",
   tool_call: "Tool 调用",

@@ -1,7 +1,7 @@
 import asyncio
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from loguru import logger
@@ -1578,6 +1578,68 @@ async def test_multiple_subagent_followups_all_persist_as_standalone_history(tmp
         "subagent result 1",
         "subagent result 2",
     ]
+
+
+@pytest.mark.asyncio
+async def test_durable_subagent_result_is_claimed_delivered_and_duplicate_skipped(
+    tmp_path: Path,
+) -> None:
+    from nanobot.session.subagent_tasks import (
+        SubagentDeliveryPhase,
+        SubagentTaskStatus,
+    )
+
+    loop = _make_full_loop(tmp_path)
+    loop.consolidator.maybe_consolidate_by_tokens = AsyncMock(return_value=False)
+    store = loop.subagents._task_store
+    await store.create(task_id="sub-durable", owner_session_key="cli:delivery")
+    await store.transition_status("sub-durable", SubagentTaskStatus.QUEUED)
+    await store.transition_status("sub-durable", SubagentTaskStatus.RUNNING)
+    await store.transition_status("sub-durable", SubagentTaskStatus.SUCCEEDED)
+    await store.mark_result_ready("sub-durable")
+    calls = 0
+
+    async def fake_run_agent_loop(initial_messages, **_kwargs):
+        nonlocal calls
+        calls += 1
+        return (
+            "ack",
+            [],
+            [*initial_messages, {"role": "assistant", "content": "ack"}],
+            "stop",
+            False,
+        )
+
+    loop._run_agent_loop = fake_run_agent_loop  # type: ignore[method-assign]
+    message = InboundMessage(
+        channel="system",
+        sender_id="subagent",
+        chat_id="cli:delivery",
+        content="durable result",
+        metadata={
+            "injected_event": "subagent_result",
+            "subagent_task_id": "sub-durable",
+        },
+    )
+
+    injected = AsyncMock()
+    with patch("nanobot.audit.boundaries.TurnAuditRecorder.input_injected", injected):
+        await loop._process_message(message)
+        await loop._process_message(message)
+
+    delivered = store.load("sub-durable")
+    assert delivered is not None
+    assert delivered.delivery.phase == SubagentDeliveryPhase.DELIVERED
+    assert calls == 1
+    persisted = loop.sessions.get_or_create("cli:delivery")
+    followups = [
+        row for row in persisted.messages
+        if row.get("subagent_task_id") == "sub-durable"
+    ]
+    assert len(followups) == 1
+    injected.assert_awaited_once()
+    assert injected.await_args.kwargs["injection_source"] == "subagent_result"
+    assert injected.await_args.kwargs["subagent_task_id"] == "sub-durable"
 
 
 def test_prompt_merge_does_not_replace_standalone_subagent_history_entry(tmp_path: Path) -> None:

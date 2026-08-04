@@ -35,5 +35,5 @@ def test_closed_enums_reject_unknown_values(enum_type: type) -> None:
 
 
 def test_event_and_payload_contract_counts_are_locked() -> None:
-    assert len(EventType) == 47
+    assert len(EventType) == 61
     assert len(PayloadKind) == 13

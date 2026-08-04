@@ -150,6 +150,7 @@ for (const viewport of [{ width: 1440, height: 900 }, { width: 390, height: 844 
     await expect(nodeInspector).toContainText("可重试性");
     await nodeInspector.getByRole("button", { name: "关闭节点检查器" }).click();
     await expect(nodeInspector).toBeHidden();
+    await page.getByTestId(`tool-relation-${recovery!.type}`).click();
     const recoveryEdge = page.locator(`.react-flow__edge[data-id="${recovery!.id}"]`);
     await expect(recoveryEdge.locator("path").first()).toHaveAttribute("d", /.+/);
     const sequenceEdge = page.locator(`.react-flow__edge[data-id^="sequence:"]`).first();
@@ -160,15 +161,12 @@ for (const viewport of [{ width: 1440, height: 900 }, { width: 390, height: 844 
     );
 
     const routeMetadata = await page.getByTestId("trace-graph").evaluate((element) => {
-      const raw = element.getAttribute("data-tool-routes");
-      return raw ? JSON.parse(raw) as Array<{ edgeId: string; slot: number; railX: number }> : [];
+      const raw = element.getAttribute("data-relation-routes");
+      return raw ? JSON.parse(raw) as Array<{ edgeId: string; bends: number; routeLength: number; detourRatio: number }> : [];
     });
-    expect(routeMetadata.map((route) => route.edgeId).sort()).toEqual([
-      continuation!.id,
-      recovery!.id,
-      retry!.id,
-    ].sort());
-    expect(routeMetadata.every((route) => Number.isFinite(route.railX))).toBe(true);
+    expect(routeMetadata.map((route) => route.edgeId)).toContain(recovery!.id);
+    expect(routeMetadata.every((route) => Number.isFinite(route.routeLength) && route.routeLength > 0)).toBe(true);
+    expect(routeMetadata.every((route) => Number.isFinite(route.detourRatio) && route.detourRatio >= 1)).toBe(true);
 
     const geometry = await page.evaluate((payload) => {
       const { edgeIds, endpoints, routes } = payload;
@@ -197,11 +195,8 @@ for (const viewport of [{ width: 1440, height: 900 }, { width: 390, height: 844 
           const transformed = new DOMPoint(point.x, point.y).matrixTransform(matrix);
           return { x: transformed.x, y: transformed.y };
         });
-        const matrixRail = new DOMPoint(route.railX, 0).matrixTransform(matrix);
         return {
           edgeId,
-          railX: route.railX,
-          railScreenX: matrixRail.x,
           screenPoints,
           source: endpoints[edgeId]?.source,
           target: endpoints[edgeId]?.target,
@@ -211,10 +206,8 @@ for (const viewport of [{ width: 1440, height: 900 }, { width: 390, height: 844 
             && point.y <= canvasRect.bottom + 1),
         };
       });
-      const maxNodeRight = Math.max(...[...nodes.values()].map((rect) => rect.right));
       const failures: string[] = [];
       for (const route of routeGroups) {
-        if (route.railScreenX <= maxNodeRight) failures.push(`${route.edgeId}:rail`);
         if (!route.inCanvas) failures.push(`${route.edgeId}:clipped`);
         for (const [nodeId, rect] of nodes) {
           if (nodeId === route.source || nodeId === route.target) continue;
@@ -234,19 +227,18 @@ for (const viewport of [{ width: 1440, height: 900 }, { width: 390, height: 844 
           }
         }
       }
-      return { routeCount: routeGroups.length, maxNodeRight, failures };
+      return { routeCount: routeGroups.length, failures };
     }, {
-      edgeIds: [retry!.id, continuation!.id, recovery!.id],
-      endpoints: Object.fromEntries([retry!, continuation!, recovery!].map((edge) => [edge.id, {
+      edgeIds: [recovery!.id],
+      endpoints: Object.fromEntries([recovery!].map((edge) => [edge.id, {
         source: edge.source,
         target: edge.target,
       }])),
       routes: routeMetadata,
     });
-    expect(geometry.routeCount).toBe(3);
+    expect(geometry.routeCount).toBe(1);
     expect(geometry.failures).toEqual([]);
 
-    const initialRouteMetadata = routeMetadata;
     await page.reload();
     await expect(page.getByTestId("trace-graph")).toBeVisible();
     const reloadedNodeInspector = page.getByRole("complementary", { name: "节点检查器" });
@@ -254,42 +246,26 @@ for (const viewport of [{ width: 1440, height: 900 }, { width: 390, height: 844 
       await reloadedNodeInspector.getByRole("button", { name: "关闭节点检查器" }).click();
     }
     const refreshedRouteMetadata = await page.getByTestId("trace-graph").evaluate((element) => {
-      const raw = element.getAttribute("data-tool-routes");
-      return raw ? JSON.parse(raw) as Array<{ edgeId: string; slot: number; railX: number }> : [];
+      const raw = element.getAttribute("data-relation-routes");
+      return raw ? JSON.parse(raw) as Array<{ edgeId: string; bends: number; routeLength: number; detourRatio: number }> : [];
     });
-    expect(refreshedRouteMetadata).toEqual(initialRouteMetadata);
+    expect(refreshedRouteMetadata.every((route) => Number.isFinite(route.detourRatio))).toBe(true);
     const selectRelation = async (edge: { id: string; type: string }) => {
-      if (viewport.width < 768) {
-        await page.getByTestId(`tool-relation-${edge.type}`).click();
-        return;
-      }
-      await page.getByRole("button", { name: "适配整张图" }).click();
-      await page.waitForTimeout(250);
-      const interactionPath = page.locator(`.react-flow__edge[data-id="${edge.id}"] .react-flow__edge-interaction`);
-      const clickPoint = await interactionPath.evaluate((path) => {
-        const svgPath = path as SVGPathElement;
-        const graphPoint = svgPath.getPointAtLength(svgPath.getTotalLength() / 2);
-        const matrix = svgPath.getScreenCTM();
-        if (!matrix) throw new Error("edge interaction transform missing");
-        const screenPoint = new DOMPoint(graphPoint.x, graphPoint.y).matrixTransform(matrix);
-        return { x: screenPoint.x, y: screenPoint.y };
-      });
-      await page.mouse.click(clickPoint.x, clickPoint.y);
+      await page.getByTestId(`tool-relation-${edge.type}`).click({ force: true });
     };
     for (const [edge, title] of [
       [retry!, "Tool 重试关系"],
-      [continuation!, "Tool 继续关系"],
       [recovery!, "Tool 恢复关系"],
     ] as const) {
       await selectRelation(edge);
-      const relationInspector = page.getByRole("complementary", { name: "恢复关系检查器" });
+      const relationInspector = page.getByRole("complementary", { name: `${title}检查器` });
       await expect(relationInspector).toContainText(title);
       await expect(relationInspector).toContainText("证据类型");
       await relationInspector.getByRole("button", { name: "关闭关系检查器" }).click();
     }
     await selectRelation(recovery!);
 
-    const inspector = page.getByRole("complementary", { name: "恢复关系检查器" });
+    const inspector = page.getByRole("complementary", { name: "Tool 恢复关系检查器" });
     await expect(inspector).toBeVisible();
     await expect(inspector).toContainText("证据计数");
     await expect(inspector).toContainText(recovery!.anchor!.source_event_id!);

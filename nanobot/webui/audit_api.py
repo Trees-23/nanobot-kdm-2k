@@ -72,6 +72,12 @@ class WebUIAuditRouter:
         self.graph_builder = AuditGraphBuilder()
         self.resolve_session_title = resolve_session_title
 
+    def _with_audit_mode(self, data: dict[str, Any]) -> dict[str, Any]:
+        index = data.get("index")
+        if isinstance(index, dict):
+            index["audit_mode"] = self.audit_mode
+        return data
+
     async def dispatch(self, request: WsRequest, got: str) -> Response | None:
         if not got.startswith("/api/audit/"):
             return None
@@ -143,7 +149,7 @@ class WebUIAuditRouter:
                     title = None
                 if title:
                     item.title = title
-        return http_json_response(page.model_dump(mode="json"))
+        return http_json_response(self._with_audit_mode(page.model_dump(mode="json")))
 
     async def _list_sessions(self, request: WsRequest) -> Response:
         query = parse_query(request.path)
@@ -170,7 +176,7 @@ class WebUIAuditRouter:
                     title = None
                 if title:
                     item.title = title
-        return http_json_response(page.model_dump(mode="json"))
+        return http_json_response(self._with_audit_mode(page.model_dump(mode="json")))
 
     async def _graph(self, request: WsRequest, trace_id: str) -> Response:
         invalid = self._validate_id(trace_id, "trace")
@@ -203,7 +209,10 @@ class WebUIAuditRouter:
             return _error(404, code, "Requested Trace or Run was not found.")
         except (ValueError, ValidationError):
             return _error(500, "audit_graph_contract_error", "Trace graph could not be built.")
-        etag_source = f"{trace_id}\0{level}\0{run_id or ''}\0{detail.revision}\0{GRAPH_BUILDER_VERSION}"
+        etag_source = (
+            f"{trace_id}\0{level}\0{run_id or ''}\0{detail.revision}\0"
+            f"{GRAPH_BUILDER_VERSION}\0{self.audit_mode}"
+        )
         etag = f'"{hashlib.sha256(etag_source.encode()).hexdigest()}"'
         if case_insensitive_header(request.headers, "If-None-Match") == etag:
             return http_response(b"", status=304, extra_headers=[("ETag", etag)])
@@ -221,6 +230,7 @@ class WebUIAuditRouter:
             "revision": detail.revision,
             "coverage_complete": self.read_service.status().coverage_complete,
             "lag_ms": self.read_service.status().lag_ms,
+            "audit_mode": self.audit_mode,
         }
         return _json_with_headers(body, headers=[("ETag", etag)])
 
@@ -286,7 +296,7 @@ class WebUIAuditRouter:
                 "items": items,
                 "next_cursor": page.next_cursor,
                 "total": page.total,
-                "index": {"revision": page.revision},
+                "index": {"revision": page.revision, "audit_mode": self.audit_mode},
             }
         )
 

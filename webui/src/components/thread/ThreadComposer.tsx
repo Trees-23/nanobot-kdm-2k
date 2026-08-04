@@ -59,6 +59,7 @@ import {
   WorkspaceAccessMenu,
   WorkspaceProjectPicker,
 } from "@/components/thread/WorkspaceControls";
+import { SubagentTaskStrip } from "@/components/thread/SubagentTaskStrip";
 import {
   ACCEPT_ATTR,
   MAX_ATTACHMENTS_PER_MESSAGE,
@@ -80,6 +81,7 @@ import type {
   OutboundMcpPresetMention,
   SlashCommand,
   SkillSummary,
+  SubagentTaskPayload,
   WebUIIngressLimits,
   WorkspaceScopePayload,
   WorkspacesPayload,
@@ -178,6 +180,8 @@ interface ThreadComposerProps {
   runStartedAt?: number | null;
   /** Sustained objective for this chat (WebSocket ``goal_state``). */
   goalState?: GoalStateWsPayload;
+  /** Durable, revisioned subagent tasks for this chat. */
+  subagentTasks?: SubagentTaskPayload[];
   workspaceScope?: WorkspaceScopePayload | null;
   workspaceDefaultScope?: WorkspaceScopePayload | null;
   workspaceControls?: WorkspacesPayload["controls"] | null;
@@ -806,6 +810,7 @@ export function ThreadComposer({
   onTranscribeAudio,
   runStartedAt = null,
   goalState,
+  subagentTasks = [],
   workspaceScope = null,
   workspaceDefaultScope = null,
   workspaceControls = null,
@@ -1862,6 +1867,7 @@ export function ThreadComposer({
             ))}
           </div>
         ) : null}
+        <SubagentTaskStrip tasks={subagentTasks} />
         <RunElapsedStrip startedAt={runStartedAt} goalState={goalState} />
         <div className="relative">
           {hasMentionDecorations ? (
