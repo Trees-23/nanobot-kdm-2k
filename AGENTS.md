@@ -58,7 +58,7 @@ This file provides guidance to AI coding agents working with this repository.
   干净工作区，并确认健康检查返回的构建标识与脚本输出一致后，才能宣称 Gateway 使用了本次代码。
 - 默认地址固定为 `http://localhost:8765`、`http://localhost:8765/#/new`、
   `http://localhost:8765/#/traces` 和 `http://127.0.0.1:18790/health`。若这些端口被非 Compose 容器占用，
-  停止并明确报告冲突容器；不得自动换端口或接管、删除该容器。
+  明确报告冲突容器并退出；不得自动换端口或接管、停止、删除该容器。
 - 涉及 Agent 流程、工具、审计、持久化、WebUI 协议或用户可见行为的改动，除聚焦测试外，默认必须完成
   一次真实 Gateway 场景验收；该验收已获授权，可使用当前配置的模型和全新的 WebUI 会话。
 - 场景提示词必须针对本次改动、带唯一场景标识，并明确预期回答、工具行为或审计状态。优先核对实际
