@@ -890,7 +890,16 @@ class AuditGraphBuilder:
                 _RunEvidence(kind="unknown", parent_run_id=owner_run_id),
             )
             node_id = f"task:{trace_id}:{task_id}"
-            region_id = f"task-region:{trace_id}:{task_id}"
+            child_region = next(
+                (
+                    region
+                    for region in regions
+                    if region.run_id == child_run_id
+                    and region.lane_id == f"lane:{child_evidence.kind}:{child_run_id}"
+                ),
+                None,
+            )
+            region_id = child_region.id if child_region is not None else f"task-region:{trace_id}:{task_id}"
             status = _task_status(grouped)
             task_label = next(
                 (
@@ -958,24 +967,27 @@ class AuditGraphBuilder:
                 ),
                 grouped,
             )
-            regions.append(
-                AuditGraphRegion(
-                    id=region_id,
-                    type="task",
-                    label=display_label,
-                    status=status,
-                    member_node_ids=[node_id],
-                    order=len(regions),
-                    lane_id=region_id,
-                    lane_kind=child_evidence.kind,
-                    lane_order=child_evidence.lane_order,
-                    lane_depth=child_evidence.lane_depth,
-                    lane_side=child_evidence.lane_side,
-                    terminal_status=status,
-                    health_status=status,
-                    task_id=task_id,
+            if child_region is not None:
+                child_region.member_node_ids.append(node_id)
+            else:
+                regions.append(
+                    AuditGraphRegion(
+                        id=region_id,
+                        type="task",
+                        label=display_label,
+                        status=status,
+                        member_node_ids=[node_id],
+                        order=len(regions),
+                        lane_id=region_id,
+                        lane_kind=child_evidence.kind,
+                        lane_order=child_evidence.lane_order,
+                        lane_depth=child_evidence.lane_depth,
+                        lane_side=child_evidence.lane_side,
+                        terminal_status=status,
+                        health_status=status,
+                        task_id=task_id,
+                    )
                 )
-            )
 
         for event in events:
             if event.event_id not in state.owners:

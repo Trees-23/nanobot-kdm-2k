@@ -428,4 +428,49 @@ describe("TraceGraph", () => {
     await waitFor(() => expect(screen.getByTestId("trace-graph").dataset.relationRoutes).toContain('"result"'));
     expect(onSelectEdge).toHaveBeenCalledWith(expect.objectContaining({ id: "result" }));
   });
+
+  it("shows every result return by default for a multi-agent trace", async () => {
+    const graph = graphFixture();
+    const resultSources = ["task:1", "task:2", "task:3"];
+    const resultTargets = ["decision:1", "decision:2", "decision:3"];
+    graph.nodes.push(
+      ...resultSources.map((id, index) => ({
+        ...graph.nodes[0],
+        id,
+        type: "task" as const,
+        label: `Child task ${index + 1}`,
+        order: index + 1,
+      })),
+      ...resultTargets.map((id, index) => ({
+        ...graph.nodes[0],
+        id,
+        type: "checkpoint" as const,
+        label: `Result checkpoint ${index + 1}`,
+        order: index + 4,
+      })),
+    );
+    graph.regions[0].member_node_ids.push(...resultSources, ...resultTargets);
+    graph.edges.push(
+      ...resultSources.map((source, index) => ({
+        id: `result-${index + 1}`,
+        type: "result_return" as const,
+        source,
+        target: resultTargets[index],
+      })),
+    );
+
+    render(
+      <div style={{ width: 900, height: 700 }}>
+        <TraceGraph graph={graph} selectedNodeId={null} focusMode={null} onSelectNode={vi.fn()} onFocusMode={vi.fn()} />
+      </div>,
+    );
+
+    await screen.findByText("Child task 1");
+    await waitFor(() => {
+      const routes = screen.getByTestId("trace-graph").dataset.relationRoutes ?? "";
+      expect(routes).toContain('"result-1"');
+      expect(routes).toContain('"result-2"');
+      expect(routes).toContain('"result-3"');
+    });
+  });
 });

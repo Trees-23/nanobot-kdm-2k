@@ -538,7 +538,9 @@ def test_trace_full_projects_recorded_task_between_spawn_child_and_continuation(
     assert task.task_id == "task-a"
     assert task.label == "检查一级目录"
     assert task.summary.task_label == "检查一级目录"
-    assert next(region for region in graph.regions if region.id == task.region_id).label == "检查一级目录"
+    assert task.region_id == child.region_id
+    assert task.id in next(region for region in graph.regions if region.id == child.region_id).member_node_ids
+    assert not any(region.type == "task" and region.task_id == "task-a" for region in graph.regions)
     assert task.status == "succeeded"
     assert task.summary.delivery_phase == "delivered"
     assert task.summary.evidence_source == "recorded"

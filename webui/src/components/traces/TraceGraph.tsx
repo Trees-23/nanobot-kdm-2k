@@ -465,12 +465,18 @@ export function TraceGraph({
     .filter((edge) => geometryNodes.some((node) => node.id === edge.source) && geometryNodes.some((node) => node.id === edge.target)),
   [geometryNodes, graph.edges, hiddenAttemptIds, hiddenCollapsedIds]);
 
+  const defaultResultReturnIds = useMemo(() => {
+    const resultReturns = availableGraphEdges.filter((edge) => edge.type === "result_return");
+    return resultReturns.length > 1 ? new Set(resultReturns.map((edge) => edge.id)) : new Set<string>();
+  }, [availableGraphEdges]);
+
   const visibleGraphEdges = useMemo(() => availableGraphEdges.filter((edge) => STRUCTURAL_RELATION_TYPES.has(edge.type)
+    || defaultResultReturnIds.has(edge.id)
     || focusResult.edgeIds.has(edge.id)
     || activeRelationId === edge.id
     || (Boolean(selectedNodeId) && SECONDARY_RELATION_TYPES.has(edge.type)
       && (edge.source === selectedNodeId || edge.target === selectedNodeId))),
-  [activeRelationId, availableGraphEdges, focusResult.edgeIds, selectedNodeId]);
+  [activeRelationId, availableGraphEdges, defaultResultReturnIds, focusResult.edgeIds, selectedNodeId]);
 
   const visibleNodeBounds = useMemo<RouteNodeBounds[]>(() => geometryNodes.flatMap((node) => {
     const styleWidth = typeof node.style?.width === "number" ? node.style.width : null;
