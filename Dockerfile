@@ -12,9 +12,6 @@ RUN mkdir -p /app/nanobot/web && npm run build
 
 FROM ghcr.io/astral-sh/uv:python3.12-bookworm-slim
 
-ARG NANOBOT_BUILD_REF=unknown
-ARG NANOBOT_BUILD_TIME=unknown
-
 RUN apt-get update && \
     apt-get install -y --no-install-recommends ca-certificates git bubblewrap openssh-client libmagic1 && \
     rm -rf /var/lib/apt/lists/*
@@ -94,6 +91,8 @@ RUN sed -i 's/\r$//' /usr/local/bin/entrypoint.sh && chmod +x /usr/local/bin/ent
 # and fails closed if it cannot, so the agent never runs as root (see
 # entrypoint.sh).
 USER root
+ARG NANOBOT_BUILD_REF=unknown
+ARG NANOBOT_BUILD_TIME=unknown
 ENV HOME=/home/nanobot
 ENV NANOBOT_BUILD_REF=${NANOBOT_BUILD_REF}
 ENV NANOBOT_BUILD_TIME=${NANOBOT_BUILD_TIME}

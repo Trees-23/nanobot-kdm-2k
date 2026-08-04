@@ -27,8 +27,8 @@ services:
     command: ["gateway"]
     restart: unless-stopped
     ports:
-      - 127.0.0.1:${NANOBOT_HEALTH_HOST_PORT:-18790}:18790
-      - ${NANOBOT_WEBUI_HOST_PORT:-8765}:8765
+      - 127.0.0.1:18790:18790
+      - 8765:8765
     deploy:
       resources:
         limits:

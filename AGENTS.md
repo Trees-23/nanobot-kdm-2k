@@ -38,9 +38,12 @@ This file provides guidance to AI coding agents working with this repository.
 
 - `runtime/workspace/` 是用户的长期默认工作区。未经用户针对该目录的明确授权，绝不删除、移动、
   清空或覆盖该目录及其内容。
-- 不得为临时验证、浏览器验收、独立 Gateway 或评测直接在 `runtime/` 根目录创建带任务名的运行根目录。
-  如确有必要，统一创建在 `runtime/.tmp/<日期>-<任务标识>/`，并使用该目录中的 `workspace/` 作为
-  临时实例工作区。
+- 长期 Gateway 仅使用 Compose 服务 `nanobot-gateway`，固定占用 `8765`（WebUI）和 `18790`（健康检查），
+  并挂载完整的 `runtime/` 运行根目录；其默认工作区必须保持为 `runtime/workspace/`。不得因切换 Git
+  分支、端口占用或日常验收自动启动另一套 Gateway、改用其他端口或改用其他运行根目录。
+- 默认场景验收在这套长期 Gateway 的全新 WebUI 会话中完成。只有用户明确要求并行或隔离实验时，才可创建
+  临时 Gateway；临时运行根目录统一创建在 `runtime/.tmp/<日期>-<任务标识>/`，并使用该目录中的
+  `workspace/`。
 - 临时实例只允许用于当前任务。验证结果已记录、相关进程已停止且不需要保留复现环境时，删除由当前
   任务创建的整个 `runtime/.tmp/<...>/` 目录；若 `runtime/.tmp/` 为空，也一并移除该空父目录。
 - 删除前必须逐项确认目标位于 `runtime/.tmp/`、目录确由当前任务创建、且没有仍在使用该目录的进程。
@@ -50,9 +53,12 @@ This file provides guidance to AI coding agents working with this repository.
 
 ## Docker 构建与真实场景验收
 
-- 修改 Python、WebUI、Dockerfile、依赖或运行协议后，不得只重启既有 `nanobot-gateway` 容器。必须执行
-  `./scripts/rebuild_gateway_for_scenario.sh`，确认健康检查返回的构建标识与脚本输出一致后，才能宣称
-  Gateway 使用了本次代码。
+- 修改 Python、WebUI、Dockerfile、依赖或运行协议后，不得只重启既有 `nanobot-gateway` 容器。完成任务
+  提交后必须执行 `./scripts/rebuild_gateway_for_scenario.sh`；脚本只重建并替换固定的长期 Gateway，要求
+  干净工作区，并确认健康检查返回的构建标识与脚本输出一致后，才能宣称 Gateway 使用了本次代码。
+- 默认地址固定为 `http://localhost:8765`、`http://localhost:8765/#/new`、
+  `http://localhost:8765/#/traces` 和 `http://127.0.0.1:18790/health`。若这些端口被非 Compose 容器占用，
+  停止并明确报告冲突容器；不得自动换端口或接管、删除该容器。
 - 涉及 Agent 流程、工具、审计、持久化、WebUI 协议或用户可见行为的改动，除聚焦测试外，默认必须完成
   一次真实 Gateway 场景验收；该验收已获授权，可使用当前配置的模型和全新的 WebUI 会话。
 - 场景提示词必须针对本次改动、带唯一场景标识，并明确预期回答、工具行为或审计状态。优先核对实际

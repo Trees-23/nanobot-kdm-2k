@@ -29,14 +29,7 @@ docker compose down
 
 修改配置后，在运行日志的终端按 `Ctrl+C`，再重新执行前台启动命令。
 
-更新代码、依赖或 Dockerfile 后，在前台重新构建并启动：
-
-```bash
-docker compose up --build --force-recreate nanobot-gateway
-```
-
-需要对本次改动进行真实 WebUI 场景验收时，使用项目脚本。它会重新构建并替换 Gateway、核对健康检查中的
-构建标识，并输出新会话与运行轨迹页面地址：
+更新代码、依赖或 Dockerfile 后，先完成任务提交，再使用项目脚本重建并替换唯一的长期 Gateway：
 
 ```bash
 ./scripts/rebuild_gateway_for_scenario.sh
@@ -45,8 +38,9 @@ docker compose up --build --force-recreate nanobot-gateway
 脚本不会自动发送模型请求。将它输出的场景标识附在本次验收提示词中，在新会话页面发送；随后从运行轨迹
 页面找到对应 trace，核对回答、工具行为、图和事件时间线。
 
-如果默认的 `8765` 或 `18790` 已被其他 Gateway 占用，脚本会自动选择空闲宿主机端口，并在输出中给出本次
-验收实际应打开的地址；旧实例不会被脚本停止或删除。
+长期 Gateway 固定使用 `8765` 与 `18790`，并一直挂载 `runtime/`，其工作区是
+`runtime/workspace/`。如果这两个端口被其他容器占用，脚本会报告容器名称并停止；它不会自动换端口、
+停止或删除其他容器。
 
 ## 配置文件
 

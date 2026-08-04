@@ -13,41 +13,31 @@ if ! docker compose version >/dev/null 2>&1; then
   exit 1
 fi
 
-commit_ref=$(git rev-parse --short=12 HEAD)
 if [ -n "$(git status --porcelain --untracked-files=normal)" ]; then
-  tree_state=dirty
-else
-  tree_state=clean
+  printf 'Gateway scenario builds require a clean Git worktree. Commit the task changes first.\n' >&2
+  exit 1
 fi
 
-export NANOBOT_BUILD_REF="git-${commit_ref}-${tree_state}"
+export NANOBOT_BUILD_REF="git-$(git rev-parse --short=12 HEAD)"
 export NANOBOT_BUILD_TIME="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 scenario_id="scenario-$(date -u +%Y%m%dT%H%M%SZ)"
 
-port_is_available() {
-  local port="$1"
-  if (exec 3<>"/dev/tcp/127.0.0.1/${port}") 2>/dev/null; then
-    exec 3>&-
-    return 1
-  fi
-  return 0
-}
-
-choose_port() {
-  local port="$1"
-  while ! port_is_available "$port"; do
-    port=$((port + 1))
-  done
-  printf '%s' "$port"
-}
-
-export NANOBOT_HEALTH_HOST_PORT="$(choose_port "${NANOBOT_HEALTH_HOST_PORT:-18790}")"
-export NANOBOT_WEBUI_HOST_PORT="$(choose_port "${NANOBOT_WEBUI_HOST_PORT:-8765}")"
+managed_container_id=$(docker compose ps --status running -q nanobot-gateway 2>/dev/null || true)
+port_conflicts=$( {
+  docker ps --filter publish=8765 --format '{{.ID}} {{.Names}}'
+  docker ps --filter publish=18790 --format '{{.ID}} {{.Names}}'
+} | sort -u | awk -v managed="$managed_container_id" '$1 != managed')
+if [ -n "$port_conflicts" ]; then
+  printf 'The fixed Gateway ports are occupied by another container:\n%s\n' "$port_conflicts" >&2
+  printf 'This script only replaces the Compose service nanobot-gateway. Stop the listed container explicitly, then rerun.\n' >&2
+  exit 1
+fi
 
 printf 'Building and replacing nanobot-gateway with %s...\n' "$NANOBOT_BUILD_REF"
-docker compose up --build --force-recreate -d nanobot-gateway
+docker compose build nanobot-gateway
+docker compose up --no-build --force-recreate -d nanobot-gateway
 
-health_url="http://127.0.0.1:${NANOBOT_HEALTH_HOST_PORT}/health"
+health_url='http://127.0.0.1:18790/health'
 health_body=''
 attempt=0
 while [ "$attempt" -lt 30 ]; do
@@ -85,7 +75,7 @@ printf '\nGateway scenario environment is ready.\n'
 printf 'Build reference: %s\n' "$NANOBOT_BUILD_REF"
 printf 'Image ID: %s\n' "$image_id"
 printf 'Health: %s\n' "$health_url"
-printf 'New chat: http://localhost:%s/#/new\n' "$NANOBOT_WEBUI_HOST_PORT"
-printf 'Trace workbench: http://localhost:%s/#/traces\n' "$NANOBOT_WEBUI_HOST_PORT"
+printf 'New chat: http://localhost:8765/#/new\n'
+printf 'Trace workbench: http://localhost:8765/#/traces\n'
 printf 'Scenario marker: [%s]\n' "$scenario_id"
 printf 'Next: send a task-specific prompt containing this marker in a new WebUI chat, then record its trace URL.\n'
