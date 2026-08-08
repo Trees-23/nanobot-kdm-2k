@@ -7,7 +7,7 @@
 本方案先解决两个相互关联但不能混为一谈的问题：
 
 1. 将静态提示、动态事实和运行时状态分层，改善 prompt KV Cache 的稳定性。
-2. 建立由代码维护的 Agent 状态投影，减少重复调用、盲目重试、任务遗漏和恢复时的上下文扫描。
+2. 建立由代码维护的 Agent 状态投影，减少盲目重试、任务遗漏和恢复时的上下文扫描。
 
 状态栏不是 UI 装饰，也不是新的记忆系统。它是从已有结构化运行状态生成的、面向模型的短摘要。
 
@@ -47,7 +47,7 @@
 - 状态栏由代码维护，不能由 LLM 批量总结历史后再写回。
 - 状态栏只提供决策辅助；硬限制必须在工具执行层或完成检查层强制执行。
 - 不能因为某工具在整个 session 中调用过几次，就对所有后续任务做全局拦截。
-- 计数必须绑定明确的作用域，例如当前 turn、当前 Goal、工具和目标资源。
+- 失败观察必须绑定明确的作用域，例如当前 turn、当前 Goal 和同一规范化请求。
 - 不要把行为规则、安全规则和 Skill 操作指令为了缓存而降级成普通 user 文本。
 - 不要在没有指标和场景证据的情况下宣称 KV Cache 或准确率一定改善。
 
@@ -105,24 +105,6 @@
 
 父 Agent 是否允许结束仍由现有 goal orchestration/completion guard 决定，不能只信 prompt 中的状态文本。
 
-### 3.4 外部副作用操作去重
-
-问题：模型在超时、网络异常、上下文恢复或重复思考后，可能再次创建提醒、发送消息或提交同一外部操作。
-
-目标：对能定义稳定幂等语义的工具记录外部 ID 和执行结果，在工具层阻止确定的重复操作。
-
-示例：
-
-```text
-操作：创建每周一 09:00 提醒
-状态：已成功
-外部 ID：cron_job_123
-```
-
-结果未知时不能盲目重试，应先查询；用户明确要求再次执行时必须有显式覆盖语义。
-
-首批只考虑 `cron`、主动 `message` 以及未来具备稳定外部 ID 的工具，不对所有工具做通用去重。
-
 ## 4. 目标上下文布局
 
 目标布局如下：
@@ -154,7 +136,7 @@ history:
 
 - `goal_state`：目标、目标状态、开始时间、UI 摘要；
 - session metadata：持续目标和恢复信息；
-- 工具执行事件：工具名、规范化操作指纹、成功/失败、错误分类、外部 ID；
+- 工具执行事件：工具名、成功/失败、错误分类和当前 turn 内的执行次数；
 - 子 Agent 生命周期：created/running/succeeded/failed/lost 等终态；
 - 完成 barrier：仍未满足的必要任务；
 - 当前 turn：迭代号、剩余工具预算、当前 turn 内的调用次数。
@@ -173,7 +155,7 @@ history:
 Scope: goal:<goal-id> / session:<session-key>
 Goal: <short objective>
 Progress: <completed>/<total>
-Tool calls: <tool>(<target>) <used>/<limit>
+Tool activity: <tool> <result-state>
 Failures: <operation> failed <count> times; last=<error-code>
 Subagents: <done>/<total>, running=<count>, blocked=<count>
 Next: <one short machine-derived hint>
@@ -192,7 +174,7 @@ Next: <one short machine-derived hint>
 
 - 记录每轮 system prompt hash、动态区 token 数、输入 token、`cached_tokens`；
 - 区分 system 静态区、session 动态区、turn 动态区；
-- 定义状态作用域：turn、session、Goal、tool、target；
+- 定义状态作用域：turn、session、Goal 和同一规范化请求；
 - 定义状态版本、最大长度、敏感字段过滤规则；
 - 明确哪些状态只提示，哪些状态由代码强制。
 
@@ -228,7 +210,7 @@ Next: <one short machine-derived hint>
 - 在 AgentRunner 的工具完成边界更新结构化状态；
 - 仅在状态发生有意义变化时，追加 model-only runtime status 消息；
 - 保持合法的 role alternation，并确保状态消息不会被当作真实用户历史展示；
-- 为重复失败、剩余预算和目标 barrier 提供稳定字段；
+- 为重复失败、当前 turn 工具活动和目标 barrier 提供稳定字段；
 - 增加 runner 集成测试，确认工具结果、状态消息和下一次模型请求的顺序。
 
 验收场景：
@@ -238,25 +220,15 @@ Next: <one short machine-derived hint>
 - 多次状态更新不会无限扩大上下文；
 - 状态消息不进入用户可见 transcript。
 
-### 阶段 3：副作用工具的幂等和执行保护
+### 阶段 3：效果评估与后续决策
 
-目标：把状态栏提示升级为少数工具的可靠安全边界。
+目标：依据真实指标决定是否继续扩展前三个场景的状态字段。
 
 任务：
 
-- 为工具定义可选的 operation fingerprint 和 idempotency scope；
-- 记录 started/succeeded/failed/unknown 和外部资源 ID；
-- 对 `cron` 等能确定重复的操作增加执行前检查；
-- 对超时/未知结果要求先查询，不自动重放；
-- 支持用户明确覆盖重复保护的语义，并在审计中记录；
-- 不对 `exec`、`write_file` 等所有操作使用全局通用拦截。
-
-验收场景：
-
-- 相同 Goal 重复创建提醒时只产生一个外部任务；
-- 外部调用超时后不会自动产生第二次副作用；
-- 新 Goal 或明确用户重做请求不会错误继承旧限制；
-- 重复拒绝、查询和最终成功属于同一条审计链路。
+- 汇总 KV Cache、输入 token、任务恢复、失败重试和子 Agent 场景指标；
+- 确认状态栏是否造成陈旧信息、上下文膨胀或 provider 兼容问题；
+- 确认是否需要补充更多可靠的任务进度或失败恢复状态。
 
 ## 7. 测试和真实验收
 
@@ -267,7 +239,6 @@ Next: <one short machine-derived hint>
 - 工具失败计数和同一操作指纹测试；
 - Goal 恢复、进程重启、上下文压缩后的恢复测试；
 - 多子 Agent 创建、运行、终态、结果投递和父子关联测试；
-- 副作用工具的重复、未知结果和显式覆盖测试；
 - 受影响 Python 路径的 `pytest` 和 `ruff check`；
 - 涉及 `loop.py`/`runner.py` 时的聚焦集成测试；
 - 按仓库约定完成一次真实 Gateway 场景验收，核对实际模型请求、工具行为、状态投影和审计轨迹。
@@ -280,7 +251,7 @@ Next: <one short machine-derived hint>
 - system prompt 拆分和 provider cache marker 的行为并不完全统一，需要按 Anthropic、OpenAI-compatible、OpenAI Codex 等 provider 分别验证。
 - 旧 session 中已经持久化的 runtime context 需要兼容读取和剥离。
 - 状态算错会被模型高度信任，因此状态生成函数应有独立单元测试和审计可追溯性。
-- 状态栏 token 预算过大时会反过来增加输入成本，应优先显示异常、约束和未完成项。
+- 状态栏 token 预算过大时会反过来增加输入成本，应优先显示异常、当前活动和未完成项。
 - 子 Agent 和 Goal 已有多个权威状态来源，实施时应先确定单一事实源，避免维护第二套互相漂移的状态机。
 
 ## 9. 明确不在本次范围
