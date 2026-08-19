@@ -1,7 +1,7 @@
 [project]
 name = "KdmCopilot"
 version = "0.2.2"
-description = "KdmCopilot: a long-running personal AI assistant for reliable, observable workflows"
+description = "KdmCopilot: a long-running AI Agent Harness for reliable, observable workflows"
 readme = { file = "README.md", content-type = "text/markdown" }
 requires-python = ">=3.11"
 license = {text = "MIT"}
