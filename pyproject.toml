@@ -1,7 +1,7 @@
 [project]
-name = "nanobot-ai"
+name = "kdmcopilot"
 version = "0.2.2"
-description = "A lightweight personal AI assistant framework"
+description = "KdmCopilot: a personal AI assistant for your workflows"
 readme = { file = "README.md", content-type = "text/markdown" }
 requires-python = ">=3.11"
 license = {text = "MIT"}
